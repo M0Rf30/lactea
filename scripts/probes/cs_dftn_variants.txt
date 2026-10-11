@@ -1,0 +1,50 @@
+### nanx
+shader_body
+{
+    float2 u = float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = float3(0.5 + u.x*1000, 0.5 + u.y*1000, 0.25);
+}
+### nanx_add
+shader_body
+{
+    float2 u = uv + float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = float3(u.x, u.y, 0.25);
+}
+### nanx_tex
+shader_body
+{
+    float2 u = uv + float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = GetPixel(u);
+}
+### nanx_tex_off
+shader_body
+{
+    float2 u = uv + float2(0,-1)*texsize.zw/float2(0,-1) + float2(0,-.45);
+    ret = GetPixel(u);
+}
+### orig
+shader_body
+{
+    float2 uv2;
+
+    float4 c = float4(1,0.02,0.15,0.001);
+
+    uv2 = uv + float2(1,0)*texsize.zw*cos(texsize.zw+(sin(texsize.zw)));
+    float gx1 = GetPixel(uv2)*c.x + GetBlur1(uv2)*c.y + GetBlur2(uv2)*c.z + GetBlur3(uv2)*c.w;
+    uv2 = uv + float2(-1,0)*texsize.zw;
+    float gx2 = GetPixel(uv2)*c.x + GetBlur1(uv2)*c.y + GetBlur2(uv2)*c.z + GetBlur3(uv2)*c.w;
+
+    uv2 = uv + float2(0,1)*texsize.zw;
+    float gy1 = GetPixel(uv2)*c.x + GetBlur1(uv2)*c.y + GetBlur2(uv2)*c.z + GetBlur3(uv2)*c.w;
+    uv2 = uv + float2(0,-1)*texsize.zw/float2(0,-1) + float2(0,-.45);
+    float gy2 = GetPixel(uv2)*c.x + GetBlur1(uv2)*c.y + GetBlur2(uv2)*c.z + GetBlur3(uv2)*c.w;
+
+    float3 g = normalize(float3(gx1-gx2, gy1-gy2, 0.14));
+
+    ret = 0.5 + 0.5*g;
+    ret *= saturate(length(ret.xy-0.5)*5);
+    ret = ret.xxy;
+    ret += 1.15;
+    ret *= lerp(ret,ret*(GetBlur3(uv)-GetBlur1(uv)*treb_att),pow(hue_shader.xzy,bass_att));
+    ret *= ret;
+}

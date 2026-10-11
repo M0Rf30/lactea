@@ -1,0 +1,351 @@
+// SPDX-FileCopyrightText: 2026 Gianluca Boiano
+// SPDX-FileCopyrightText: 2005-2013 Nullsoft, Inc.
+// SPDX-License-Identifier: (MIT OR Apache-2.0) AND BSD-3-Clause
+
+//! Renderer configuration and the MD2-vs-projectM compatibility switch.
+
+use lactea_abi::{RunConfig, ShaderInterface};
+
+/// Which reference behaviour the renderer follows where MilkDrop 2 (`third_party/md2`) and
+/// projectM differ. Default: projectM.
+///
+/// Every divergence handled by this switch (see [`Compat::rules`]):
+///
+/// | item | `ProjectM` | `MilkDrop2` |
+/// |---|---|---|
+/// | `_c3.w`/`_c4.w` (`vol`, `vol_att`) | `(bass+mid+treb)*0.333` | `0.3333*treb` (C comma-operator bug) |
+/// | `_c12.y` (`mip_y`) | from height | from width (typo) |
+/// | `_c1` (aspect "sd") | zeros | `aspect` for the sd variant |
+/// | no-shader warp decay | `min(decay,1)` as float, no 8-bit rounding | `(int)(decay*255)&0xFF` (truncated, wraps) |
+/// | vertex colours (waves, shapes, borders, mv, echo) | float, modulo-wrapped like `& 0xFF` when out of 0..1 | 8-bit truncated |
+/// | no-shader comp hue tint | always applied | only if `fShader > 0.001`, blended by `fShader` |
+/// | thick / dots main-wave passes | whenever `thick \|\| dots` | additionally needs `texsize >= 512` |
+/// | custom-shape thick outline offset | `1/W` (half a pixel) | `2/W` (one pixel) |
+/// | motion vectors: first frame | skipped | drawn |
+/// | motion vectors: min length / lookup | 1.25 px, geometrically correct row | 1 px, mirrored-row lookup (`ReversePropagatePoint`) |
+/// | comp-shader `sampler_main` | current frame (after waves/borders) | previous frame (`m_lpVS[0]` in `ApplyShaderParams`) |
+/// | warp mesh `ang` seam | no fix (interpolates across the +-pi seam row) | `ang` patched to -pi / +pi per half |
+/// | comp mesh UV | `uv + 0.5/size` (half-texel) | exact (the D3D9 half-pixel compensation nets to 0) |
+/// | warp-shader `VsOut.diffuse` | `(decay, decay, decay, 1)` | `(1, 1, 1, 1)` |
+/// | no-shader composite hue-tint corners | `shade[0..1]` at the *top* corners (projectM draws the quad in its flipped frame) | `shade[0..1]` at the bottom corners |
+/// | blur pass 0 vertical `+1 texel` bias | `-1` (projectM samples the upside-down stored source with `uv.y` flipped, so the bias goes up) | `+1` (down) |
+/// | warp mesh cell diagonal | bottom-left to top-right in image space (projectM's mesh row 0 is the top) | top-left to bottom-right |
+/// | no-shader composite / filter quad diagonal | `TL,TR,BL,BR` strip: split along top-right to bottom-left (hue-tint colours interpolate differently) | triangles `(0,1,2),(2,1,3)` of `geom::echo_quad` (bottom-right to top-left) |
+/// | no-shader echo / gamma quad size | scaled by `VideoEcho`'s `aspectMultX/Y` (x stretched by `H/W` on portrait targets, UVs unchanged) | `1 + 1/size` |
+/// | no-shader gamma pass count | `(int)(gamma - 0.0001) + 1` | `(int)(gamma - 0.001) + 1` |
+/// | lines / points | GL rasterisation rules emulated exactly ([`StrokeRaster`]) | D3D9 thin quads |
+/// | custom-wave dots | the 2n-1 vertices of `SmoothWave`, always 1 px (`gl_PointSize` ignored) | the n source points, `1 + thick` px |
+/// | custom-wave thick offset | `1/W` ndc in x *and* y (half a pixel in x, `H/2W` px in y) | `2/W`, `2/H` (one pixel) |
+/// | `rot_*` uniforms | translation row dropped (`glm::mat3x4` of a `mat4`: only the 3 rotation columns are uploaded) | `float4x3` incl. the translation row |
+/// | first frame of a preset whose shaders sample blur (the frame that allocates the blur textures) | shapes, waves, main wave, darken centre, borders lost (`BlurTexture::Update` restores FBO 0) | drawn |
+/// | custom wave / shape slots that run | 4 each (`CustomWaveformCount`, `CustomShapeCount`; slots 4..15 are ignored) | 16 each |
+/// | warp shader `sampler_main` (first `main` sampler in name order) | filter linear, address from `bTexWrap` (`WarpedBlit` rebinds unit 0) | whatever the shader's sampler prefix says |
+/// | preset change (`Transition::Soft`) | image-space cross-fade of two independently rendered presets by one of six built-in transition shaders (`md2_preset_blend = false`) | MD2's own blend inside one frame pipeline: both states' equations run, per-vertex UVs blended by a random pattern, old/new shaders drawn as alpha-tiled passes (`md2_preset_blend = true`) |
+///
+/// Not switchable (identical in both): blur chain, blur source (previous frame image), blur
+/// min/max "push apart" typo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Compat {
+    /// projectM's behaviour (the default).
+    #[default]
+    ProjectM,
+    /// MilkDrop 2's behaviour (Direct3D 9 semantics).
+    MilkDrop2,
+}
+
+/// The individual behaviours selected by a [`Compat`] value (see the table there for the
+/// projectM / MilkDrop 2 values of each).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct CompatRules {
+    /// `vol` / `vol_att` follow MD2's comma-operator bug (`0.3333*treb`).
+    pub vol_is_comma_bug: bool,
+    /// `_c12.y` (`mip_y`) is derived from the width instead of the height (MD2 typo).
+    pub mip_y_from_width: bool,
+    /// `_c1` (aspect "sd") is all zeros.
+    pub c1_is_zero: bool,
+    /// The no-shader warp decay is truncated to 8 bits and wraps, `(int)(decay*255)&0xFF`.
+    pub decay_8bit: bool,
+    /// Vertex colours are 8-bit truncated; otherwise float, modulo-wrapped like `& 0xFF` when outside 0..1.
+    pub quantize_vertex_colors: bool,
+    /// The no-shader composite hue tint is always applied; otherwise only if `fShader > 0.001`, blended by `fShader`.
+    pub hue_tint_always: bool,
+    /// Thick / dots main-wave passes additionally need a texture size of at least 512.
+    pub thick_needs_512: bool,
+    /// Main waveform geometry/alpha follow projectM `Waveforms/*.cpp` (`wavegen::main_wave_geometry_projectm`)
+    /// instead of the MD2 `DrawWave` port (`wavegen::main_wave_geometry`).
+    pub pm_waveforms: bool,
+    /// The custom-shape thick outline offset is one pixel (`2/W`) instead of half a pixel (`1/W`).
+    pub shape_thick_full_pixel: bool,
+    /// Motion vectors are skipped on the first frame.
+    pub mv_skip_first_frame: bool,
+    /// Minimum motion-vector length in pixels.
+    pub mv_min_len_px: f32,
+    /// Motion-vector lookup uses MD2's mirrored row (`ReversePropagatePoint`).
+    pub mv_mirrored_lookup: bool,
+    /// The composite shader's `sampler_main` reads the previous frame instead of the current one.
+    pub comp_reads_previous: bool,
+    /// The warp mesh `ang` seam is patched to -pi / +pi per half instead of interpolating across the seam row.
+    pub ang_seam_fix: bool,
+    /// The composite mesh UV gets a half-texel offset (`uv + 0.5/size`).
+    pub comp_uv_half_texel: bool,
+    /// A warp shader's `VsOut.diffuse` is `(decay, decay, decay, 1)` instead of `(1, 1, 1, 1)`.
+    pub shader_warp_diffuse_is_decay: bool,
+    /// The translation row of the `rot_*` uniforms is dropped (`glm::mat3x4` of a `mat4`).
+    pub rot_translation_dropped: bool,
+    /// The no-shader composite hue-tint colours `shade[0..1]` sit at the top corners instead of the bottom ones.
+    pub shade_top_first: bool,
+    /// Blur pass 0 samples an upside-down source, so its vertical `+1 texel` bias is `-1`.
+    pub blur_src_flipped: bool,
+    /// Warp mesh cells are split bottom-left to top-right in image space instead of top-left to bottom-right.
+    pub warp_diag_flipped: bool,
+    /// The no-shader composite / filter quad is split top-right to bottom-left instead of bottom-right to top-left.
+    pub echo_diag_flipped: bool,
+    /// projectM stretches the echo / gamma quad by `aspectMultX/Y` of `VideoEcho::Draw` (`geom::echo_aspect_mult`):
+    /// identity for landscape targets, a horizontal `H/W` magnification of the centre for portrait ones. MD2 draws the
+    /// plain `1 + 1/size` quad.
+    pub echo_quad_aspect: bool,
+    /// Epsilon of the gamma pass count of the no-echo composite, `(int)(gamma - eps) + 1` passes: projectM
+    /// (`VideoEcho::DrawGammaAdjustment`) `0.0001`, MD2 (`ShowToUser_NoShaders`) `0.001`.
+    pub gamma_pass_eps: f32,
+    /// Lines and points follow OpenGL rasterisation rules (see [`StrokeRaster`]) instead of D3D9 thin quads.
+    pub gl_strokes: bool,
+    /// Custom-wave dots use the `2n-1` vertices of `SmoothWave`; otherwise the `n` source points.
+    pub wave_dots_smoothed: bool,
+    /// Point sizes (`1 + thick` px) are honoured; otherwise points are always 1 px (`gl_PointSize` ignored).
+    pub point_size_honored: bool,
+    /// The custom-wave thick offset is `1/W` ndc in x *and* y; otherwise `2/W`, `2/H` (one pixel).
+    pub wave_thick_ndc_inc: bool,
+    /// Custom-wave point positions: projectM `static_cast<float>((x * 2.0 - 1.0) * invAspectX)` (the product is taken in
+    /// double, one rounding to `f32`); MD2 `(float)(x * 2 - 1) * m_fInvAspectX` (rounded to `f32` before the product).
+    pub wave_point_f64_aspect: bool,
+    /// projectM textures have a single level (no `glGenerateMipmap`, samplers use the plain `GL_LINEAR` /
+    /// `GL_NEAREST` min filter), so `tex2D` never blends mip levels and `tex2Dlod` / `tex2Dbias` read level 0.
+    /// MD2 uses D3D9 textures with a mip chain (trilinear).
+    pub no_mipmaps: bool,
+    /// projectM evaluates the warp UV formula (`pow`, `sin`, `cos`, multiply-adds) in its *vertex shader*, so the
+    /// result carries the GPU's approximations and fusion; MD2 does it on the CPU (`D3DX`/libm floats).
+    /// With this rule the renderer runs the warp vertex shader on the per-vertex inputs of `FrameInput::warp_gpu`.
+    pub warp_uv_on_gpu: bool,
+    /// projectM: the internal images are RGBA; `main` starts at alpha 0, the no-shader warp keeps `tex.a`,
+    /// shaders write 1, overlays blend alpha with the colour factors and textured fills multiply by `tex.a`.
+    /// MD2 (X8R8G8B8) has no alpha: sampled alpha is 1 and nothing is written.
+    pub main_alpha: bool,
+    /// projectM binds the `GL_NEAREST` flip texture (set by `TextureAttachment`) for textured shapes that sample the
+    /// main image; MD2 samples it bilinearly.
+    pub shape_main_nearest: bool,
+    /// projectM: on the frame that (re)allocates the blur textures (first frame after preset load / resize) of a preset
+    /// whose shaders sample blur, `BlurTexture::Update` restores the wrong framebuffer, so shapes, waves, main wave,
+    /// darken-centre and borders of that frame are drawn to the default framebuffer and lost. MD2 draws them.
+    pub blur_alloc_drops_overlays: bool,
+    /// projectM draws in GL window space (y up), lactea's targets are y down (wgpu / D3D9): both use the top-left
+    /// rule, so a pixel centre lying exactly on a *horizontal* triangle edge goes to the polygon below the edge in
+    /// wgpu and to the polygon above it in projectM. With this rule such triangle fills (borders whose
+    /// `size * H / 2` is a half integer) are nudged by one sub-pixel step (`geom::gl_fill_ties`). MD2 (D3D9) has
+    /// the wgpu rule.
+    pub gl_fill_ties: bool,
+    /// Borders are one 8-vertex / 8-triangle mesh in projectM (`Border.cpp`, mirrored vertically by its y-flipping
+    /// projection), four rotated quads in MD2. Identical for sane sizes, different when `ob + ib > 1` or a size is
+    /// negative (self-overlapping triangles).
+    pub pm_border_mesh: bool,
+    /// Number of custom wave / custom shape slots that run: projectM `CustomWaveformCount` /
+    /// `CustomShapeCount` = 4 (the keys `wavecode_4..15` / `shapecode_4..15` are never read), MD2 / `MAX_CUSTOM_*` = 16.
+    pub custom_slots: usize,
+    /// projectM's `PerPixelMesh::WarpedBlit` binds its own sampler (`GL_LINEAR`, `GL_REPEAT` / `GL_CLAMP_TO_EDGE` from the
+    /// per-frame `wrap` variable, i.e. `bTexWrap`) on texture unit 0 *after* the warp shader loaded its samplers, which
+    /// replaces the sampler of the first `main` descriptor (`std::set` order of the sampler names, `main` always
+    /// present): a warp shader's `sampler_main` follows `wrap`, not the `fw_`/`fc_`/`pw_`/`pc_` prefix. MD2 uses the
+    /// sampler declared in the shader.
+    pub warp_main_sampler_from_wrap: bool,
+    /// Soft cuts follow MilkDrop 2's `m_bBlending` (`state.cpp` `StartBlendFrom`, `milkdropfs.cpp` `RenderFrame`): the old
+    /// preset's state stays alive next to the new one inside a single frame pipeline (one renderer, old shaders in
+    /// `m_OldShaders`). projectM instead renders both presets to their own images and blends the finished images with
+    /// one of six transition shaders ([`TransitionKind`](crate::TransitionKind)).
+    pub md2_preset_blend: bool,
+}
+
+impl Compat {
+    /// The behaviours of this compatibility mode.
+    pub fn rules(self) -> CompatRules {
+        match self {
+            Compat::ProjectM => CompatRules {
+                vol_is_comma_bug: false,
+                mip_y_from_width: false,
+                c1_is_zero: true,
+                decay_8bit: false,
+                quantize_vertex_colors: false,
+                hue_tint_always: true,
+                thick_needs_512: false,
+                pm_waveforms: true,
+                shape_thick_full_pixel: false,
+                mv_skip_first_frame: true,
+                mv_min_len_px: 1.25,
+                mv_mirrored_lookup: false,
+                comp_reads_previous: false,
+                ang_seam_fix: false,
+                comp_uv_half_texel: true,
+                shader_warp_diffuse_is_decay: true,
+                rot_translation_dropped: true,
+                shade_top_first: true,
+                blur_src_flipped: true,
+                warp_diag_flipped: true,
+                echo_diag_flipped: true,
+                echo_quad_aspect: true,
+                gamma_pass_eps: 0.0001,
+                gl_strokes: true,
+                wave_dots_smoothed: true,
+                point_size_honored: false,
+                wave_thick_ndc_inc: true,
+                wave_point_f64_aspect: true,
+                no_mipmaps: true,
+                warp_uv_on_gpu: true,
+                main_alpha: true,
+                shape_main_nearest: true,
+                blur_alloc_drops_overlays: true,
+                gl_fill_ties: true,
+                pm_border_mesh: true,
+                custom_slots: 4,
+                warp_main_sampler_from_wrap: true,
+                md2_preset_blend: false,
+            },
+            Compat::MilkDrop2 => CompatRules {
+                vol_is_comma_bug: true,
+                mip_y_from_width: true,
+                c1_is_zero: false,
+                decay_8bit: true,
+                quantize_vertex_colors: true,
+                hue_tint_always: false,
+                thick_needs_512: true,
+                pm_waveforms: false,
+                shape_thick_full_pixel: true,
+                mv_skip_first_frame: false,
+                mv_min_len_px: 1.0,
+                mv_mirrored_lookup: true,
+                comp_reads_previous: true,
+                ang_seam_fix: true,
+                comp_uv_half_texel: false,
+                shader_warp_diffuse_is_decay: false,
+                rot_translation_dropped: false,
+                shade_top_first: false,
+                blur_src_flipped: false,
+                warp_diag_flipped: false,
+                echo_diag_flipped: false,
+                echo_quad_aspect: false,
+                gamma_pass_eps: 0.001,
+                gl_strokes: false,
+                wave_dots_smoothed: false,
+                point_size_honored: true,
+                wave_thick_ndc_inc: false,
+                wave_point_f64_aspect: false,
+                no_mipmaps: false,
+                warp_uv_on_gpu: false,
+                main_alpha: false,
+                shape_main_nearest: false,
+                blur_alloc_drops_overlays: false,
+                gl_fill_ties: false,
+                pm_border_mesh: false,
+                custom_slots: 16,
+                warp_main_sampler_from_wrap: false,
+                md2_preset_blend: true,
+            },
+        }
+    }
+}
+
+/// How 1-pixel lines and points (custom/main waves, shape outlines, motion vectors) are rasterised.
+///
+/// projectM draws `GL_LINES`/`GL_LINE_STRIP`/`GL_LINE_LOOP`/`GL_POINTS`, non-antialiased (`GL_LINE_SMOOTH` has no
+/// effect on Mesa). The GPU's own line rule (diamond exit) decides every stroke pixel, so the choice below only
+/// matters for pixel-exactness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum StrokeRaster {
+    /// `wgpu` `LineList` / `PointList` primitives (1 px): fastest, but the rule is the driver's and can differ
+    /// from projectM's GL rules for many stroke pixels.
+    Native,
+    /// Exact CPU emulation of projectM's GL rules (strip / diamond exit / point floor), every lit pixel
+    /// drawn as a 1-px point at its centre: identical on every GPU.
+    #[default]
+    Emulated,
+    /// Thin quads (one pixel wide band covering the major axis extent): the D3D9 look MilkDrop 2 had.
+    /// `Compat::MilkDrop2` always draws strokes this way, whatever the configured mode.
+    Quads,
+}
+
+/// Renderer construction parameters.
+#[derive(Clone, Debug)]
+pub struct RenderConfig {
+    /// Internal image width (`m_nTexSizeX`; MD2 "auto exact" = window size), also the output width.
+    pub width: u32,
+    /// Internal image height, also the output height.
+    pub height: u32,
+    /// Warp mesh cells `[gx, gy]` (both even, e.g. `[48, 36]`).
+    pub mesh: [u32; 2],
+    /// In texels; added to warp UVs (`MD2: 0.5`, projectM/modern APIs: `0`).
+    pub texel_offset: [f32; 2],
+    /// Format of the host target view passed to `render_frame`. `*Srgb` formats are compensated so
+    /// stored bytes equal a non-sRGB render.
+    pub output_format: wgpu::TextureFormat,
+    /// Seeds noise textures, rotation matrices, hue offsets.
+    pub seed: u64,
+    /// MD2 vs projectM behaviour where they differ (default projectM).
+    pub compat: Compat,
+    /// Rasterisation of 1-pixel lines and points, see [`StrokeRaster`].
+    pub stroke: StrokeRaster,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self::from_run(&RunConfig::default(), wgpu::TextureFormat::Rgba8Unorm)
+    }
+}
+
+impl RenderConfig {
+    /// Build a config from the ABI's [`RunConfig`] (size, mesh, texel offset, seed) and the host
+    /// target format; compatibility and stroke mode take their defaults.
+    pub fn from_run(run: &RunConfig, output_format: wgpu::TextureFormat) -> Self {
+        Self {
+            width: run.width,
+            height: run.height,
+            mesh: run.mesh,
+            texel_offset: run.texel_offset,
+            output_format,
+            seed: run.seed,
+            compat: Compat::default(),
+            stroke: StrokeRaster::default(),
+        }
+    }
+}
+
+/// A warp or composite shader: WGSL module source (starting with `lactea_abi::WGSL_COMMON`,
+/// entry `fs_main`) plus the resource interface the renderer binds in group 1.
+#[derive(Clone, Debug)]
+pub struct CompiledShader {
+    /// WGSL module source.
+    pub wgsl: String,
+    /// Resource interface bound in group 1.
+    pub interface: ShaderInterface,
+}
+
+/// Errors reported by the renderer.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum RenderError {
+    /// Shader module / pipeline rejected by wgpu validation.
+    Shader(String),
+    /// Bad argument (sizes, data length, ...).
+    Invalid(String),
+    /// GPU read-back failed.
+    Readback(String),
+}
+
+impl std::fmt::Display for RenderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenderError::Shader(s) => write!(f, "shader error: {s}"),
+            RenderError::Invalid(s) => write!(f, "invalid argument: {s}"),
+            RenderError::Readback(s) => write!(f, "readback error: {s}"),
+        }
+    }
+}
+impl std::error::Error for RenderError {}

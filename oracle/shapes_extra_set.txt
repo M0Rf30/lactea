@@ -1,0 +1,40 @@
+/usr/share/projectM/presets/m0rf30/M0Rf30 - Liquid Chrome Kaleidoscope.milk	additive,border,inst,thick
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Hard Drink (Half-Infinitea).milk	additive,textured
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - ddummyy (04u0404).milk	textured
+/usr/share/projectM/presets/presets_milkdrop/Mstress & Juppy - Dancer.milk	border,textured,thick
+/usr/share/projectM/presets/presets_milkdrop_104/EoS + Phat - CAT Scan (Nirvana flux).milk	textured,thick
+/usr/share/projectM/presets/presets_milkdrop_104/Geiss - Feedback 2.milk	additive,border,textured
+/usr/share/projectM/presets/presets_milkdrop_104/Phat+fiShbRaiN+EoS_Mandala_Chasers_remix - www-eos4life-com.milk	additive,border,textured,thick
+/usr/share/projectM/presets/presets_milkdrop_104/Redi Jedi - i was here till this came on.milk	border,textured
+/usr/share/projectM/presets/presets_milkdrop_200/Hexcollie - Personal Mashup3 [Flexis portal mix].milk	additive,textured,thick
+/usr/share/projectM/presets/presets_mischa_collection/A New Definition for Milk - AdamFX - Laser Show in a Crystalstorm  ft Orb n Martin Inside the Forge of Isengard.milk	additive,border,inst,textured,thick
+/usr/share/projectM/presets/presets_tryptonaut/27_super_goats - have you ever been knocked out before, sunshine..milk	additive,inst,textured
+/usr/share/projectM/presets/presets_tryptonaut/414 bowel rebranding pr whore skinned to the teeth shader serial killer common glut.milk	border,inst
+/usr/share/projectM/presets/presets_tryptonaut/DemonLD_-_Toxic_water_diffusion threx angela vs debi brown (nice).milk	additive,inst,textured,thick
+/usr/share/projectM/presets/presets_tryptonaut/Flexi - lorenz attractor.milk	additive,border,inst
+/usr/share/projectM/presets/presets_tryptonaut/Zylot - Heaven Bloom nz+.milk	additive,inst,thick
+/usr/share/projectM/presets/presets_tryptonaut/flexi - color strike.milk	additive,inst
+/usr/share/projectM/presets/presets_tryptonaut/rediculator qrem glob.milk	border,inst,textured
+/usr/share/projectM/presets/presets_tryptonaut/sawtooth grin roam.milk	inst
+/usr/share/projectM/presets/presets_tryptonaut/sckephthaeck nz.milk	inst,textured
+/usr/share/projectM/presets/presets_tryptonaut/amandio c - ring system gonskin.milk	additive,border,inst,thick
+/usr/share/projectM/presets/presets_bltc201/Unchained - ReAwoke.milk	additive,textured
+/usr/share/projectM/presets/presets_bltc201/BrainStain-re entry.milk	textured
+/usr/share/projectM/presets/presets_milkdrop_104/Aderrasi - Straight Tropical Coal (Elysium Channel).milk	border,textured,thick
+/usr/share/projectM/presets/presets_milkdrop_104/EoS + Phat - CAT Scan.milk	textured,thick
+/usr/share/projectM/presets/presets_milkdrop_104/Krash & Rovastar - Cerebral Demons - Phat + EoS Vortex Remix.milk	additive,border,textured
+/usr/share/projectM/presets/presets_projectM/Reenen Geiss - Triple Feedback.milk	additive,border,textured,thick
+/usr/share/projectM/presets/presets_tryptonaut/Jc - Neon Star Formation.milk	additive,border,inst,textured,thick
+/usr/share/projectM/presets/presets_tryptonaut/Rozzor & Rovastar - Dynamic Swirls 3 (Mysticial Awakening Mix Tweak) - cpe rst roams nz+ mindful selfless temperance.milk	border,inst
+/usr/share/projectM/presets/presets_tryptonaut/Stahlregen + Unchained - Psychedelic Flower Kung Fu (Corrupt).milk	additive,inst,textured,thick
+/usr/share/projectM/presets/presets_tryptonaut/suksma - flexi - lorenz chaser - heretical tribal necklace.milk	additive,border,inst
+/usr/share/projectM/presets/presets_tryptonaut/suksma - uninitialized variabowl (hydroponic chronic).milk	additive,inst
+/usr/share/projectM/presets/presets_tryptonaut/skipper skipper kiss me hard - ifitweren'tforyouwonderfulroleplaying'people'partsofmysolipsisticovermind,i'dbeungrateful.milk	inst
+/usr/share/projectM/presets/presets_eyetune/Goody - Vertigo.milk	additive,textured
+/usr/share/projectM/presets/presets_bltc201/EoS - repeater 08 - rave on a lot of acid and some K.milk	textured
+/usr/share/projectM/presets/presets_milkdrop_104/Redi Jedi - subspace of reality.milk	border,textured,thick
+/usr/share/projectM/presets/presets_milkdrop_200/Rovastar + Loadus + Geiss - Tone-mapped FractalDrop 7b.milk	additive,border,textured
+/usr/share/projectM/presets/presets_tryptonaut/bdrv + al EoS - Sarc Gbdrv2 mx_Phat_RedEye_FractalView_v2.milk	additive,border,slot4+,textured
+/usr/share/projectM/presets/presets_bltc201/Rovastar - Inner Thoughts (Frantic Thoughts Mix).milk	textured
+/usr/share/projectM/presets/presets_eyetune/fed - slowfast 1.1 (geiss composite remix).milk	textured
+/usr/share/projectM/presets/presets_milkdrop/Rovastar - Inner Thoughts (Frantic Thoughts Mix).milk	textured

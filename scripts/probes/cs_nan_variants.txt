@@ -1,0 +1,37 @@
+### n1
+shader_body
+{
+    float2 u = float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = float3(u.x==u.x ? 1 : 0, u.y==u.y ? 1 : 0, 0.25);
+}
+### n2
+shader_body
+{
+    float2 u = float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = float3(uv.x + u.x, uv.y + u.y, 0.25);
+}
+### n3
+shader_body
+{
+    float t = 0*texsize.z;
+    float u2 = t/0;
+    ret = float3(u2==u2 ? 1 : 0, uv.x + u2, 0.25);
+}
+### n4
+shader_body
+{
+    float2 u = float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = float3(uv.x + u.x*1, uv.y, 0.25);
+}
+### n5
+shader_body
+{
+    float2 u = float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = GetPixel(uv + float2(u.x, 0));
+}
+### n6
+shader_body
+{
+    float2 u = float2(0,-1)*texsize.zw/float2(0,-1);
+    ret = float3(uv.x*u.x+0.5, uv.y, 0.25);
+}

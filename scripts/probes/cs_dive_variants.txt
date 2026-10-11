@@ -1,0 +1,52 @@
+### d1
+float2 d;
+shader_body
+{
+float h = q9;
+float2 t = float2(0.1,-0.05)*time;
+float2 c = uv_orig-float2(0.5,1-h);
+float z = 3/c.y;
+float2 uw = float2(c.x*z*h,z*h)*0.05+t;
+ret = float3(frac(uw), c.y>0 ? 1 : 0);
+}
+### d2
+float2 d;
+shader_body
+{
+float h = q9;
+float2 t = float2(0.1,-0.05)*time;
+float2 c = uv_orig-float2(0.5,1-h);
+float z = 3/c.y;
+float2 uw = float2(c.x*z*h,z*h)*0.05+t;
+ret = tex2D(sampler_noise_hq, uw);
+}
+### d3
+float2 d;
+shader_body
+{
+float h = q9;
+float2 t = float2(0.1,-0.05)*time;
+float2 c = uv_orig-float2(0.5,1-h);
+float z = 3/c.y;
+float2 uw = float2(c.x*z*h,z*h)*0.05+t;
+int mask = (c.y>0);
+uw = (tex2D(sampler_noise_hq,uw)-0.5)*mask;
+ret = float3(uw*4+0.5, mask);
+}
+### d4
+float2 d;
+shader_body
+{
+float h = q9;
+float2 c = uv_orig-float2(0.5,1-h);
+ret = float3(c.y*20+0.5, c.x+0.5, c.y>0 ? 1:0);
+}
+### d5
+float2 d;
+shader_body
+{
+float h = q9;
+float2 c = uv_orig-float2(0.5,1-h);
+float z = 3/c.y;
+ret = float3(frac(z*0.01), frac(z), frac(z*100));
+}

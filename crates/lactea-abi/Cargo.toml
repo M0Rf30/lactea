@@ -1,0 +1,20 @@
+[package]
+name = "lactea-abi"
+description = "Frozen cross-crate contract for lactea: MilkDrop 2 shader constants, binding layout, vertex format, dump layout."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["milkdrop", "projectm", "wgpu", "visualizer"]
+categories = ["graphics", "data-structures"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[dependencies]
+bytemuck.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+naga = { workspace = true, features = ["wgsl-in"] }

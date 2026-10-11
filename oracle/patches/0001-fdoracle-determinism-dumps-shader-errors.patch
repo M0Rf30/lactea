@@ -1,0 +1,1428 @@
+diff --git a/src/libprojectM/CMakeLists.txt b/src/libprojectM/CMakeLists.txt
+index 024fdfd..87819da 100644
+--- a/src/libprojectM/CMakeLists.txt
++++ b/src/libprojectM/CMakeLists.txt
+@@ -17,6 +17,8 @@ add_subdirectory(UserSprites)
+ 
+ add_library(projectM_main OBJECT
+         "${PROJECTM_EXPORT_HEADER}"
++        FdOracle.cpp
++        FdOracle.hpp
+         Logging.cpp
+         Logging.hpp
+         Preset.hpp
+diff --git a/src/libprojectM/FdOracle.cpp b/src/libprojectM/FdOracle.cpp
+new file mode 100644
+index 0000000..539219b
+--- /dev/null
++++ b/src/libprojectM/FdOracle.cpp
+@@ -0,0 +1,509 @@
++// lactea oracle instrumentation (NOT part of upstream projectM). See FdOracle.hpp.
++#include "FdOracle.hpp"
++
++#include "Renderer/OpenGL.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <map>
++#include <set>
++#include <sys/stat.h>
++#include <vector>
++
++namespace libprojectM {
++namespace FdOracle {
++namespace {
++
++struct Config
++{
++    bool enabled{false};
++    uint64_t seed{0};
++    std::string dir;
++    std::set<std::string> stages;
++    bool vars{false};
++    bool textures{false};
++};
++
++const Config& Cfg()
++{
++    static Config cfg = [] {
++        Config c;
++        if (const char* s = std::getenv("FD_SEED"); s && *s)
++        {
++            c.enabled = true;
++            c.seed = std::strtoull(s, nullptr, 10);
++        }
++        if (const char* d = std::getenv("FD_DUMP_DIR"); d && *d)
++        {
++            c.dir = d;
++        }
++        if (const char* st = std::getenv("FD_DUMP_STAGES"); st && *st)
++        {
++            std::string all = st;
++            size_t pos = 0;
++            while (pos <= all.size())
++            {
++                auto next = all.find(',', pos);
++                if (next == std::string::npos)
++                {
++                    next = all.size();
++                }
++                if (next > pos)
++                {
++                    c.stages.insert(all.substr(pos, next - pos));
++                }
++                pos = next + 1;
++            }
++        }
++        if (const char* v = std::getenv("FD_DUMP_VARS"); v && *v && *v != '0')
++        {
++            c.vars = true;
++        }
++        if (const char* t = std::getenv("FD_DUMP_TEXTURES"); t && *t && *t != '0')
++        {
++            c.textures = true;
++        }
++        return c;
++    }();
++    return cfg;
++}
++
++uint64_t SplitMixMix(uint64_t z)
++{
++    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++    return z ^ (z >> 31);
++}
++
++uint64_t Fnv1a64(const std::string& s)
++{
++    uint64_t h = 0xCBF29CE484222325ULL;
++    for (unsigned char c : s)
++    {
++        h ^= c;
++        h *= 0x100000001B3ULL;
++    }
++    return h;
++}
++
++using ImageSink = void (*)(const char* name, int frame, int width, int height, const uint8_t* rgba, void* user);
++ImageSink g_sink{nullptr};
++void* g_sinkUser{nullptr};
++
++std::map<std::string, double>& Vars()
++{
++    static std::map<std::string, double> v;
++    return v;
++}
++
++std::vector<std::string>& ShaderErrors()
++{
++    static std::vector<std::string> e;
++    return e;
++}
++
++std::map<std::string, std::string>& Info()
++{
++    static std::map<std::string, std::string> i;
++    return i;
++}
++
++void MkDirs(const std::string& path)
++{
++    std::string cur;
++    for (size_t i = 0; i <= path.size(); i++)
++    {
++        if (i == path.size() || path[i] == '/')
++        {
++            if (!cur.empty())
++            {
++                mkdir(cur.c_str(), 0777);
++            }
++        }
++        if (i < path.size())
++        {
++            cur.push_back(path[i]);
++        }
++    }
++}
++
++std::string JsonEscape(const std::string& s)
++{
++    std::string o;
++    for (unsigned char c : s)
++    {
++        switch (c)
++        {
++            case '"': o += "\\\""; break;
++            case '\\': o += "\\\\"; break;
++            case '\n': o += "\\n"; break;
++            case '\r': o += "\\r"; break;
++            case '\t': o += "\\t"; break;
++            default:
++                if (c < 0x20)
++                {
++                    char b[8];
++                    std::snprintf(b, sizeof b, "\\u%04x", c);
++                    o += b;
++                }
++                else
++                {
++                    o.push_back(static_cast<char>(c));
++                }
++        }
++    }
++    return o;
++}
++
++std::string FormatNumber(double v)
++{
++    if (std::isnan(v))
++    {
++        return "\"nan\"";
++    }
++    if (std::isinf(v))
++    {
++        return v > 0 ? "\"inf\"" : "\"-inf\"";
++    }
++    char buf[40];
++    std::snprintf(buf, sizeof buf, "%.17g", v);
++    return buf;
++}
++
++} // namespace
++
++namespace { int g_frame = 0; const char* g_stagePrefix = ""; }
++void SetStagePrefix(const char* prefix) { g_stagePrefix = prefix ? prefix : ""; }
++int CurrentFrame() { return g_frame; }
++void SetCurrentFrame(int frame) { g_frame = frame; }
++bool Enabled() { return Cfg().enabled; }
++uint64_t Seed() { return Cfg().seed; }
++
++Rng::Rng(const std::string& streamName)
++    : m_state(SplitMixMix(Cfg().seed + 0x9E3779B97F4A7C15ULL) ^ Fnv1a64(streamName))
++{
++}
++
++uint64_t Rng::Next64()
++{
++    m_state += 0x9E3779B97F4A7C15ULL;
++    return SplitMixMix(m_state);
++}
++
++size_t TransitionShaderIndex(size_t count)
++{
++    static Rng select("transition_select");
++    const uint32_t r = select.Next32();
++    if (count == 0)
++    {
++        return 0;
++    }
++    size_t index = r % count;
++    if (Cfg().enabled)
++    {
++        if (const char* f = std::getenv("FD_TRANSITION_SHADER"); f && *f)
++        {
++            index = static_cast<size_t>(std::strtoul(f, nullptr, 10)) % count;
++        }
++    }
++    return index;
++}
++
++void TransitionStatic(int32_t out[4])
++{
++    static Rng stat("transition_static");
++    for (int i = 0; i < 4; i++)
++    {
++        out[i] = static_cast<int32_t>(stat.Next32());
++    }
++    if (Cfg().enabled)
++    {
++        if (const char* f = std::getenv("FD_TRANSITION_STATIC"); f && *f)
++        {
++            long long v[4];
++            if (std::sscanf(f, "%lld,%lld,%lld,%lld", &v[0], &v[1], &v[2], &v[3]) == 4)
++            {
++                for (int i = 0; i < 4; i++)
++                {
++                    out[i] = static_cast<int32_t>(v[i]);
++                }
++            }
++        }
++    }
++}
++
++bool DumpActive() { return Cfg().enabled && (!Cfg().stages.empty() || Cfg().vars || Cfg().textures); }
++bool StageWanted(const char* stage)
++{
++    const auto& s = Cfg().stages;
++    return Cfg().enabled && (s.count("all") != 0 || s.count(stage) != 0);
++}
++bool VarsWanted() { return Cfg().enabled && Cfg().vars && !Cfg().dir.empty(); }
++bool TexturesWanted() { return Cfg().enabled && Cfg().textures; }
++bool ForceBlur()
++{
++    return StageWanted("blur1") || StageWanted("blur2") || StageWanted("blur3");
++}
++
++GlStateGuard::GlStateGuard()
++{
++    GLint v{};
++    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &v);
++    m_readFbo = v;
++    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &v);
++    m_drawFbo = v;
++    glGetIntegerv(GL_VIEWPORT, m_viewport);
++    m_blend = glIsEnabled(GL_BLEND);
++    glGetIntegerv(GL_BLEND_SRC_RGB, &v);
++    m_blendSrcRgb = v;
++    glGetIntegerv(GL_BLEND_DST_RGB, &v);
++    m_blendDstRgb = v;
++    glGetIntegerv(GL_BLEND_SRC_ALPHA, &v);
++    m_blendSrcAlpha = v;
++    glGetIntegerv(GL_BLEND_DST_ALPHA, &v);
++    m_blendDstAlpha = v;
++    glGetIntegerv(GL_BLEND_EQUATION_RGB, &v);
++    m_blendEqRgb = v;
++    glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &v);
++    m_blendEqAlpha = v;
++    glGetIntegerv(GL_ACTIVE_TEXTURE, &v);
++    m_activeTexture = v;
++    glActiveTexture(GL_TEXTURE0);
++    glGetIntegerv(GL_TEXTURE_BINDING_2D, &v);
++    m_tex2dUnit0 = v;
++    glGetIntegerv(GL_SAMPLER_BINDING, &v);
++    m_samplerUnit0 = v;
++    glActiveTexture(static_cast<GLenum>(m_activeTexture));
++    glGetIntegerv(GL_CURRENT_PROGRAM, &v);
++    m_program = v;
++    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &v);
++    m_vao = v;
++    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &v);
++    m_arrayBuffer = v;
++}
++
++GlStateGuard::~GlStateGuard()
++{
++    glBindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(m_readFbo));
++    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(m_drawFbo));
++    glViewport(m_viewport[0], m_viewport[1], m_viewport[2], m_viewport[3]);
++    if (m_blend)
++    {
++        glEnable(GL_BLEND);
++    }
++    else
++    {
++        glDisable(GL_BLEND);
++    }
++    glBlendFuncSeparate(static_cast<GLenum>(m_blendSrcRgb), static_cast<GLenum>(m_blendDstRgb),
++                        static_cast<GLenum>(m_blendSrcAlpha), static_cast<GLenum>(m_blendDstAlpha));
++    glBlendEquationSeparate(static_cast<GLenum>(m_blendEqRgb), static_cast<GLenum>(m_blendEqAlpha));
++    glActiveTexture(GL_TEXTURE0);
++    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(m_tex2dUnit0));
++    glBindSampler(0, static_cast<GLuint>(m_samplerUnit0));
++    glActiveTexture(static_cast<GLenum>(m_activeTexture));
++    glUseProgram(static_cast<GLuint>(m_program));
++    glBindVertexArray(static_cast<GLuint>(m_vao));
++    glBindBuffer(GL_ARRAY_BUFFER, static_cast<GLuint>(m_arrayBuffer));
++}
++
++void DumpTexture2D(const char* stage, int frame, unsigned int textureId, int width, int height, bool flipRows)
++{
++    if (!g_sink || width <= 0 || height <= 0 || textureId == 0)
++    {
++        return;
++    }
++
++    GLint prevTex{};
++    GLint prevAlign{};
++    GLint prevPackBuf{};
++    glGetIntegerv(GL_TEXTURE_BINDING_2D, &prevTex);
++    glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlign);
++    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &prevPackBuf);
++    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    glBindTexture(GL_TEXTURE_2D, textureId);
++
++    std::vector<uint8_t> raw(static_cast<size_t>(width) * height * 4);
++    glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
++
++    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(prevTex));
++    glPixelStorei(GL_PACK_ALIGNMENT, prevAlign);
++    glBindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(prevPackBuf));
++
++    if (flipRows)
++    {
++        std::vector<uint8_t> out(raw.size());
++        const size_t stride = static_cast<size_t>(width) * 4;
++        for (int y = 0; y < height; y++)
++        {
++            std::memcpy(out.data() + static_cast<size_t>(y) * stride,
++                        raw.data() + static_cast<size_t>(height - 1 - y) * stride, stride);
++        }
++        raw.swap(out);
++    }
++
++    const std::string outName = std::string(g_stagePrefix) + stage;
++    g_sink(outName.c_str(), frame, width, height, raw.data(), g_sinkUser);
++
++    if (frame == 0 && std::strncmp(stage, "blur", 4) == 0)
++    {
++        NoteInfo(std::string(stage) + "_size", "[" + std::to_string(width) + "," + std::to_string(height) + "]");
++    }
++}
++
++void DumpStaticTexture(const char* name, unsigned int textureId, unsigned int target, int width, int height, int depth)
++{
++    if (!TexturesWanted() || textureId == 0)
++    {
++        return;
++    }
++
++    GLint prevTex{};
++    GLint prevAlign{};
++    glGetIntegerv(target == GL_TEXTURE_3D ? GL_TEXTURE_BINDING_3D : GL_TEXTURE_BINDING_2D, &prevTex);
++    glGetIntegerv(GL_PACK_ALIGNMENT, &prevAlign);
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    glBindTexture(target, textureId);
++
++    std::vector<uint8_t> raw(static_cast<size_t>(width) * height * depth * 4);
++    glGetTexImage(target, 0, GL_RGBA, GL_UNSIGNED_BYTE, raw.data());
++
++    glBindTexture(target, static_cast<GLuint>(prevTex));
++    glPixelStorei(GL_PACK_ALIGNMENT, prevAlign);
++
++    if (target == GL_TEXTURE_3D)
++    {
++        if (Cfg().dir.empty())
++        {
++            return;
++        }
++        MkDirs(Cfg().dir + "/textures");
++        std::string path = Cfg().dir + "/textures/" + name + ".bin";
++        if (FILE* f = std::fopen(path.c_str(), "wb"))
++        {
++            // "FDV3" | u32 version=1 | u32 width | u32 height | u32 depth | u32 channels=4 | u32 format=0 (RGBA8)
++            // then width*height*depth*4 bytes: x fastest, then y, then z; byte order R,G,B,A.
++            const uint32_t hdr[6] = {0x33564446u /* "FDV3" LE */, 1u, static_cast<uint32_t>(width),
++                                     static_cast<uint32_t>(height), static_cast<uint32_t>(depth), 4u};
++            const uint32_t format = 0;
++            std::fwrite(hdr, sizeof hdr, 1, f);
++            std::fwrite(&format, sizeof format, 1, f);
++            std::fwrite(raw.data(), 1, raw.size(), f);
++            std::fclose(f);
++        }
++    }
++    else if (g_sink)
++    {
++        g_sink((std::string("textures/") + name).c_str(), -1, width, height, raw.data(), g_sinkUser);
++    }
++}
++
++void SetVar(const std::string& name, double value)
++{
++    if (VarsWanted())
++    {
++        Vars()[name] = value;
++    }
++}
++
++void FlushVars(int frame)
++{
++    if (!VarsWanted())
++    {
++        return;
++    }
++    auto& vars = Vars();
++
++    // Unprefixed rand_frame/rand_preset = composite shader's values if it exists, else the warp shader's.
++    for (const char* base : {"rand_frame", "rand_preset"})
++    {
++        for (const char* c : {"x", "y", "z", "w"})
++        {
++            const std::string suffix = std::string(base) + "." + c;
++            auto it = vars.find("comp." + suffix);
++            if (it == vars.end())
++            {
++                it = vars.find("warp." + suffix);
++            }
++            if (it != vars.end())
++            {
++                vars[suffix] = it->second;
++            }
++        }
++    }
++
++    MkDirs(Cfg().dir + "/" + g_stagePrefix + "vars");
++    char name[64];
++    std::snprintf(name, sizeof name, "/%svars/%05d.json", g_stagePrefix, frame);
++    if (FILE* f = std::fopen((Cfg().dir + name).c_str(), "wb"))
++    {
++        std::fputs("{", f);
++        bool first = true;
++        for (const auto& [k, v] : vars)
++        {
++            std::fprintf(f, "%s\n\"%s\": %s", first ? "" : ",", JsonEscape(k).c_str(), FormatNumber(v).c_str());
++            first = false;
++        }
++        std::fputs("\n}\n", f);
++        std::fclose(f);
++    }
++    vars.clear();
++}
++
++void RecordShaderError(const std::string& message)
++{
++    ShaderErrors().push_back(message);
++}
++
++void NoteInfo(const std::string& key, const std::string& jsonValue)
++{
++    Info()[key] = jsonValue;
++}
++
++} // namespace FdOracle
++} // namespace libprojectM
++
++// ---- C API for the refrender harness (not part of the public projectM API) ---------------------
++extern "C" {
++
++__attribute__((visibility("default"))) void fd_oracle_set_image_sink(
++    void (*sink)(const char* name, int frame, int width, int height, const uint8_t* rgba, void* user), void* user)
++{
++    libprojectM::FdOracle::g_sink = sink;
++    libprojectM::FdOracle::g_sinkUser = user;
++}
++
++/// Returns a JSON object: {"shader_errors": N, "shader_error_messages": [...], <info keys...>}.
++/// The pointer stays valid until the next call.
++__attribute__((visibility("default"))) const char* fd_oracle_info_json()
++{
++    using namespace libprojectM::FdOracle;
++    static std::string out;
++    out = "{\"shader_errors\": " + std::to_string(ShaderErrors().size()) + ", \"shader_error_messages\": [";
++    for (size_t i = 0; i < ShaderErrors().size(); i++)
++    {
++        out += (i ? ", \"" : "\"") + JsonEscape(ShaderErrors()[i]) + "\"";
++    }
++    out += "]";
++    for (const auto& [k, v] : Info())
++    {
++        out += ", \"" + JsonEscape(k) + "\": " + v;
++    }
++    out += "}";
++    return out.c_str();
++}
++
++__attribute__((visibility("default"))) void fd_oracle_reset_errors()
++{
++    libprojectM::FdOracle::ShaderErrors().clear();
++}
++
++__attribute__((visibility("default"))) int fd_oracle_shader_error_count()
++{
++    return static_cast<int>(libprojectM::FdOracle::ShaderErrors().size());
++}
++}
+diff --git a/src/libprojectM/FdOracle.hpp b/src/libprojectM/FdOracle.hpp
+new file mode 100644
+index 0000000..dfdfcfc
+--- /dev/null
++++ b/src/libprojectM/FdOracle.hpp
+@@ -0,0 +1,94 @@
++// lactea oracle instrumentation (NOT part of upstream projectM).
++// Everything here is inert unless the FD_* environment variables are set; see oracle/README.md.
++#pragma once
++
++#include <cstdint>
++#include <string>
++
++namespace libprojectM {
++namespace FdOracle {
++
++/// True when FD_SEED is set: all RNGs are replaced by the documented deterministic streams.
++bool Enabled();
++/// Frame index set by the preset before drawing the frame (used by deep hooks like the blur pass).
++int CurrentFrame();
++void SetCurrentFrame(int frame);
++uint64_t Seed();
++
++/// Deterministic stream: state = splitmix64(seed) ^ fnv1a64(name); next64() = splitmix64 step.
++class Rng
++{
++public:
++    explicit Rng(const std::string& streamName);
++    uint64_t Next64();
++    uint32_t Next32() { return static_cast<uint32_t>(Next64() >> 32); }
++
++private:
++    uint64_t m_state;
++};
++
++/// Drop-in for "std::uniform_int_distribution<int>(0, INT32_MAX)(engine)": returns Next32() >> 1.
++inline int RandInt31(Rng& rng) { return static_cast<int>(rng.Next32() >> 1); }
++
++/// Replacement for the projectM shader `rand() % 7381 / 7380.0f` helper.
++inline float ShaderFloat(Rng& rng) { return static_cast<float>(rng.Next32() % 7381u) / 7380.0f; }
++
++// ---- dumping -----------------------------------------------------------------------------
++bool DumpActive();               ///< Any stage/vars/textures output requested.
++bool StageWanted(const char* stage);
++bool VarsWanted();
++bool TexturesWanted();
++bool ForceBlur();                ///< Compute all three blur levels even if no shader uses them.
++
++/// RAII snapshot/restore of every piece of GL state `BlurTexture::Update` touches (FBO read/draw bindings, viewport, blend
++/// enable/function/equation, active texture + unit-0 2D texture and sampler bindings, program, VAO, array buffer). Used
++/// only when the blur chain runs *solely* because blur dumps were requested (no shader samples blur), so that dumping the
++/// blur textures cannot change what is rendered. Natively-needed blur updates are left exactly as upstream has them.
++class GlStateGuard
++{
++public:
++    GlStateGuard();
++    ~GlStateGuard();
++    GlStateGuard(const GlStateGuard&) = delete;
++    GlStateGuard& operator=(const GlStateGuard&) = delete;
++
++private:
++    int m_readFbo{}, m_drawFbo{};
++    int m_viewport[4]{};
++    unsigned char m_blend{};
++    int m_blendSrcRgb{}, m_blendDstRgb{}, m_blendSrcAlpha{}, m_blendDstAlpha{}, m_blendEqRgb{}, m_blendEqAlpha{};
++    int m_activeTexture{};
++    int m_tex2dUnit0{};
++    int m_samplerUnit0{};
++    int m_program{};
++    int m_vao{};
++    int m_arrayBuffer{};
++};
++
++/// Read back a 2D RGBA8 texture and hand it to the image sink as top-down rows.
++/// `glRowsBottomFirst` = true if the GL storage has row 0 at the bottom of the image (needs a flip).
++void DumpTexture2D(const char* stage, int frame, unsigned int textureId, int width, int height, bool flipRows);
++/// Static texture (2D -> PNG through the sink, rows in GL memory order; 3D -> .bin file).
++void DumpStaticTexture(const char* name, unsigned int textureId, unsigned int target, int width, int height, int depth);
++
++void SetVar(const std::string& name, double value);
++void FlushVars(int frame);
++
++void RecordShaderError(const std::string& message);
++void NoteInfo(const std::string& key, const std::string& jsonValue);
++
++// ---- preset transitions ---------------------------------------------------------------------
++/// Prefix prepended to the output name/dir of per-preset dumps (stage dirs and vars dir). `ProjectM::RenderFrame` sets
++/// "new_" around the incoming preset's frame; StageWanted keeps checking the plain stage name.
++void SetStagePrefix(const char* prefix);
++
++/// Soft-cut shader choice: "transition_select" stream Next32() % count (one persistent stream, advanced exactly once per
++/// call). `FD_TRANSITION_SHADER=k` forces the result (the stream still advances). Only meaningful when Enabled().
++size_t TransitionShaderIndex(size_t count);
++
++/// The 4 `iRandStatic` ints: 4 x static_cast<int32_t>(Next32()) of the persistent "transition_static" stream.
++/// `FD_TRANSITION_STATIC=a,b,c,d` overrides the values (the stream still advances 4 times).
++void TransitionStatic(int32_t out[4]);
++
++} // namespace FdOracle
++} // namespace libprojectM
+diff --git a/src/libprojectM/MilkdropPreset/BlurTexture.cpp b/src/libprojectM/MilkdropPreset/BlurTexture.cpp
+index 219c22e..4146ad6 100644
+--- a/src/libprojectM/MilkdropPreset/BlurTexture.cpp
++++ b/src/libprojectM/MilkdropPreset/BlurTexture.cpp
+@@ -1,6 +1,7 @@
+ #include "BlurTexture.hpp"
+ 
+ #include "PerFrameContext.hpp"
++#include "FdOracle.hpp"
+ #include "PresetState.hpp"
+ 
+ #include "MilkdropStaticShaders.hpp"
+@@ -10,6 +11,11 @@
+ #include <Renderer/ShaderCache.hpp>
+ 
+ #include <array>
++#include <memory>
++
++#ifndef BLUR_FLIP
++#define BLUR_FLIP false
++#endif
+ 
+ namespace libprojectM {
+ namespace MilkdropPreset {
+@@ -105,10 +111,22 @@ auto BlurTexture::GetDescriptorsForBlurLevel(BlurTexture::BlurLevel blurLevel) c
+ 
+ void BlurTexture::Update(const Renderer::Texture& sourceTexture, const PerFrameContext& perFrameContext)
+ {
+-    if (m_blurLevel == BlurLevel::None)
++    // lactea oracle: compute all levels when blur dumps are requested. If no shader samples blur natively, the whole
++    // update runs inside a GL state guard, so dumping the blur textures cannot change what is rendered. (Without the guard,
++    // `AllocateTextures` -> `Framebuffer::SetSize` leaves FBO 0 bound *before* the "remember previously bound framebuffer"
++    // snapshot below on the first call, so frame 0's overlays would be drawn to the default framebuffer, and the blur sampler
++    // would leak on texture unit 0. Both are upstream behaviour that real presets with native blur do exhibit; they are kept
++    // untouched for presets that use blur themselves.)
++    const BlurLevel blurLevel = FdOracle::ForceBlur() ? BlurLevel::Blur3 : m_blurLevel;
++    if (blurLevel == BlurLevel::None)
+     {
+         return;
+     }
++    std::unique_ptr<FdOracle::GlStateGuard> fdGuard;
++    if (m_blurLevel == BlurLevel::None)
++    {
++        fdGuard = std::make_unique<FdOracle::GlStateGuard>();
++    }
+ 
+     if (sourceTexture.Width() == 0 ||
+         sourceTexture.Height() == 0)
+@@ -118,7 +136,7 @@ void BlurTexture::Update(const Renderer::Texture& sourceTexture, const PerFrameC
+ 
+     AllocateTextures(sourceTexture);
+ 
+-    unsigned int const passes = static_cast<int>(m_blurLevel) * 2;
++    unsigned int const passes = static_cast<int>(blurLevel) * 2;
+     auto const blur1EdgeDarken = static_cast<float>(*perFrameContext.blur1_edge_darken);
+ 
+     const std::array<float, 8> weights = {4.0f, 3.8f, 3.5f, 2.9f, 1.9f, 1.2f, 0.7f, 0.3f}; //<- user can specify these
+@@ -266,6 +284,17 @@ void BlurTexture::Update(const Renderer::Texture& sourceTexture, const PerFrameC
+     Renderer::Mesh::Unbind();
+     Renderer::BlendMode::Set(false, Renderer::BlendMode::Function::SourceAlpha, Renderer::BlendMode::Function::OneMinusSourceAlpha);
+ 
++    // lactea oracle: blur1..3 are textures 1, 3, 5.
++    for (int level = 1; level <= 3; level++)
++    {
++        const auto stage = "blur" + std::to_string(level);
++        const auto& tex = m_blurTextures[level * 2 - 1];
++        if (static_cast<unsigned>(level) * 2 <= passes && tex && FdOracle::StageWanted(stage.c_str()))
++        {
++            FdOracle::DumpTexture2D(stage.c_str(), FdOracle::CurrentFrame(), tex->TextureID(), tex->Width(), tex->Height(), BLUR_FLIP);
++        }
++    }
++
+     // Bind previous framebuffer and reset viewport size
+     glBindFramebuffer(GL_READ_FRAMEBUFFER, origReadFramebuffer);
+     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, origDrawFramebuffer);
+diff --git a/src/libprojectM/MilkdropPreset/MilkdropPreset.cpp b/src/libprojectM/MilkdropPreset/MilkdropPreset.cpp
+index ef17161..2b9903f 100755
+--- a/src/libprojectM/MilkdropPreset/MilkdropPreset.cpp
++++ b/src/libprojectM/MilkdropPreset/MilkdropPreset.cpp
+@@ -27,6 +27,21 @@
+ 
+ #include <Logging.hpp>
+ 
++#include "FdOracle.hpp"
++
++#include <algorithm>
++#include <cctype>
++
++#ifndef FD_FLIP_WARPSRC
++#define FD_FLIP_WARPSRC true
++#endif
++#ifndef FD_FLIP_WARPED
++#define FD_FLIP_WARPED true
++#endif
++#ifndef FD_FLIP_MAIN
++#define FD_FLIP_MAIN true
++#endif
++
+ namespace libprojectM {
+ namespace MilkdropPreset {
+ 
+@@ -89,6 +104,8 @@ void MilkdropPreset::RenderFrame(const libprojectM::Audio::FrameAudioData& audio
+ 
+     m_state.mainTexture = m_framebuffer.GetColorAttachmentTexture(m_previousFrameBuffer, 0);
+ 
++    FdOracle::SetCurrentFrame(static_cast<int>(renderContext.frame));
++
+     // First evaluate per-frame code
+     PerFrameUpdate();
+ 
+@@ -102,6 +119,13 @@ void MilkdropPreset::RenderFrame(const libprojectM::Audio::FrameAudioData& audio
+         m_motionVectors.Draw(m_perFrameContext, m_motionVectorUVMap->Texture());
+     }
+ 
++    // lactea oracle: image the warp samples (previous main + motion vectors); also the blur source.
++    if (FdOracle::StageWanted("warpsrc"))
++    {
++        const auto t = m_framebuffer.GetColorAttachmentTexture(m_previousFrameBuffer, 0);
++        FdOracle::DumpTexture2D("warpsrc", static_cast<int>(renderContext.frame), t->TextureID(), t->Width(), t->Height(), FD_FLIP_WARPSRC);
++    }
++
+     // y-flip the previous frame and assign the flipped texture as "main"
+     m_flipTexture.Draw(*renderContext.shaderCache, m_framebuffer.GetColorAttachmentTexture(m_previousFrameBuffer, 0), nullptr, true, false);
+     m_state.mainTexture = m_flipTexture.Texture();
+@@ -118,6 +142,13 @@ void MilkdropPreset::RenderFrame(const libprojectM::Audio::FrameAudioData& audio
+     // Remove the u/v texture from the framebuffer.
+     m_framebuffer.RemoveColorAttachment(m_currentFrameBuffer, 1);
+ 
++    // lactea oracle: image right after the warp pass.
++    if (FdOracle::StageWanted("warped"))
++    {
++        const auto t = m_framebuffer.GetColorAttachmentTexture(m_currentFrameBuffer, 0);
++        FdOracle::DumpTexture2D("warped", static_cast<int>(renderContext.frame), t->TextureID(), t->Width(), t->Height(), FD_FLIP_WARPED);
++    }
++
+     // Update blur textures
+     {
+         const auto warpedImage = m_framebuffer.GetColorAttachmentTexture(m_previousFrameBuffer, 0);
+@@ -143,6 +174,13 @@ void MilkdropPreset::RenderFrame(const libprojectM::Audio::FrameAudioData& audio
+     }
+     m_border.Draw(m_perFrameContext);
+ 
++    // lactea oracle: image after shapes/waves/borders; this is what the next frame warps.
++    if (FdOracle::StageWanted("main"))
++    {
++        const auto t = m_framebuffer.GetColorAttachmentTexture(m_currentFrameBuffer, 0);
++        FdOracle::DumpTexture2D("main", static_cast<int>(renderContext.frame), t->TextureID(), t->Width(), t->Height(), FD_FLIP_MAIN);
++    }
++
+     // y-flip the image for final compositing again
+     m_flipTexture.Draw(*renderContext.shaderCache, m_framebuffer.GetColorAttachmentTexture(m_currentFrameBuffer, 0), nullptr, true, false);
+     m_state.mainTexture = m_flipTexture.Texture();
+@@ -163,6 +201,8 @@ void MilkdropPreset::RenderFrame(const libprojectM::Audio::FrameAudioData& audio
+     std::swap(m_currentFrameBuffer, m_previousFrameBuffer);
+ 
+     m_isFirstFrame = false;
++
++    FdOracle::FlushVars(static_cast<int>(renderContext.frame));
+ }
+ 
+ auto MilkdropPreset::OutputTexture() const -> std::shared_ptr<Renderer::Texture>
+@@ -199,6 +239,39 @@ void MilkdropPreset::PerFrameUpdate()
+     // Clamp gamma and echo zoom values
+     *m_perFrameContext.gamma = std::max(0.0, std::min(8.0, *m_perFrameContext.gamma));
+     *m_perFrameContext.echo_zoom = std::max(0.001, std::min(1000.0, *m_perFrameContext.echo_zoom));
++
++    // lactea oracle: dump every per-frame variable (after the per-frame equations and the clamps above).
++    if (FdOracle::VarsWanted())
++    {
++        projectm_eval_context_enum_variables(
++            m_perFrameContext.perFrameCodeContext,
++            [](const char* name, PRJM_EVAL_F* value, void*) {
++                std::string lower(name);
++                std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
++                FdOracle::SetVar(lower, static_cast<double>(*value));
++            },
++            nullptr);
++        for (int i = 0; i < 100; i++)
++        {
++            char reg[8];
++            std::snprintf(reg, sizeof reg, "reg%02d", i);
++            FdOracle::SetVar(reg, static_cast<double>(m_state.globalRegisters[i]));
++        }
++        FdOracle::SetVar("audio.bass", m_state.audioData.bass);
++        FdOracle::SetVar("audio.mid", m_state.audioData.mid);
++        FdOracle::SetVar("audio.treb", m_state.audioData.treb);
++        FdOracle::SetVar("audio.vol", m_state.audioData.vol);
++        FdOracle::SetVar("audio.bass_att", m_state.audioData.bassAtt);
++        FdOracle::SetVar("audio.mid_att", m_state.audioData.midAtt);
++        FdOracle::SetVar("audio.treb_att", m_state.audioData.trebAtt);
++        FdOracle::SetVar("audio.vol_att", m_state.audioData.volAtt);
++        FdOracle::SetVar("render.time", m_state.renderContext.time);
++        FdOracle::SetVar("render.frame", static_cast<double>(m_state.renderContext.frame));
++        for (int i = 0; i < 4; i++)
++        {
++            FdOracle::SetVar("hue_offset." + std::to_string(i), m_state.hueRandomOffsets[i]);
++        }
++    }
+ }
+ 
+ void MilkdropPreset::Load(const std::string& pathname)
+diff --git a/src/libprojectM/MilkdropPreset/MilkdropShader.cpp b/src/libprojectM/MilkdropPreset/MilkdropShader.cpp
+index 10cf919..9955f18 100644
+--- a/src/libprojectM/MilkdropPreset/MilkdropShader.cpp
++++ b/src/libprojectM/MilkdropPreset/MilkdropShader.cpp
+@@ -1,6 +1,7 @@
+ #include "MilkdropShader.hpp"
+ 
+ #include "PresetState.hpp"
++#include "FdOracle.hpp"
+ #include "Utils.hpp"
+ 
+ #include <MilkdropStaticShaders.hpp>
+@@ -21,12 +22,15 @@ namespace MilkdropPreset {
+ 
+ using libprojectM::MilkdropPreset::MilkdropStaticShaders;
+ 
+-static auto floatRand = []() { return static_cast<float>(rand() % 7381) / 7380.0f; };
++// lactea oracle: with FD_SEED set, every shader instance draws from its own deterministic stream
++// ("shader_warp" / "shader_comp"); otherwise the original libc rand() is used.
+ 
+ MilkdropShader::MilkdropShader(ShaderType type)
+     : m_type(type)
+-    , m_randValues({floatRand(), floatRand(), floatRand(), floatRand()})
++    , m_fdRng(type == ShaderType::WarpShader ? "shader_warp" : "shader_comp")
+ {
++    auto floatRand = [this]() { return FloatRand(); };
++    m_randValues = {floatRand(), floatRand(), floatRand(), floatRand()};
+     unsigned int index = 0;
+     do
+     {
+@@ -48,6 +52,15 @@ MilkdropShader::MilkdropShader(ShaderType type)
+     } while (index < sizeof(m_randTranslation) / sizeof(m_randTranslation[0]));
+ }
+ 
++float MilkdropShader::FloatRand()
++{
++    if (FdOracle::Enabled())
++    {
++        return FdOracle::ShaderFloat(m_fdRng);
++    }
++    return static_cast<float>(rand() % 7381) / 7380.0f;
++}
++
+ void MilkdropShader::LoadCode(const std::string& presetShaderCode)
+ {
+     m_fragmentShaderCode = presetShaderCode;
+@@ -165,10 +178,9 @@ void MilkdropShader::LoadVariables(const PresetState& presetState, const PerFram
+ 
+     m_shader.SetUniformMat4x4("vertex_transformation", PresetState::orthogonalProjection);
+ 
+-    m_shader.SetUniformFloat4("rand_frame", {floatRand(),
+-                                             floatRand(),
+-                                             floatRand(),
+-                                             floatRand()});
++    auto floatRand = [this]() { return FloatRand(); };
++    const std::array<float, 4> randFrame{floatRand(), floatRand(), floatRand(), floatRand()};
++    m_shader.SetUniformFloat4("rand_frame", {randFrame[0], randFrame[1], randFrame[2], randFrame[3]});
+     m_shader.SetUniformFloat4("rand_preset", {m_randValues[0],
+                                               m_randValues[1],
+                                               m_randValues[2],
+@@ -267,6 +279,34 @@ void MilkdropShader::LoadVariables(const PresetState& presetState, const PerFram
+         tempMatrices[i] = rotationY * tempMatrices[i];
+     }
+ 
++    if (FdOracle::VarsWanted())
++    {
++        const std::string prefix = (m_type == ShaderType::WarpShader) ? "warp." : "comp.";
++        const char* xyzw = "xyzw";
++        FdOracle::NoteInfo(m_type == ShaderType::WarpShader ? "warp_shader" : "comp_shader", "true");
++        for (int k = 0; k < 4; k++)
++        {
++            FdOracle::SetVar(prefix + "rand_frame." + xyzw[k], randFrame[k]);
++            FdOracle::SetVar(prefix + "rand_preset." + xyzw[k], m_randValues[k]);
++        }
++        FdOracle::SetVar(prefix + "time", timeSincePresetStartWrapped);
++        FdOracle::SetVar(prefix + "progress", presetState.renderContext.progress);
++        static const char* const rotNames[24] = {"rot_s1", "rot_s2", "rot_s3", "rot_s4", "rot_d1", "rot_d2", "rot_d3", "rot_d4",
++                                                 "rot_f1", "rot_f2", "rot_f3", "rot_f4", "rot_vf1", "rot_vf2", "rot_vf3", "rot_vf4",
++                                                 "rot_uf1", "rot_uf2", "rot_uf3", "rot_uf4", "rot_rand1", "rot_rand2", "rot_rand3", "rot_rand4"};
++        for (int m = 0; m < 24; m++)
++        {
++            const glm::mat3x4 uploaded{tempMatrices[m]}; // exactly what is passed to SetUniformMat3x4 (column-major)
++            for (int c = 0; c < 3; c++)
++            {
++                for (int r = 0; r < 4; r++)
++                {
++                    FdOracle::SetVar(prefix + rotNames[m] + "." + std::to_string(c * 4 + r), uploaded[c][r]);
++                }
++            }
++        }
++    }
++
+     m_shader.SetUniformMat3x4("rot_s1", tempMatrices[0]);
+     m_shader.SetUniformMat3x4("rot_s2", tempMatrices[1]);
+     m_shader.SetUniformMat3x4("rot_s3", tempMatrices[2]);
+diff --git a/src/libprojectM/MilkdropPreset/MilkdropShader.hpp b/src/libprojectM/MilkdropPreset/MilkdropShader.hpp
+index 2997a82..4c18ad1 100644
+--- a/src/libprojectM/MilkdropPreset/MilkdropShader.hpp
++++ b/src/libprojectM/MilkdropPreset/MilkdropShader.hpp
+@@ -8,6 +8,7 @@
+ #pragma once
+ 
+ #include "BlurTexture.hpp"
++#include "FdOracle.hpp"
+ 
+ #include <Renderer/Shader.hpp>
+ #include <Renderer/TextureManager.hpp>
+@@ -94,7 +95,11 @@ private:
+      */
+     void UpdateMaxBlurLevel(BlurTexture::BlurLevel requestedLevel);
+ 
++    /// lactea oracle: deterministic replacement for rand() % 7381 / 7380.
++    float FloatRand();
++
+     ShaderType m_type{ShaderType::WarpShader}; //!< Type of this shader.
++    FdOracle::Rng m_fdRng;                     //!< lactea oracle RNG stream (only used when FD_SEED is set).
+     std::string m_fragmentShaderCode;          //!< The original preset fragment shader code.
+     std::string m_preprocessedCode;            //!< The preprocessed preset shader code.
+ 
+diff --git a/src/libprojectM/MilkdropPreset/PresetState.cpp b/src/libprojectM/MilkdropPreset/PresetState.cpp
+index 72c0f61..180fcf8 100644
+--- a/src/libprojectM/MilkdropPreset/PresetState.cpp
++++ b/src/libprojectM/MilkdropPreset/PresetState.cpp
+@@ -7,6 +7,8 @@
+ 
+ #include <glm/gtc/matrix_transform.hpp>
+ 
++#include "FdOracle.hpp"
++
+ #include <random>
+ 
+ namespace libprojectM {
+@@ -18,6 +20,17 @@ const glm::mat4 PresetState::orthogonalProjectionFlipped = glm::ortho(-1.0f, 1.0
+ PresetState::PresetState()
+     : globalMemory(projectm_eval_memory_buffer_create())
+ {
++    if (FdOracle::Enabled())
++    {
++        // lactea oracle: deterministic stream "hue_offsets", same moduli as upstream.
++        FdOracle::Rng rng("hue_offsets");
++        hueRandomOffsets[0] = static_cast<float>(FdOracle::RandInt31(rng) % 64841L) * 0.01f;
++        hueRandomOffsets[1] = static_cast<float>(FdOracle::RandInt31(rng) % 53751L) * 0.01f;
++        hueRandomOffsets[2] = static_cast<float>(FdOracle::RandInt31(rng) % 42661L) * 0.01f;
++        hueRandomOffsets[3] = static_cast<float>(FdOracle::RandInt31(rng) % 31571L) * 0.01f;
++    }
++    else
++    {
+     std::random_device randomDevice;
+     std::mt19937 randomGenerator(randomDevice());
+     std::uniform_int_distribution<> distrib(0, std::numeric_limits<int>::max());
+@@ -26,6 +39,7 @@ PresetState::PresetState()
+     hueRandomOffsets[1] = static_cast<float>(distrib(randomGenerator) % 53751L) * 0.01f;
+     hueRandomOffsets[2] = static_cast<float>(distrib(randomGenerator) % 42661L) * 0.01f;
+     hueRandomOffsets[3] = static_cast<float>(distrib(randomGenerator) % 31571L) * 0.01f;
++    }
+ }
+ 
+ PresetState::~PresetState()
+diff --git a/src/libprojectM/ProjectM.cpp b/src/libprojectM/ProjectM.cpp
+index 5693bf2..5851498 100644
+--- a/src/libprojectM/ProjectM.cpp
++++ b/src/libprojectM/ProjectM.cpp
+@@ -21,7 +21,9 @@
+ 
+ #include "ProjectM.hpp"
+ 
++#include "FdOracle.hpp"
+ #include "Logging.hpp"
++#include <cstdio>
+ #include "Preset.hpp"
+ #include "PresetFactoryManager.hpp"
+ #include "TimeKeeper.hpp"
+@@ -181,7 +183,9 @@ void ProjectM::RenderFrame(uint32_t targetFramebufferObject /*= 0*/)
+         }
+         else
+         {
++            FdOracle::SetStagePrefix("new_");
+             m_transitioningPreset->RenderFrame(audioData, renderContext);
++            FdOracle::SetStagePrefix("");
+         }
+     }
+ 
+@@ -205,6 +209,17 @@ void ProjectM::RenderFrame(uint32_t targetFramebufferObject /*= 0*/)
+ 
+     if (m_transition != nullptr && m_transitioningPreset != nullptr)
+     {
++        // lactea oracle: both presets' output textures right before the blend (same orientation as "final": rows flipped).
++        if (FdOracle::StageWanted("old_out"))
++        {
++            const auto t = m_activePreset->OutputTexture();
++            FdOracle::DumpTexture2D("old_out", static_cast<int>(m_frameCount), t->TextureID(), t->Width(), t->Height(), true);
++        }
++        if (FdOracle::StageWanted("new_out"))
++        {
++            const auto t = m_transitioningPreset->OutputTexture();
++            FdOracle::DumpTexture2D("new_out", static_cast<int>(m_frameCount), t->TextureID(), t->Width(), t->Height(), true);
++        }
+         m_transition->Draw(*m_activePreset, *m_transitioningPreset, renderContext, audioData, m_timeKeeper->GetFrameTime());
+     }
+     else
+@@ -318,6 +333,20 @@ void ProjectM::StartPresetTransition(std::unique_ptr<Preset>&& preset, bool hard
+         m_transitioningPreset = std::move(preset);
+         m_timeKeeper->StartSmoothing();
+         m_transition = std::make_unique<Renderer::PresetTransition>(m_transitionShaderManager->RandomTransition(), m_softCutDuration, m_timeKeeper->GetFrameTime());
++
++        if (FdOracle::Enabled())
++        {
++            // lactea oracle: record the transition parameters (oracle.json "transition").
++            static const char* const kNames[6] = {"Circle", "Plasma", "SimpleBlend", "Sweep", "Warp", "ZoomBlur"};
++            const size_t index = m_transitionShaderManager->LastIndex();
++            const auto st = m_transition->StaticRandomValues();
++            char buf[512];
++            std::snprintf(buf, sizeof buf,
++                          "{\"shader\": %zu, \"name\": \"%s\", \"static\": [%d, %d, %d, %d], \"start_time\": %.17g, \"duration\": %.17g, \"shader_ok\": %s}",
++                          index, index < 6 ? kNames[index] : "?", st.x, st.y, st.z, st.w, m_transition->StartTime(),
++                          m_transition->DurationSeconds(), m_transitionShaderManager->ShaderOk(index) ? "true" : "false");
++            FdOracle::NoteInfo("transition", buf);
++        }
+     }
+ }
+ 
+diff --git a/src/libprojectM/Renderer/MilkdropNoise.cpp b/src/libprojectM/Renderer/MilkdropNoise.cpp
+index 20d5f0b..d192c09 100644
+--- a/src/libprojectM/Renderer/MilkdropNoise.cpp
++++ b/src/libprojectM/Renderer/MilkdropNoise.cpp
+@@ -1,5 +1,6 @@
+ #include "Renderer/MilkdropNoise.hpp"
+ 
++#include "FdOracle.hpp"
+ #include "Renderer/OpenGL.h"
+ #include "Renderer/Texture.hpp"
+ 
+@@ -56,6 +57,9 @@ auto MilkdropNoise::generate2D(int size, int zoomFactor) -> std::vector<uint32_t
+     uint32_t randomSeed = static_cast<uint32_t>(std::chrono::system_clock::now().time_since_epoch().count());
+     std::default_random_engine randomGenerator(randomSeed);
+     std::uniform_int_distribution<int> randomDistribution(0, INT32_MAX);
++    // lactea oracle: deterministic stream per (kind,size,zoom) when FD_SEED is set.
++    FdOracle::Rng fdRng(std::string("noise_") + "2d_" + std::to_string(size) + "_" + std::to_string(zoomFactor));
++    auto nextRandom = [&]() -> int { return FdOracle::Enabled() ? FdOracle::RandInt31(fdRng) : randomDistribution(randomGenerator); };
+ 
+     std::vector<uint32_t> textureData;
+     textureData.resize(size * size);
+@@ -67,16 +71,16 @@ auto MilkdropNoise::generate2D(int size, int zoomFactor) -> std::vector<uint32_t
+     {
+         for (auto x = 0; x < size; x++)
+         {
+-            dst[x] = (static_cast<uint32_t>((randomDistribution(randomGenerator) % RANGE) + RANGE / 2) << 24) |
+-                     (static_cast<uint32_t>((randomDistribution(randomGenerator) % RANGE) + RANGE / 2) << 16) |
+-                     (static_cast<uint32_t>((randomDistribution(randomGenerator) % RANGE) + RANGE / 2) << 8) |
+-                     (static_cast<uint32_t>((randomDistribution(randomGenerator) % RANGE) + RANGE / 2));
++            dst[x] = (static_cast<uint32_t>((nextRandom() % RANGE) + RANGE / 2) << 24) |
++                     (static_cast<uint32_t>((nextRandom() % RANGE) + RANGE / 2) << 16) |
++                     (static_cast<uint32_t>((nextRandom() % RANGE) + RANGE / 2) << 8) |
++                     (static_cast<uint32_t>((nextRandom() % RANGE) + RANGE / 2));
+         }
+         // swap some pixels randomly, to improve 'randomness'
+         for (auto x = 0; x < size; x++)
+         {
+-            auto x1 = randomDistribution(randomGenerator) % size;
+-            auto x2 = randomDistribution(randomGenerator) % size;
++            auto x1 = nextRandom() % size;
++            auto x2 = nextRandom() % size;
+             auto temp = dst[x2];
+             dst[x2] = dst[x1];
+             dst[x1] = temp;
+@@ -143,6 +147,9 @@ auto MilkdropNoise::generate3D(int size, int zoomFactor) -> std::vector<uint32_t
+     uint32_t randomSeed = static_cast<uint32_t>(std::chrono::system_clock::now().time_since_epoch().count());
+     std::default_random_engine randomGenerator(randomSeed);
+     std::uniform_int_distribution<int> randomDistribution(0, INT32_MAX);
++    // lactea oracle: deterministic stream per (kind,size,zoom) when FD_SEED is set.
++    FdOracle::Rng fdRng(std::string("noise_") + "3d_" + std::to_string(size) + "_" + std::to_string(zoomFactor));
++    auto nextRandom = [&]() -> int { return FdOracle::Enabled() ? FdOracle::RandInt31(fdRng) : randomDistribution(randomGenerator); };
+ 
+ 
+     std::vector<uint32_t> textureData;
+@@ -157,16 +164,16 @@ auto MilkdropNoise::generate3D(int size, int zoomFactor) -> std::vector<uint32_t
+         {
+             for (auto x = 0; x < size; x++)
+             {
+-                dst[x] = ((static_cast<uint32_t>(randomDistribution(randomGenerator) % RANGE) + RANGE / 2) << 24) |
+-                         ((static_cast<uint32_t>(randomDistribution(randomGenerator) % RANGE) + RANGE / 2) << 16) |
+-                         ((static_cast<uint32_t>(randomDistribution(randomGenerator) % RANGE) + RANGE / 2) << 8) |
+-                         ((static_cast<uint32_t>(randomDistribution(randomGenerator) % RANGE) + RANGE / 2));
++                dst[x] = ((static_cast<uint32_t>(nextRandom() % RANGE) + RANGE / 2) << 24) |
++                         ((static_cast<uint32_t>(nextRandom() % RANGE) + RANGE / 2) << 16) |
++                         ((static_cast<uint32_t>(nextRandom() % RANGE) + RANGE / 2) << 8) |
++                         ((static_cast<uint32_t>(nextRandom() % RANGE) + RANGE / 2));
+             }
+             // swap some pixels randomly, to improve 'randomness'
+             for (auto x = 0; x < size; x++)
+             {
+-                auto x1 = randomDistribution(randomGenerator) % size;
+-                auto x2 = randomDistribution(randomGenerator) % size;
++                auto x1 = nextRandom() % size;
++                auto x2 = nextRandom() % size;
+                 auto temp = dst[x2];
+                 dst[x2] = dst[x1];
+                 dst[x1] = temp;
+diff --git a/src/libprojectM/Renderer/PresetTransition.cpp b/src/libprojectM/Renderer/PresetTransition.cpp
+index e706086..d4b5be3 100644
+--- a/src/libprojectM/Renderer/PresetTransition.cpp
++++ b/src/libprojectM/Renderer/PresetTransition.cpp
+@@ -1,5 +1,7 @@
+ #include "Renderer/PresetTransition.hpp"
+ 
++#include "FdOracle.hpp"
++
+ #include "Renderer/TextureManager.hpp"
+ 
+ #include <algorithm>
+@@ -27,8 +29,18 @@ PresetTransition::PresetTransition(const std::shared_ptr<Shader>& transitionShad
+ 
+     m_mesh.Update();
+ 
+-    std::mt19937 rand32(m_randomDevice());
+-    m_staticRandomValues = {rand32(), rand32(), rand32(), rand32()};
++    if (FdOracle::Enabled())
++    {
++        // lactea oracle: documented "transition_static" stream (4 draws per transition, static_cast<int32_t>(Next32())).
++        int32_t values[4];
++        FdOracle::TransitionStatic(values);
++        m_staticRandomValues = {values[0], values[1], values[2], values[3]};
++    }
++    else
++    {
++        std::mt19937 rand32(m_randomDevice());
++        m_staticRandomValues = {rand32(), rand32(), rand32(), rand32()};
++    }
+ }
+ 
+ auto PresetTransition::IsDone(double currentFrameTime) const -> bool
+diff --git a/src/libprojectM/Renderer/PresetTransition.hpp b/src/libprojectM/Renderer/PresetTransition.hpp
+index 1822811..7a4f9cd 100644
+--- a/src/libprojectM/Renderer/PresetTransition.hpp
++++ b/src/libprojectM/Renderer/PresetTransition.hpp
+@@ -44,6 +44,11 @@ public:
+      */
+     auto Progress(double currentFrameTime) const -> double;
+ 
++    /// lactea oracle accessors (transition metadata for oracle.json).
++    auto StaticRandomValues() const -> glm::ivec4 { return m_staticRandomValues; }
++    auto DurationSeconds() const -> double { return m_durationSeconds; }
++    auto StartTime() const -> double { return m_transitionStartTime; }
++
+     /**
+      * @brief Updates the transition variables and renders the shader quad to the current FBO.
+      * @param oldPreset A reference to the old (fading out) preset.
+diff --git a/src/libprojectM/Renderer/Shader.hpp b/src/libprojectM/Renderer/Shader.hpp
+index 79b2f15..15ac6c0 100644
+--- a/src/libprojectM/Renderer/Shader.hpp
++++ b/src/libprojectM/Renderer/Shader.hpp
+@@ -16,6 +16,9 @@
+ #include <string>
+ 
+ namespace libprojectM {
++namespace FdOracle {
++void RecordShaderError(const std::string& message);
++}
+ namespace Renderer {
+ 
+ /**
+@@ -27,6 +30,7 @@ public:
+     ShaderException(std::string message)
+         : m_message(std::move(message))
+     {
++        FdOracle::RecordShaderError(m_message); // lactea oracle: count/report swallowed shader failures
+     }
+ 
+     virtual ~ShaderException() = default;
+diff --git a/src/libprojectM/Renderer/Texture.cpp b/src/libprojectM/Renderer/Texture.cpp
+index 962ee12..88cefdc 100644
+--- a/src/libprojectM/Renderer/Texture.cpp
++++ b/src/libprojectM/Renderer/Texture.cpp
+@@ -1,6 +1,10 @@
+ #include "Renderer/Texture.hpp"
+ 
++#include "FdOracle.hpp"
++
++#include <algorithm>
+ #include <utility>
++#include <vector>
+ 
+ namespace libprojectM {
+ namespace Renderer {
+@@ -148,13 +152,21 @@ void Texture::CreateNewTexture()
+ {
+     glGenTextures(1, &m_textureId);
+     glBindTexture(m_target, m_textureId);
++    // lactea oracle: upload zeros instead of leaving the storage undefined (determinism).
++    std::vector<unsigned char> fdZeros;
++    const void* fdInit = nullptr;
++    if (FdOracle::Enabled())
++    {
++        fdZeros.assign(static_cast<size_t>(m_width) * m_height * std::max(1, m_depth) * 16, 0);
++        fdInit = fdZeros.data();
++    }
+     switch (m_target)
+     {
+         case GL_TEXTURE_2D:
+-            glTexImage2D(m_target, 0, m_internalFormat, m_width, m_height, 0, m_format, m_type, nullptr);
++            glTexImage2D(m_target, 0, m_internalFormat, m_width, m_height, 0, m_format, m_type, fdInit);
+             break;
+         case GL_TEXTURE_3D:
+-            glTexImage3D(m_target, 0, m_internalFormat, m_width, m_height, m_depth, 0, m_format, m_type, nullptr);
++            glTexImage3D(m_target, 0, m_internalFormat, m_width, m_height, m_depth, 0, m_format, m_type, fdInit);
+             break;
+         default:
+             // Unsupported, do nothing.
+diff --git a/src/libprojectM/Renderer/TextureAttachment.cpp b/src/libprojectM/Renderer/TextureAttachment.cpp
+index 4851520..f9675cb 100644
+--- a/src/libprojectM/Renderer/TextureAttachment.cpp
++++ b/src/libprojectM/Renderer/TextureAttachment.cpp
+@@ -1,5 +1,9 @@
+ #include "Renderer/TextureAttachment.hpp"
+ 
++#include "FdOracle.hpp"
++
++#include <vector>
++
+ // OpenGL ES might not define this constant in its headers, e.g. in the iOS and Emscripten SDKs.
+ #ifndef GL_STENCIL_INDEX
+ #define GL_STENCIL_INDEX 0x1901
+@@ -109,7 +113,13 @@ void TextureAttachment::ReplaceTexture(int width, int height)
+     GLuint textureId;
+     glGenTextures(1, &textureId);
+     glBindTexture(GL_TEXTURE_2D, textureId);
+-    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, textureFormat, pixelFormat, nullptr);
++    // lactea oracle: upload zeros instead of leaving the storage undefined (determinism).
++    std::vector<unsigned char> fdZeros;
++    if (FdOracle::Enabled())
++    {
++        fdZeros.assign(static_cast<size_t>(width) * height * 16, 0);
++    }
++    glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, textureFormat, pixelFormat, fdZeros.empty() ? nullptr : fdZeros.data());
+ 
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+diff --git a/src/libprojectM/Renderer/TextureManager.cpp b/src/libprojectM/Renderer/TextureManager.cpp
+index ed6a138..0dc264c 100644
+--- a/src/libprojectM/Renderer/TextureManager.cpp
++++ b/src/libprojectM/Renderer/TextureManager.cpp
+@@ -12,6 +12,9 @@
+ 
+ #include <algorithm>
+ #include <cstdlib>
++#include "FdOracle.hpp"
++
++#include <algorithm>
+ #include <memory>
+ #include <random>
+ #include <vector>
+@@ -100,6 +103,13 @@ void TextureManager::Preload()
+     m_textures["noise_hq"] = MilkdropNoise::HighQuality();
+     m_textures["noisevol_lq"] = MilkdropNoise::LowQualityVolume();
+     m_textures["noisevol_hq"] = MilkdropNoise::HighQualityVolume();
++
++    // lactea oracle: dump the generated static textures (no-op unless FD_DUMP_TEXTURES is set).
++    for (const char* n : {"noise_lq", "noise_lq_lite", "noise_mq", "noise_hq", "noisevol_lq", "noisevol_hq"})
++    {
++        const auto& t = m_textures[n];
++        FdOracle::DumpStaticTexture(n, t->TextureID(), t->Type(), t->Width(), t->Height(), t->Type() == GL_TEXTURE_3D ? t->Depth() : 1);
++    }
+ }
+ 
+ void TextureManager::PurgeTextures()
+@@ -291,6 +301,16 @@ auto TextureManager::GetRandomTexture(const std::string& randomName) -> TextureS
+ 
+     std::string lowerCaseName = Utils::ToLower(randomName);
+ 
++    // lactea oracle: directory scan order is filesystem-dependent; make the pool order stable.
++    FdOracle::Rng fdRng("randtex_" + lowerCaseName);
++    if (FdOracle::Enabled())
++    {
++        std::stable_sort(m_scannedTextureFiles.begin(), m_scannedTextureFiles.end(),
++                         [](const ScannedFile& a, const ScannedFile& b) {
++                             return a.lowerCaseBaseName != b.lowerCaseBaseName ? a.lowerCaseBaseName < b.lowerCaseBaseName : a.filePath < b.filePath;
++                         });
++    }
++
+     if (m_scannedTextureFiles.empty())
+     {
+         LOG_DEBUG("[TextureManager] Texture file list is empty.");
+@@ -307,7 +327,7 @@ auto TextureManager::GetRandomTexture(const std::string& randomName) -> TextureS
+     {
+         // Just pick a random index.
+         std::uniform_int_distribution<size_t> distribution(0, m_scannedTextureFiles.size() - 1);
+-        selectedFilename = m_scannedTextureFiles.at(distribution(rndEngine)).lowerCaseBaseName;
++        selectedFilename = m_scannedTextureFiles.at(FdOracle::Enabled() ? static_cast<size_t>(fdRng.Next64() % m_scannedTextureFiles.size()) : distribution(rndEngine)).lowerCaseBaseName;
+     }
+     else
+     {
+@@ -323,7 +343,7 @@ auto TextureManager::GetRandomTexture(const std::string& randomName) -> TextureS
+         if (!filteredFiles.empty())
+         {
+             std::uniform_int_distribution<size_t> distribution(0, filteredFiles.size() - 1);
+-            selectedFilename = filteredFiles.at(distribution(rndEngine)).lowerCaseBaseName;
++            selectedFilename = filteredFiles.at(FdOracle::Enabled() ? static_cast<size_t>(fdRng.Next64() % filteredFiles.size()) : distribution(rndEngine)).lowerCaseBaseName;
+         }
+     }
+ 
+diff --git a/src/libprojectM/Renderer/TransitionShaderManager.cpp b/src/libprojectM/Renderer/TransitionShaderManager.cpp
+index 638e3c8..6201e35 100644
+--- a/src/libprojectM/Renderer/TransitionShaderManager.cpp
++++ b/src/libprojectM/Renderer/TransitionShaderManager.cpp
+@@ -1,5 +1,7 @@
+ #include "Renderer/TransitionShaderManager.hpp"
+ 
++#include "FdOracle.hpp"
++
+ #include "BuiltInTransitionsResources.hpp"
+ 
+ namespace libprojectM {
+@@ -23,7 +25,14 @@ auto TransitionShaderManager::RandomTransition() -> std::shared_ptr<Shader>
+         return {};
+     }
+ 
+-    return m_transitionShaders.at(m_mersenneTwister() % m_transitionShaders.size());
++    if (FdOracle::Enabled())
++    {
++        m_lastIndex = FdOracle::TransitionShaderIndex(m_transitionShaders.size());
++        return m_transitionShaders.at(m_lastIndex);
++    }
++
++    m_lastIndex = m_mersenneTwister() % m_transitionShaders.size();
++    return m_transitionShaders.at(m_lastIndex);
+ }
+ 
+ auto TransitionShaderManager::CompileTransitionShader(const std::string& shaderBodyCode) -> std::shared_ptr<Shader>
+diff --git a/src/libprojectM/Renderer/TransitionShaderManager.hpp b/src/libprojectM/Renderer/TransitionShaderManager.hpp
+index cc5c3b0..1e9d8b4 100644
+--- a/src/libprojectM/Renderer/TransitionShaderManager.hpp
++++ b/src/libprojectM/Renderer/TransitionShaderManager.hpp
+@@ -21,6 +21,11 @@ public:
+      */
+     auto RandomTransition() -> std::shared_ptr<Shader>;
+ 
++    /// lactea oracle: index (0 Circle, 1 Plasma, 2 SimpleBlend, 3 Sweep, 4 Warp, 5 ZoomBlur) chosen by the last RandomTransition().
++    auto LastIndex() const -> size_t { return m_lastIndex; }
++    /// lactea oracle: whether the shader at `index` compiled.
++    auto ShaderOk(size_t index) const -> bool { return index < m_transitionShaders.size() && m_transitionShaders[index] != nullptr; }
++
+ private:
+     /**
+      * @brief Compiles a single transition shader program.
+@@ -32,6 +37,7 @@ private:
+ 
+     std::random_device m_randomDevice; //!< Seed for the random number generator
+     std::mt19937 m_mersenneTwister; //!< Random engine to select shader
++    size_t m_lastIndex{};           //!< lactea oracle: last selected shader index.
+ };
+ 
+ } // namespace Renderer
+diff --git a/src/libprojectM/TimeKeeper.cpp b/src/libprojectM/TimeKeeper.cpp
+index 6c1817b..25282a5 100644
+--- a/src/libprojectM/TimeKeeper.cpp
++++ b/src/libprojectM/TimeKeeper.cpp
+@@ -1,5 +1,7 @@
+ #include "TimeKeeper.hpp"
+ 
++#include "FdOracle.hpp"
++
+ #include <algorithm>
+ #include <random>
+ 
+@@ -28,7 +30,12 @@ void TimeKeeper::UpdateTimers()
+ {
+     double currentFrameTime{m_userSpecifiedTime};
+ 
+-    if (m_userSpecifiedTime < 0.0)
++    if (m_userSpecifiedTime < 0.0 && FdOracle::Enabled())
++    {
++        // lactea oracle: no wall clock; time stays 0 until projectm_set_frame_time() is called.
++        currentFrameTime = 0.0;
++    }
++    else if (m_userSpecifiedTime < 0.0)
+     {
+         auto currentTime = std::chrono::high_resolution_clock::now();
+         currentFrameTime = std::chrono::duration<double>(currentTime - m_startTime).count();
+diff --git a/src/libprojectM/TimeKeeper.hpp b/src/libprojectM/TimeKeeper.hpp
+index 949bcf5..ce723cf 100644
+--- a/src/libprojectM/TimeKeeper.hpp
++++ b/src/libprojectM/TimeKeeper.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include "FdOracle.hpp"
++
+ #include <chrono>
+ #include <random>
+ 
+@@ -110,7 +112,7 @@ private:
+     std::chrono::high_resolution_clock::time_point m_startTime{std::chrono::high_resolution_clock::now()};
+ 
+     std::random_device m_randomDevice{};
+-    std::mt19937 m_randomGenerator{m_randomDevice()};
++    std::mt19937 m_randomGenerator{FdOracle::Enabled() ? static_cast<std::mt19937::result_type>(FdOracle::Seed()) : m_randomDevice()};
+ 
+     double m_userSpecifiedTime{-1.0}; //!< User-specifed run time. If set to a value >= 0.0, this time is used instead of the system clock.
+ 

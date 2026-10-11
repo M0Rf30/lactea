@@ -1,0 +1,34 @@
+[package]
+name = "lactea"
+description = "MilkDrop engine: preset + expressions + audio + shaders driving lactea-render. Embeddable into any wgpu host."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["milkdrop", "projectm", "visualizer", "wgpu", "music"]
+categories = ["graphics", "multimedia", "rendering"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[dependencies]
+lactea-abi = { workspace = true }
+lactea-eel = { workspace = true }
+lactea-preset = { workspace = true }
+lactea-audio = { workspace = true }
+lactea-hlsl = { workspace = true }
+lactea-render = { workspace = true }
+wgpu = { workspace = true }
+thiserror = { workspace = true }
+
+[features]
+# Oracle / teacher-forcing hooks (forced frames, injected images). Off by default.
+diagnostics = ["lactea-render/diagnostics"]
+
+[dev-dependencies]
+pollster = { workspace = true }
+image = { workspace = true }
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]

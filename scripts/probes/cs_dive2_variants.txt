@@ -1,0 +1,29 @@
+### e1
+float2 d;
+shader_body
+{
+ret = float3(frac(uv_orig.y*1048576), frac(uv_orig.x*1048576), frac(uv.y*1048576));
+}
+### e2
+float2 d;
+shader_body
+{
+ret = float3(frac(uv_orig.y*4096), frac(uv_orig.x*4096), frac((uv_orig.y-0.4941668)*65536));
+}
+### e3
+float2 d;
+shader_body
+{
+float h = q9;
+float2 c = uv_orig-float2(0.5,1-h);
+ret = float3(frac(c.y*1048576), frac(c.x*1048576), 0);
+}
+### e4
+float2 d;
+shader_body
+{
+float h = q9;
+float2 c = uv_orig-float2(0.5,1-h);
+float z = 3/c.y;
+ret = float3(frac(z*128), frac(z*1024), frac(z*8192));
+}

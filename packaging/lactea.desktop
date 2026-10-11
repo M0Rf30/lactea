@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lactea
+GenericName=Music Visualizer
+Comment=MilkDrop 2 / projectM-compatible music visualizer
+Exec=lactea
+Icon=lactea
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=visualizer;milkdrop;projectm;music;
+StartupWMClass=lactea

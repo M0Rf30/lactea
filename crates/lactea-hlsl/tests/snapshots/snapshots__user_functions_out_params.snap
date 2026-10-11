@@ -1,0 +1,61 @@
+---
+source: crates/lactea-hlsl/tests/snapshots.rs
+expression: out
+---
+@group(1) @binding(1) var tex_sampler_main: texture_2d<f32>;
+@group(1) @binding(2) var smp_sampler_main: sampler;
+fn f_split_1(p_x_11: f32, p_ip_13: ptr<function, f32>, p_fp_14: ptr<function, f32>) {
+    var x_12: f32 = p_x_11;
+    let t_15 = x_12;
+    (*p_ip_13) = trunc(t_15);
+    (*p_fp_14) = (t_15 - trunc(t_15));
+}
+
+fn f_rot2_0(p_p_18: vec2<f32>, p_a_20: f32) -> vec2<f32> {
+    var p_19: vec2<f32> = p_p_18;
+    var a_21: f32 = p_a_20;
+    var s_22: f32;
+    var c_23: f32;
+    s_22 = sin(a_21);
+    c_23 = cos(a_21);
+    return vec2<f32>(((p_19.x * c_23) - (p_19.y * s_22)), ((p_19.x * s_22) + (p_19.y * c_23)));
+}
+
+fn f_PS_2(p__vDiffuse_1: vec4<f32>, p__uv_3: vec4<f32>, p__rad_ang_5: vec2<f32>, p__return_value_7: ptr<function, vec4<f32>>) {
+    var vDiffuse_2: vec4<f32> = p__vDiffuse_1;
+    var uv_4: vec4<f32> = p__uv_3;
+    var rad_ang_6: vec2<f32> = p__rad_ang_5;
+    var ret_8: vec3<f32> = vec3<f32>(0.0f);
+    var i_9: f32;
+    var f_10: f32;
+    var out_16: f32 = 0.0f;
+    var out_17: f32 = 0.0f;
+    f_split_1((uv_4.xy.x * 8.0f), &out_16, &out_17);
+    i_9 = out_16;
+    f_10 = out_17;
+    var p_24: vec2<f32> = f_rot2_0((uv_4.xy - 0.5f), ((mu.c[2].x * 0.3f) + i_9));
+    ret_8 = ((textureSample(tex_sampler_main, smp_sampler_main, (p_24 + 0.5f))).xyz * (0.5f + (0.5f * f_10)));
+    (*p__return_value_7) = vec4<f32>(ret_8.xyz, vDiffuse_2.w);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var rv: vec4<f32> = vec4<f32>();
+    f_PS_2(in.diffuse, in.uv, in.rad_ang, &rv);
+    return rv;
+}
+
+// interface: ShaderInterface {
+    textures: [
+        TextureBinding {
+            hlsl_name: "sampler_main",
+            source: Main,
+            filter: Linear,
+            address: Wrap,
+            dim: D2,
+        },
+    ],
+    texsize_slots: [],
+    max_blur_level: 0,
+}
+// texsize_params: []

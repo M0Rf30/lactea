@@ -1,0 +1,113 @@
+diff --git a/projectm-eval/Scanner.c b/projectm-eval/Scanner.c
+index 09124ff..ceaa5bb 100644
+--- a/projectm-eval/Scanner.c
++++ b/projectm-eval/Scanner.c
+@@ -348,7 +348,6 @@ struct prjm_eval_scanner_state;
+ /* First, we deal with  platform-specific or compiler-specific issues. */
+ 
+ /* begin standard C headers. */
+-
+ #include <stdio.h>
+ #include <string.h>
+ #include <errno.h>
+@@ -365,8 +364,8 @@ struct prjm_eval_scanner_state;
+ 
+ #if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+ 
+-/* C++ systems might need __STDC_LIMIT_MACROS defined before including
+- * <stdint.h>, if you want the limit (max/min) macros for int types.
++/* C99 says to define __STDC_LIMIT_MACROS before including stdint.h,
++ * if you want the limit (max/min) macros for int types. 
+  */
+ #ifndef __STDC_LIMIT_MACROS
+ #define __STDC_LIMIT_MACROS 1
+diff --git a/projectm-eval/Scanner.h b/projectm-eval/Scanner.h
+index ba76251..81e1ec0 100644
+--- a/projectm-eval/Scanner.h
++++ b/projectm-eval/Scanner.h
+@@ -352,7 +352,6 @@ struct prjm_eval_scanner_state;
+ /* First, we deal with  platform-specific or compiler-specific issues. */
+ 
+ /* begin standard C headers. */
+-
+ #include <stdio.h>
+ #include <string.h>
+ #include <errno.h>
+@@ -369,8 +368,8 @@ struct prjm_eval_scanner_state;
+ 
+ #if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+ 
+-/* C++ systems might need __STDC_LIMIT_MACROS defined before including
+- * <stdint.h>, if you want the limit (max/min) macros for int types.
++/* C99 says to define __STDC_LIMIT_MACROS before including stdint.h,
++ * if you want the limit (max/min) macros for int types. 
+  */
+ #ifndef __STDC_LIMIT_MACROS
+ #define __STDC_LIMIT_MACROS 1
+diff --git a/projectm-eval/TreeFunctions.c b/projectm-eval/TreeFunctions.c
+index ddd1d82..f1de069 100644
+--- a/projectm-eval/TreeFunctions.c
++++ b/projectm-eval/TreeFunctions.c
+@@ -9,6 +9,7 @@
+ #include <math.h>
+ #include <assert.h>
+ #include <stdint.h>
++#include <stdlib.h>
+ 
+ #if PRJM_F_SIZE == 4
+ typedef int32_t PRJM_EVAL_I;
+@@ -166,6 +167,14 @@ static uint32_t prjm_eval_genrand_int32(void)
+     if (!mti)
+     {
+         uint32_t s = 0x4141f00d; // Initial Mersenne Twister seed
++        /* lactea oracle: FD_SEED=1 (the default run seed) keeps the original seed; other seeds shift it. */
++        {
++            const char* fd_seed = getenv("FD_SEED");
++            if (fd_seed && *fd_seed)
++            {
++                s += (uint32_t) ((strtoull(fd_seed, NULL, 10) - 1ULL) * 0x9E3779B9ULL);
++            }
++        }
+         mt[0] = s & 0xffffffffUL;
+         for (mti = 1; mti < N; mti++)
+         {
+diff --git a/projectm-eval/api/projectm-eval.c b/projectm-eval/api/projectm-eval.c
+index ee6abab..5b2de8b 100644
+--- a/projectm-eval/api/projectm-eval.c
++++ b/projectm-eval/api/projectm-eval.c
+@@ -46,6 +46,16 @@ PRJM_EVAL_F* projectm_eval_context_register_variable(struct projectm_eval_contex
+     return prjm_eval_register_variable(ctx, var_name);
+ }
+ 
++void projectm_eval_context_enum_variables(struct projectm_eval_context* ctx,
++                                          void (*cb)(const char* name, PRJM_EVAL_F* value, void* user),
++                                          void* user)
++{
++    for (prjm_eval_variable_entry_t* v = ctx->variables.first; v; v = v->next)
++    {
++        cb(v->variable->name, &v->variable->value, user);
++    }
++}
++
+ struct projectm_eval_code* projectm_eval_code_compile(struct projectm_eval_context* ctx, const char* code)
+ {
+     return (struct projectm_eval_code*) prjm_eval_compile_code(ctx, code);
+diff --git a/projectm-eval/api/projectm-eval.h b/projectm-eval/api/projectm-eval.h
+index ab90e51..b696458 100644
+--- a/projectm-eval/api/projectm-eval.h
++++ b/projectm-eval/api/projectm-eval.h
+@@ -124,6 +124,14 @@ void projectm_eval_context_reset_variables(struct projectm_eval_context* ctx);
+  */
+ PRJM_EVAL_F* projectm_eval_context_register_variable(struct projectm_eval_context* ctx, const char* var_name);
+ 
++/**
++ * @brief lactea oracle patch: calls cb(name, value_ptr, user) for every registered (non-regNN) variable.
++ * Order is unspecified.
++ */
++void projectm_eval_context_enum_variables(struct projectm_eval_context* ctx,
++                                          void (*cb)(const char* name, PRJM_EVAL_F* value, void* user),
++                                          void* user);
++
+ /**
+  * @brief Compiled the given code into an executable program.
+  * Call @a projectm_eval_get_error() to retrieve the compiler error and location on compilation failure.

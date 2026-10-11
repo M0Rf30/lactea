@@ -1,0 +1,54 @@
+name: Bug report
+description: Something renders wrongly, crashes or misbehaves
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Expected and actual behaviour. Attach a screenshot if it is visual.
+    validations:
+      required: true
+  - type: input
+    id: preset
+    attributes:
+      label: Preset
+      description: File name and where it comes from (attach the `.milk` if it is not in the projectM collection).
+  - type: input
+    id: version
+    attributes:
+      label: Lactea version
+      description: "`lactea --version`, or the crate version / commit"
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [standalone app, Rust library, C library, web example, other]
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: "e.g. Intel Iris Xe, Mesa 25.2; NVIDIA RTX 4070, 570.133; Apple M2"
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: wgpu backend
+      options: [Vulkan, Metal, DX12, GL, WebGPU, unknown]
+  - type: input
+    id: os
+    attributes:
+      label: OS
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output with `RUST_LOG=debug`
+      render: text

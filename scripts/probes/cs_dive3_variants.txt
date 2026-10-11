@@ -1,0 +1,32 @@
+### f1
+float2 d;
+shader_body
+{
+float h = q9;
+ret = float3(frac((1-h)*1048576), frac(h*1048576), frac(q9*1048576));
+}
+### f2
+float2 d;
+shader_body
+{
+float h = q9;
+float y = uv_orig.y - (1-h);
+ret = float3(frac(y*1048576), frac(uv_orig.y*1048576), 0);
+}
+### f3
+float2 d;
+shader_body
+{
+float h = q9;
+float y = uv_orig.y + h - 1;
+ret = float3(frac(y*1048576), frac(uv_orig.y*1048576), 0);
+}
+### f4
+float2 d;
+shader_body
+{
+float h = q9;
+float t = 1-h;
+float y = uv_orig.y - t;
+ret = float3(frac(y*1048576), frac(t*1048576), 0);
+}

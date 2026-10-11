@@ -1,0 +1,65 @@
+# release-plz: version bumps, changelog and crates.io publish for the nine publishable crates.
+# All crates share one version (workspace lockstep). release-plz pushes the tag `vX.Y.Z`;
+# .github/workflows/release.yml then builds the binaries and creates the GitHub release.
+
+[workspace]
+changelog_path = "./CHANGELOG.md"
+changelog_config = "cliff.toml"
+git_release_enable = false
+git_tag_enable = false
+publish_allow_dirty = false
+semver_check = false
+
+[[package]]
+name = "lactea"
+git_tag_enable = true
+git_tag_name = "v{{ version }}"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-abi"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-eel"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-preset"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-jpeg"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-audio"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-hlsl"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-render"
+version_group = "lactea"
+
+[[package]]
+name = "lactea-compare"
+release = false
+
+[[package]]
+name = "lactea-app"
+release = false
+
+[[package]]
+name = "lactea-capi"
+release = false
+
+[[package]]
+name = "lactea-cli"
+release = false
+
+[[package]]
+name = "lactea-eel-oracle"
+release = false

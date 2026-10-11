@@ -1,0 +1,55 @@
+/usr/share/projectM/presets/presets_projectM/Aderrasi - Antique Abyss.milk
+/usr/share/projectM/presets/presets_stock/EMPR - Random - They're so cute Dad can I keep one!.milk
+/usr/share/projectM/presets/presets_stock/Geiss & Rovastar - Julia Fractal (Vectrip Mix).milk
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss + Rovastar - Notions Of Tonality 2.milk
+/usr/share/projectM/presets/presets_milkdrop/Geiss - Heavenly 1.milk
+/usr/share/projectM/presets/presets_stock/Idiot - What Shall Come.milk
+/usr/share/projectM/presets/presets_stock/Idiot24-7 - Ascending to heaven 2.milk
+/usr/share/projectM/presets/presets_bltc201/Illusion & Rovastar - Clouded Bottle.milk
+/usr/share/projectM/presets/presets_tryptonaut/Illusion & Unchained - New Strategy.milk
+/usr/share/projectM/presets/presets_milkdrop_104/Krash & Rovastar - Altars Of Madness (Mad Ocean Mix).milk
+/usr/share/projectM/presets/presets_milkdrop/Krash - Interwoven (Nightmare Weft Mix).milk
+/usr/share/projectM/presets/presets_tryptonaut/Phat+fiShbRaiN+EoS_Mandala_Chasers_remix.milk
+/usr/share/projectM/presets/presets_milkdrop_200/PieturP - triptrap_(getting_concrete_visions_through_a_diafragma_version).milk
+/usr/share/projectM/presets/presets_milkdrop/Rovastar & Fvese - Paranormal Static.milk
+/usr/share/projectM/presets/presets_milkdrop/Rovastar & Fvese - Stranger Minds (Astral Mix).milk
+/usr/share/projectM/presets/presets_milkdrop/Rovastar & Geiss - Bipolar 2 (Vectrip Mix).milk
+/usr/share/projectM/presets/presets_stock/Rovastar & Geiss - Dynamic Swirls 3 (Voyage Of Twisted Soul.milk
+/usr/share/projectM/presets/presets_tryptonaut/Rovastar & Geiss - Dynamic Swirls 3 (Voyage Of Twisted Soul.milk
+/usr/share/projectM/presets/presets_tryptonaut/Rovastar & Telek - Altars of Madness (Rolling Oceans Mix).milk
+/usr/share/projectM/presets/presets_stock/Rovastar & Unchained - Oddball World.milk
+/usr/share/projectM/presets/presets_milkdrop_200/Rovastar + Geiss - Hurricane Nightmare (Gold Chrome Mix).milk
+/usr/share/projectM/presets/presets_milkdrop_200/Rovastar + Telek - Altars of Madness (Rolling Oceans Mix).milk
+/usr/share/projectM/presets/presets_milkdrop/Rovastar - Biohazard Warning.milk
+/usr/share/projectM/presets/presets_tryptonaut/Rovastar - Biohazard Warning.milk
+/usr/share/projectM/presets/presets_projectM/Rovastar - Fractopia (Fantic Dancing Lights Mix).milk
+/usr/share/projectM/presets/presets_bltc201/Rovastar - Fractopia (Galaxy Swirl Mix).milk
+/usr/share/projectM/presets/presets_milkdrop_104/Rovastar - Fractopia (Upspoken Mix).milk
+/usr/share/projectM/presets/presets_stock/Rovastar - Fractopia (Upspoken Mix)_Phat_Speak_When_Spoken_2.milk
+/usr/share/projectM/presets/presets_milkdrop/Rovastar - Jester's Surreal Tornado (Further Vortex Mix).milk
+/usr/share/projectM/presets/presets_tryptonaut/Rovastar - Multiverse Starfield 3.milk
+/usr/share/projectM/presets/presets_tryptonaut/Rovastar - Solarized Space.milk
+/usr/share/projectM/presets/presets_bltc201/Rozzor & Krash - Throwing The Book.milk
+/usr/share/projectM/presets/presets_bltc201/Rozzor & Unchained - Painful Plasma (Multi-Wave Mirrored Rage (Triangle Tweak)).milk
+/usr/share/projectM/presets/presets_milkdrop/Rozzor and Idiot - Any Other Deep Rising.milk
+/usr/share/projectM/presets/presets_milkdrop_104/Studio Music - Intuitive Awareness (Traces of Love mix).milk
+/usr/share/projectM/presets/presets_tryptonaut/StudioMusic - It's Only Make Believe.milk
+/usr/share/projectM/presets/presets_milkdrop_200/TEcHNO + SandStorm - Psychodelic Highway.milk
+/usr/share/projectM/presets/presets_milkdrop/Telek - Directive Swagger (Spectral Inferno) (fix---) maybe.milk
+/usr/share/projectM/presets/presets_milkdrop_104/Telek - Directive Swagger (Spectral Inferno) (fix---) maybe-- YES.milk
+/usr/share/projectM/presets/presets_milkdrop/Telek - Sine Wave.milk
+/usr/share/projectM/presets/presets_projectM/Unchained - Cartoon Factory.milk
+/usr/share/projectM/presets/presets_tryptonaut/Unchained - Picture Of Exile.milk
+/usr/share/projectM/presets/presets_tryptonaut/Unchained - Picture Of Nectar.milk
+/usr/share/projectM/presets/presets_bltc201/Unchained - Quine.milk
+/usr/share/projectM/presets/presets_tryptonaut/Unchained - ReAwoke.milk
+/usr/share/projectM/presets/presets_milkdrop/che - terracarbon stream.milk
+/usr/share/projectM/presets/presets_stock/che - terracarbon stream.milk
+/usr/share/projectM/presets/presets_tryptonaut/fiShbRaiN - lost in the bottle.milk
+/usr/share/projectM/presets/presets_milkdrop_200/fiShbRaiN - the machine that conquered the world (domination remix).milk
+/usr/share/projectM/presets/presets_tryptonaut/nil - Singularity in My Oscilloscope.milk
+/usr/share/projectM/presets/presets_tryptonaut/phat + EoS - 2ct2V5.milk
+/usr/share/projectM/presets/presets_tryptonaut/phat + EoS - TesellatingFractal_Mix3.milk
+/usr/share/projectM/presets/presets_tryptonaut/suksma - yin - 100 - Through the ether - Bitcore Tweak - mash0000 - dmt eye rub spher nz+.milk
+/usr/share/projectM/presets/presets_yin/yin - 100 - Through the ether.milk
+/usr/share/projectM/presets/presets_yin/yin - 120 - Resonant consciousness.milk

@@ -1,0 +1,37 @@
+# lactea oracle starter set: path<TAB>features covered. v1 = no shaders, v2 = MilkDrop 2 shaders.
+/usr/share/projectM/presets/presets_milkdrop/Aderrasi - Elastoid.milk	main wave mode 0 (circle)
+/usr/share/projectM/presets/presets_milkdrop_104/Krash & Idiot - Memories Of The Castle.milk	main wave mode 1
+/usr/share/projectM/presets/presets_milkdrop/Geiss - Hyperion.milk	main wave mode 2, wave_brighten
+/usr/share/projectM/presets/presets_milkdrop/Che - Burning Hus.milk	main wave mode 3
+/usr/share/projectM/presets/presets_milkdrop/nil - Can't Stop the Blithering.milk	main wave mode 4, thick
+/usr/share/projectM/presets/presets_milkdrop/Aderrasi - Making Time (Swamp Mix).milk	main wave mode 5, thick, brighten
+/usr/share/projectM/presets/presets_stock/Aderrasi - Antidote.milk	main wave mode 6 (cleanest v1 feedback)
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Bitterfeld (Crystal Border Mix).milk	main wave mode 7; inner+outer borders
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Bow To Gravity.milk	video echo orient 1; borders
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - See.milk	video echo orient 2
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Ghast Entity.milk	video echo orient 3
+/usr/share/projectM/presets/presets_bltc201/Geiss - Cosmic Dust 2.milk	gamma adjust; wave dots
+/usr/share/projectM/presets/presets_bltc201/Rovastar - Solarized Space.milk	brighten+solarize+invert filters; motion vectors; darken_center
+/usr/share/projectM/presets/presets_bltc201/Bmelgren - Pentultimate Nerual Slipstream (Tweak 2).milk	darken filter; darken_center; gamma
+/usr/share/projectM/presets/presets_bltc201/Che - Escape.milk	motion vectors; echo; inner border; wave dots
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Halls Of Centrifuge.milk	darken_center; borders; echo
+/usr/share/projectM/presets/presets_bltc201/EoS + Phat - CAT Scan.milk	custom waves dots+thick+additive; custom shape 40 sides textured thick outline; darken
+/usr/share/projectM/presets/presets_bltc201/Rozzor & StudioMusic - Vertigyny (Geiss Shape Mod).milk	custom wave spectrum; shape thick outline
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Airhandler (Last Breath - Crab).milk	custom shapes textured, additive, 50/100 sides
+/usr/share/projectM/presets/presets_tryptonaut/Goody - LSD Zoomtunnel.milk	custom shape instanced (num_inst>1), textured
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Songflower (Hybrid Plant).milk	custom shapes textured+additive+thick outline; borders
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Skin Dots 3.milk	v2 warp shader + comp shader using blur1
+/usr/share/projectM/presets/presets_milkdrop_200/Aderrasi + Geiss - Airhandler (Square Mix).milk	v2 comp shader with blur1 (no warp shader); outer border
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Fog Zone.milk	v2 comp shader with blur2 only (GetBlur2)
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Blur Mix 3.milk	v2 warp+comp with blur1,blur2,blur3
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Tokamak Plus 2.milk	v2 noise_lq; rand_frame/rand_preset; texsize
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Iris Storm.milk	v2 noise_hq; blur1; rand_*
+/usr/share/projectM/presets/presets_tryptonaut/ORB - Quicksand.milk	v2 noise_lq+mq+hq; user texture; q vars; blur1
+/usr/share/projectM/presets/presets_tryptonaut/ORB - Acid Sunrise.milk	v2 noisevol_lq (3D); q vars
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Reaction Diffusion 4 - Petri Mix.milk	v2 noisevol_hq (3D); rot_* matrices; audio in shader; blur1
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Cosmic Dust 2 - Trails 7.milk	v2 user texture; q vars
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Diffuser (Gold Mix).milk	v2 random texture (randXX); custom wave; blur1
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Mandelbrot 9c2.milk	v2 q vars in warp+comp shaders (no blur/noise)
+/usr/share/projectM/presets/presets_milkdrop_200/EoS + Geiss - glowsticks v2 03 music shifter edit b (water mix).milk	v2 rot_* matrices; noisevol_hq; custom shape+wave; blur1
+/usr/share/projectM/presets/presets_milkdrop_200/shifter + Geiss - molten glass wrap.milk	v2 comp roam_cos/slow_roam; blur1; custom shape
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Rose 5 Crossfire Beats.milk	v2 warp+comp with rand_frame/rand_preset; noise_lq; wave mode 0

@@ -1,0 +1,58 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lactea-abi",
+    "crates/lactea-eel",
+    "crates/lactea-eel-oracle",
+    "crates/lactea-preset",
+    "crates/lactea-audio",
+    "crates/lactea-hlsl",
+    "crates/lactea-jpeg",
+    "crates/lactea-render",
+    "crates/lactea-compare",
+    "crates/lactea",
+    "crates/lactea-cli",
+    "crates/lactea-capi",
+    "crates/lactea-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/M0Rf30/lactea"
+homepage = "https://github.com/M0Rf30/lactea"
+authors = ["The Lactea Authors"]
+
+[workspace.dependencies]
+lactea-abi = { path = "crates/lactea-abi", version = "0.1.0" }
+lactea-eel = { path = "crates/lactea-eel", version = "0.1.0" }
+lactea-preset = { path = "crates/lactea-preset", version = "0.1.0" }
+lactea-audio = { path = "crates/lactea-audio", version = "0.1.0" }
+lactea-hlsl = { path = "crates/lactea-hlsl", version = "0.1.0" }
+lactea-jpeg = { path = "crates/lactea-jpeg", version = "0.1.0" }
+lactea-render = { path = "crates/lactea-render", version = "0.1.0" }
+lactea-compare = { path = "crates/lactea-compare", version = "0.1.0" }
+lactea = { path = "crates/lactea", version = "0.1.0" }
+
+wgpu = "30"
+naga = "30"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4", features = ["derive"] }
+pollster = "1"
+rustfft = "6"
+cc = "1"
+insta = "1"
+proptest = "1"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+debug = 1

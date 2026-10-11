@@ -1,0 +1,191 @@
+name: ci
+
+# What runs here needs neither the projectM reference build, the preset corpus (/usr/share/projectM)
+# nor a GPU: every test that does is skipped with a message when the resource is absent. The
+# fidelity loop (scripts/fidelity.sh, scripts/corpus_run.py; docs/fidelity.md) is a manual /
+# self-hosted workflow: it needs the reference build (oracle/build.sh) and a GPU for bit-comparable
+# output.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # lactea-app (alsa/pipewire/winit system libs) and lactea-eel-oracle (clones and builds
+      # projectm-eval) are not linted here. `approx_constant` is allowed: the MD2/projectM ports
+      # deliberately use its literals.
+      - name: clippy (workspace minus app/eel-oracle)
+        run: >
+          cargo clippy --workspace --all-targets
+          --exclude lactea-app --exclude lactea-eel-oracle
+          -- -D warnings -A clippy::approx_constant
+
+  test:
+    name: test (no GPU, no oracle, no corpus)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: audio fixtures (python stdlib only)
+        run: python3 fixtures/audio/gen_audio.py
+      - name: unit + integration tests
+        run: >
+          cargo test
+          -p lactea-abi -p lactea-eel -p lactea-preset -p lactea-audio
+          -p lactea-hlsl -p lactea-compare
+
+  gpu-tests:
+    name: test (software Vulkan, advisory)
+    runs-on: ubuntu-latest
+    # lavapipe is not bit-identical with the Intel/Mesa reference GPU; these tests mostly check
+    # structure/validation, a few compare pixels. Advisory until a self-hosted GPU runner exists.
+    continue-on-error: true
+    env:
+      WGPU_BACKEND: vulkan
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: lavapipe + Vulkan headers (examples/c/vulkan.c is built by the lactea-capi tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 libvulkan-dev
+      - run: python3 fixtures/audio/gen_audio.py
+      - name: render / engine / cli tests
+        run: cargo test -p lactea-render -p lactea -p lactea-cli -p lactea-capi
+
+  eel-oracle:
+    name: eel differential vs projectm-eval (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # build.rs clones third_party/projectm-eval on demand (needs git + a C compiler); the corpus
+      # differential skips itself when /usr/share/projectM is absent.
+      - run: cargo test -p lactea-eel-oracle
+
+  wasm:
+    name: engine builds for wasm32-unknown-unknown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # Library crates only: no pollster / filesystem / threads in the core API (native-only
+      # bits are cfg-gated; see README "WebAssembly").
+      - run: cargo check -p lactea --target wasm32-unknown-unknown
+      # The wasm-bindgen demo (own workspace, own lock file): see README "WebAssembly".
+      - run: cargo check --locked --manifest-path examples/web/Cargo.toml --target wasm32-unknown-unknown
+
+  app-platforms:
+    name: app (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux, cpal only (no PipeWire)
+            os: ubuntu-latest
+            args: --no-default-features --features engine
+          - name: windows
+            os: windows-latest
+            args: --no-default-features --features engine
+          - name: macos
+            os: macos-latest
+            args: --no-default-features --features engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: system libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
+      - run: cargo check -p lactea-app ${{ matrix.args }}
+      - name: unit tests (Linux only)
+        if: runner.os == 'Linux'
+        run: cargo test -p lactea-app ${{ matrix.args }}
+
+  msrv:
+    name: MSRV (rust-version 1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - run: >
+          cargo check --locked
+          -p lactea-abi -p lactea-eel -p lactea-preset -p lactea-jpeg -p lactea-audio
+          -p lactea-hlsl -p lactea-render -p lactea
+
+  deny:
+    name: cargo-deny (licenses, advisories, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  package:
+    name: package (publishable crates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Leaf crates are verified fully; crates that depend on unpublished siblings can only be
+      # packaged (file list and manifest checks) until the siblings are on crates.io.
+      - name: license files match the root copies
+        run: |
+          for c in crates/lactea crates/lactea-*; do
+            [ -f "$c/Cargo.toml" ] && grep -q '^publish = false' "$c/Cargo.toml" && continue
+            for f in LICENSE-MIT LICENSE-APACHE; do cmp "$f" "$c/$f"; done
+          done
+      - run: cargo publish --dry-run -p lactea-abi -p lactea-eel -p lactea-preset -p lactea-jpeg
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: raven-actions/actionlint@v2
+
+  scripts:
+    name: scripts (shell + python syntax)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n
+        run: |
+          set -e
+          for f in scripts/*.sh oracle/*.sh examples/web/build.sh; do echo "bash -n $f"; bash -n "$f"; done
+      - name: shellcheck (errors only)
+        run: shellcheck -S error scripts/*.sh oracle/*.sh examples/web/build.sh
+      - name: python compile
+        run: python3 -m py_compile scripts/*.py oracle/*.py fixtures/audio/gen_audio.py

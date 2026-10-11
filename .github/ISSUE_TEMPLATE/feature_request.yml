@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose a feature or a compatibility improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: If it is a projectM / MilkDrop 2 behaviour, name the source (file, function) it comes from.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [standalone app, Rust library, C library, web example, tooling, other]

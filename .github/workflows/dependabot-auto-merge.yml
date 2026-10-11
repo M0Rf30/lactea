@@ -1,0 +1,33 @@
+name: dependabot auto-merge
+
+# Approves Dependabot PRs and enables squash auto-merge for semver-minor/patch updates. Auto-merge
+# only waits for CI when branch protection requires checks, so nothing is merged unless the
+# repository has auto-merge enabled (it needs branch protection: public repo or GitHub Pro).
+
+on: pull_request_target
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  dependabot:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: approve and enable auto-merge
+        if: steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'
+        run: |
+          if [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .allow_auto_merge)" != true ]; then
+            echo "repository auto-merge is disabled; leaving the PR for review"
+            exit 0
+          fi
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

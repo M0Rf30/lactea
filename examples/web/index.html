@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>lactea web demo</title>
+<style>
+  body { margin: 0; background: #111; color: #ccc; font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 12px; }
+  canvas { width: 100%; aspect-ratio: 16 / 9; background: #000; display: block; }
+  button { margin: 8px 8px 0 0; }
+  #status { margin-top: 8px; white-space: pre-wrap; font-family: monospace; }
+</style>
+</head>
+<body>
+<main>
+  <canvas id="c" width="960" height="540"></canvas>
+  <button id="soft">Soft cut to the next preset (3 s)</button>
+  <button id="cut">Hard cut</button>
+  <button id="mic">Use microphone</button>
+  <div id="status">starting…</div>
+</main>
+<script type="module">
+import init, { Demo } from "./pkg/lactea_web_demo.js";
+
+// Two small presets, so the soft cut has something to blend between.
+const PRESETS = [
+  { name: "tunnel", milk: `[preset00]
+fDecay=0.97
+zoom=1.03
+rot=0.02
+fWaveAlpha=0.9
+nWaveMode=2
+wave_r=0.4
+wave_g=0.8
+wave_b=1
+ob_size=0.015
+ob_r=1
+ob_a=0.6
+per_frame_1=zoom = 1.0 + 0.03*sin(time*0.7) + 0.02*bass;
+per_frame_2=wave_r = 0.5 + 0.5*sin(time); wave_b = 0.5 + 0.5*cos(time*1.3);
+` },
+  { name: "spiral", milk: `[preset00]
+fDecay=0.95
+zoom=1.0
+rot=0.06
+warp=1.2
+fWaveAlpha=1
+nWaveMode=0
+wave_r=1
+wave_g=0.5
+wave_b=0.2
+per_frame_1=rot = 0.04*sin(time*0.5) + 0.03*treb;
+per_frame_2=wave_g = 0.5 + 0.5*sin(time*2); zoom = 1.01 + 0.02*bass;
+` },
+];
+
+const status = document.getElementById("status");
+const canvas = document.getElementById("c");
+const log = (s) => { status.textContent = s; };
+window.lacteaDemo = { ready: false, frames: 0, error: null };
+
+// Audio: a synthetic 120 bpm kick + saw by default, the microphone on request.
+const RATE = 48000;
+let analyser = null;
+const micBuf = new Float32Array(1024);
+function pcm(t) {
+  const n = 800;                       // ~1/60 s at 48 kHz
+  const out = new Float32Array(2 * n);
+  if (analyser) {
+    analyser.getFloatTimeDomainData(micBuf);
+    for (let i = 0; i < n; i++) out[2 * i] = out[2 * i + 1] = micBuf[Math.min(i, micBuf.length - 1)];
+    return out;
+  }
+  for (let i = 0; i < n; i++) {
+    const s = t + i / RATE, beat = (s * 2) % 1;
+    const kick = Math.sin(2 * Math.PI * 55 * s) * Math.exp(-beat * 8);
+    const saw = (((s * 220) % 1) * 2 - 1) * 0.15;
+    out[2 * i] = out[2 * i + 1] = 0.8 * kick + saw;
+  }
+  return out;
+}
+
+if (!navigator.gpu) {
+  log("WebGPU is not available in this browser (needs a secure context: https:// or localhost).");
+  window.lacteaDemo.error = "no navigator.gpu";
+} else {
+  try {
+    await init();
+    const demo = await Demo.create(canvas);
+    let which = 0;
+    log(demo.load_preset(PRESETS[0].milk, PRESETS[0].name, 0));
+    const next = (seconds) => {
+      which = (which + 1) % PRESETS.length;
+      log(demo.load_preset(PRESETS[which].milk, PRESETS[which].name, seconds));
+    };
+    document.getElementById("soft").onclick = () => next(3);
+    document.getElementById("cut").onclick = () => next(0);
+    document.getElementById("mic").onclick = async () => {
+      const ctx = new AudioContext({ sampleRate: RATE });
+      const src = ctx.createMediaStreamSource(await navigator.mediaDevices.getUserMedia({ audio: true }));
+      analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      src.connect(analyser);
+    };
+    window.lacteaDemo.demo = demo;
+    window.lacteaDemo.next = next;
+    window.lacteaDemo.ready = true;
+    const t0 = performance.now();
+    const tick = () => {
+      const t = (performance.now() - t0) / 1000;
+      try {
+        demo.render(t, pcm(t));
+        window.lacteaDemo.frames = demo.frames();
+      } catch (e) {
+        window.lacteaDemo.error = String(e);
+        log("render error: " + e);
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  } catch (e) {
+    window.lacteaDemo.error = String(e);
+    log("failed: " + e);
+  }
+}
+</script>
+</body>
+</html>

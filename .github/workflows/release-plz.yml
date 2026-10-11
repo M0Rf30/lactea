@@ -1,0 +1,58 @@
+name: release-plz
+
+# On every push to main: open/update a release PR (version bump + CHANGELOG.md) and, once that PR
+# is merged, publish the crates to crates.io and push the tag `vX.Y.Z`. The tag triggers
+# release.yml, which builds the binaries and creates the GitHub release.
+#
+# Secrets: CARGO_REGISTRY_TOKEN (crates.io) and RELEASE_PLZ_TOKEN (a PAT or GitHub App token:
+# tags/PRs created with the default GITHUB_TOKEN do not trigger other workflows). Both jobs stay
+# off until the repository variable RELEASE_PLZ_ENABLED is set to `true` (after adding the secrets).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    if: github.repository == 'M0Rf30/lactea' && vars.RELEASE_PLZ_ENABLED == 'true'
+    concurrency:
+      group: release-plz-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  release-pr:
+    name: release PR
+    runs-on: ubuntu-latest
+    if: github.repository == 'M0Rf30/lactea' && vars.RELEASE_PLZ_ENABLED == 'true'
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

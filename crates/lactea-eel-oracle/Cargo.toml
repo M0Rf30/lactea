@@ -1,0 +1,23 @@
+[package]
+name = "lactea-eel-oracle"
+description = "Test-only: projectm-eval (MIT, C) built via cc, used as differential oracle for lactea-eel."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+lactea-eel = { workspace = true }
+
+[build-dependencies]
+cc = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+libc = "0.2"
+
+[[bench]]
+name = "eval_bench"
+harness = false

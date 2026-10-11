@@ -1,0 +1,126 @@
+name: release
+
+# release-plz (release-plz.yml) bumps versions, updates CHANGELOG.md, publishes the crates to
+# crates.io and pushes the tag `vX.Y.Z`. This workflow only builds binaries for that tag.
+# Pushing a tag `vX.Y.Z` builds the standalone app (`lactea`) and the C library (`lactea-capi`)
+# for Linux x86_64, Windows x86_64 and macOS (arm64 runner), and attaches the archives plus
+# SHA256SUMS to a GitHub release. The tag must equal the workspace version (`Cargo.toml`).
+# `workflow_dispatch` runs the builds only (artifacts, no release) as a dry run; archives are then
+# named `lactea-dev-<sha>-...`. Locally: `actionlint`, and `scripts/release_package.sh` runs the
+# Linux packaging step on an existing `cargo build --release` (see README "Releases").
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # `v1.2.3` on tag pushes; `dev-<sha>` for dry runs (a branch name may contain slashes).
+  VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('dev-{0}', github.sha) }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compare
+        run: |
+          set -euo pipefail
+          crate=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -n1)
+          echo "workspace version: $crate, release name: $VERSION"
+          if [[ "$GITHUB_REF" == refs/tags/v* && "v$crate" != "$VERSION" ]]; then
+            echo "::error::tag $VERSION does not match the workspace version $crate"
+            exit 1
+          fi
+
+  linux:
+    name: linux x86_64
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: system libraries
+        run: >
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          libasound2-dev libpipewire-0.3-dev libspa-0.2-dev clang pkg-config
+      - name: build
+        run: cargo build --locked --release -p lactea-app -p lactea-capi
+      - name: package
+        run: scripts/release_package.sh linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: windows x86_64
+    needs: verify
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # PipeWire is Linux-only; audio capture goes through cpal (WASAPI loopback).
+      - name: build
+        run: |
+          cargo build --locked --release -p lactea-app --no-default-features --features engine
+          cargo build --locked --release -p lactea-capi
+      - name: package
+        run: scripts/release_package.sh windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    name: macos arm64
+    needs: verify
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: |
+          cargo build --locked --release -p lactea-app --no-default-features --features engine
+          cargo build --locked --release -p lactea-capi
+      - name: package
+        run: scripts/release_package.sh macos
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-arm64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -55,7 +55,7 @@ jobs:
         run: cargo build --locked --release -p lactea-app -p lactea-capi
       - name: package
         run: scripts/release_package.sh linux
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: dist/*.tar.gz
@@ -79,7 +79,7 @@ jobs:
           cargo build --locked --release -p lactea-capi
       - name: package
         run: scripts/release_package.sh windows
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
           path: dist/*.zip
@@ -99,7 +99,7 @@ jobs:
           cargo build --locked --release -p lactea-capi
       - name: package
         run: scripts/release_package.sh macos
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: dist/*.tar.gz

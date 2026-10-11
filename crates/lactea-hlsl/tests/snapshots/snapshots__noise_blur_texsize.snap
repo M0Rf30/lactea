@@ -1,0 +1,71 @@
+---
+source: crates/lactea-hlsl/tests/snapshots.rs
+expression: out
+---
+@group(1) @binding(1) var tex_sampler_main: texture_2d<f32>;
+@group(1) @binding(2) var smp_sampler_main: sampler;
+@group(1) @binding(3) var tex_sampler_blur1: texture_2d<f32>;
+@group(1) @binding(4) var smp_sampler_blur1: sampler;
+@group(1) @binding(5) var tex_sampler_blur3: texture_2d<f32>;
+@group(1) @binding(6) var smp_sampler_blur3: sampler;
+@group(1) @binding(7) var tex_sampler_pw_noise_lq: texture_2d<f32>;
+@group(1) @binding(8) var smp_sampler_pw_noise_lq: sampler;
+fn f_PS_0(p__vDiffuse_1: vec4<f32>, p__uv_3: vec2<f32>, p__rad_ang_5: vec2<f32>, p__return_value_7: ptr<function, vec4<f32>>) {
+    var vDiffuse_2: vec4<f32> = p__vDiffuse_1;
+    var uv_4: vec2<f32> = p__uv_3;
+    var rad_ang_6: vec2<f32> = p__rad_ang_5;
+    var ret_8: vec3<f32> = vec3<f32>(0.0f);
+    var n_9: vec2<f32> = (textureSample(tex_sampler_pw_noise_lq, smp_sampler_pw_noise_lq, (((uv_4.xy * mu.c[7].xy) * mu.texsize_noise[0].zw) + mu.rand_frame.xy))).xy;
+    ret_8 = (((((textureSample(tex_sampler_blur1, smp_sampler_blur1, (uv_4.xy + (n_9 * 0.01f)))).xyz * mu.c[5].x) + mu.c[5].y) * 1.5f) + ((((textureSample(tex_sampler_blur3, smp_sampler_blur3, uv_4.xy)).xyz * mu.c[6].x) + mu.c[6].y) * 0.25f));
+    ret_8 = mix(ret_8, (textureSample(tex_sampler_main, smp_sampler_main, uv_4.xy)).xyz, vec3<f32>(saturate((mu.c[4].x - 0.5f))));
+    (*p__return_value_7) = vec4<f32>(ret_8.xyz, vDiffuse_2.w);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    var rv: vec4<f32> = vec4<f32>();
+    f_PS_0(in.diffuse, in.uv.xy, in.rad_ang, &rv);
+    return rv;
+}
+
+// interface: ShaderInterface {
+    textures: [
+        TextureBinding {
+            hlsl_name: "sampler_main",
+            source: Main,
+            filter: Linear,
+            address: Wrap,
+            dim: D2,
+        },
+        TextureBinding {
+            hlsl_name: "sampler_blur1",
+            source: Blur(
+                1,
+            ),
+            filter: Linear,
+            address: Clamp,
+            dim: D2,
+        },
+        TextureBinding {
+            hlsl_name: "sampler_blur3",
+            source: Blur(
+                3,
+            ),
+            filter: Linear,
+            address: Clamp,
+            dim: D2,
+        },
+        TextureBinding {
+            hlsl_name: "sampler_pw_noise_lq",
+            source: Noise(
+                Lq,
+            ),
+            filter: Point,
+            address: Wrap,
+            dim: D2,
+        },
+    ],
+    texsize_slots: [],
+    max_blur_level: 3,
+}
+// texsize_params: []

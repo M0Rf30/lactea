@@ -1,0 +1,14 @@
+# lactea soft-cut pair set: A<TAB>B<TAB>options. Options (space separated): shader=K (force the transition shader 0..5;
+# otherwise it is drawn from the seeded stream), seed=N (default 1), soft=S (soft cut seconds, default 1), switch=N (default 20),
+# frames=N (default 100), start_clean=0|1 (default 0). v1 = no shaders, v2 = MilkDrop 2 shaders.
+# Rendered by scripts/fdtransition.py -> out/ref/transitions/<pair>
+/usr/share/projectM/presets/presets_stock/Aderrasi - Antidote.milk	/usr/share/projectM/presets/presets_milkdrop/Geiss - Hyperion.milk	shader=0	# v1 -> v1, circle
+/usr/share/projectM/presets/presets_milkdrop/Geiss - Hyperion.milk	/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Blur Mix 3.milk	seed=1	# v1 -> v2, seed-drawn (plasma)
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Fog Zone.milk	/usr/share/projectM/presets/presets_milkdrop/Che - Burning Hus.milk	shader=2	# v2 -> v1, simple blend
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Blur Mix 3.milk	/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Tokamak Plus 2.milk	shader=3	# v2 -> v2, sweep
+/usr/share/projectM/presets/presets_bltc201/Aderrasi - Bow To Gravity.milk	/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Iris Storm.milk	shader=4	# v1 (borders) -> v2, warp
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Rose 5 Crossfire Beats.milk	/usr/share/projectM/presets/presets_milkdrop/nil - Can't Stop the Blithering.milk	shader=5	# v2 -> v1, zoom blur
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Mandelbrot 9c2.milk	/usr/share/projectM/presets/presets_milkdrop/Aderrasi - Elastoid.milk	seed=2	# v2 -> v1, seed-drawn (zoom blur)
+/usr/share/projectM/presets/presets_bltc201/Che - Escape.milk	/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Fog Zone.milk	seed=3	# v1 (motion vectors) -> v2, seed-drawn (warp)
+/usr/share/projectM/presets/presets_bltc201/EoS + Phat - CAT Scan.milk	/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Diffuser (Gold Mix).milk	seed=5	# v1 (shapes/waves) -> v2, seed-drawn (sweep)
+/usr/share/projectM/presets/presets_milkdrop_200/Geiss - Skin Dots 3.milk	/usr/share/projectM/presets/presets_stock/Aderrasi - Antidote.milk	seed=8 soft=3 switch=10 frames=200	# v2 -> v1, seed-drawn (simple blend), projectM's default 3 s

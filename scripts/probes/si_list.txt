@@ -1,0 +1,9 @@
+scripts/probes/si_filter.milk
+scripts/probes/si_prefix.milk
+scripts/probes/si_name.milk
+scripts/probes/si_blend.milk
+scripts/probes/si_rot.milk
+scripts/probes/si_nearest.milk
+scripts/probes/si_misc.milk
+scripts/probes/si_mix.milk
+scripts/probes/si_blur.milk

@@ -1,0 +1,47 @@
+### orig
+float a,b,c;
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+    float3 base = GetBlur3(uv) + GetBlur2(uv) * GetBlur1(uv) + sin(time+(tex2D(sampler_main, uv))) + 0.04;
+a =base.x/4;b = base.y/4; c = base.z/4;
+c = c + b - c*b;
+a = a + c - a*c;
+base = 1.4*a;
+ret = base*(1-base)*(1-base)*2*float3(2,1.4,0) + pow(base,2)*float3(-0.3,0.2,0.6);
+}
+### b1
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+ret = GetBlur1(uv);
+}
+### b2
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+ret = GetBlur2(uv);
+}
+### b3
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+ret = GetBlur3(uv);
+}
+### mn
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+ret = tex2D(sampler_main, uv);
+}
+### uvx
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### sint
+shader_body
+{
+ret = 0.5 + 0.5*sin(time + float3(0,1,2));
+}

@@ -1,0 +1,7 @@
+scripts/probes/c_base.milk
+scripts/probes/c_gamma2.milk
+scripts/probes/c_gamma1_5.milk
+scripts/probes/c_echo_o1.milk
+scripts/probes/c_echo_g2.milk
+scripts/probes/c_all4.milk
+scripts/probes/c_darken.milk

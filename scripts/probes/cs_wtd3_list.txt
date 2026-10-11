@@ -1,0 +1,6 @@
+scripts/probes/cs_wtd3_a.milk
+scripts/probes/cs_wtd3_b.milk
+scripts/probes/cs_wtd3_c.milk
+scripts/probes/cs_wtd3_d.milk
+scripts/probes/cs_wtd3_e.milk
+scripts/probes/cs_wtd3_f.milk

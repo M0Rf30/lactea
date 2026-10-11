@@ -1,0 +1,10 @@
+/target
+/target-*
+/out
+/third_party/projectm
+/third_party/projectm-eval
+/oracle/build
+/fixtures/audio/*.wav
+*.mp4
+__pycache__/
+/lactea-debug-*.png

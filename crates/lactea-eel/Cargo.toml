@@ -1,0 +1,15 @@
+[package]
+name = "lactea-eel"
+description = "ns-eel2 / projectm-eval compatible expression language (MilkDrop per-frame/per-vertex code)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["milkdrop", "expression", "ns-eel", "projectm", "interpreter"]
+categories = ["compilers", "parser-implementations"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[dependencies]

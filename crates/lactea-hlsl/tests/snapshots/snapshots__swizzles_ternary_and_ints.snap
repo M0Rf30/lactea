@@ -1,0 +1,40 @@
+---
+source: crates/lactea-hlsl/tests/snapshots.rs
+expression: out
+---
+var<private> g_qg: vec4<f32>;
+fn f_PS_0(p__vDiffuse_1: vec4<f32>, p__uv_3: vec4<f32>, p__rad_ang_5: vec2<f32>, p__return_value_7: ptr<function, vec4<f32>>) {
+    var vDiffuse_2: vec4<f32> = p__vDiffuse_1;
+    var uv_4: vec4<f32> = p__uv_3;
+    var rad_ang_6: vec2<f32> = p__rad_ang_5;
+    var ret_8: vec3<f32> = vec3<f32>(0.0f);
+    var a_9: vec3<f32> = vec3<f32>(uv_4.xy, 0.5f);
+    let sw_10 = (a_9.xz * 0.5f);
+    a_9.z = sw_10.x;
+    a_9.x = sw_10.y;
+    a_9.y = (a_9.y + 0.25f);
+    var n_11: f32 = trunc((mu.q[0].z * 4.0f));
+    var m_12: f32 = (trunc(n_11 / 3.0f) + (n_11 % 2.0f));
+    var b_13: bool = (uv_4.xy.x > 0.5f);
+    ret_8 = select((a_9.zyx * m_12), a_9, b_13);
+    ret_8 = (ret_8 + (vec3<f32>((a_9 > vec3<f32>(0.4f))) * 0.1f));
+    uv_4.x = a_9.x;
+    ret_8 = (ret_8 * g_qg.z);
+    g_qg.z = 0.5f;
+    (*p__return_value_7) = vec4<f32>(ret_8.xyz, vDiffuse_2.w);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    g_qg = mu.q[6];
+    var rv: vec4<f32> = vec4<f32>();
+    f_PS_0(in.diffuse, in.uv, in.rad_ang, &rv);
+    return rv;
+}
+
+// interface: ShaderInterface {
+    textures: [],
+    texsize_slots: [],
+    max_blur_level: 0,
+}
+// texsize_params: []

@@ -1,0 +1,31 @@
+[package]
+name = "lactea-hlsl"
+description = "MilkDrop HLSL (ps_2/ps_3 dialect + include.fx) to WGSL translator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["milkdrop", "hlsl", "wgsl", "shader", "visualizer"]
+categories = ["graphics", "compilers"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*", "THIRD_PARTY_NOTICES.md"]
+
+[features]
+# Internal: exposes the glslang reference-text builder (`harness`) used by this crate's differential tests.
+# Not part of the supported API.
+testing = []
+
+[dependencies]
+lactea-abi.workspace = true
+
+[dev-dependencies]
+lactea-hlsl = { path = ".", features = ["testing"] }
+naga = { workspace = true, features = ["wgsl-in", "spv-in", "wgsl-out"] }
+wgpu = { workspace = true, features = ["naga-ir"] }
+pollster.workspace = true
+bytemuck.workspace = true
+serde_json.workspace = true
+insta.workspace = true
+image.workspace = true

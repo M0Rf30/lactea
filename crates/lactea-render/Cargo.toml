@@ -1,0 +1,32 @@
+[package]
+name = "lactea-render"
+description = "wgpu backend reproducing the MilkDrop 2 frame pipeline; host-provided device, renders into any texture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["milkdrop", "projectm", "wgpu", "visualizer", "renderer"]
+categories = ["graphics", "rendering", "multimedia"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[features]
+# Hooks for comparing against a reference render: image injection, extra read-backs. Off by default.
+diagnostics = []
+
+[dependencies]
+lactea-abi = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+# Used only to block on `Device::pop_error_scope` when validating user shaders (native targets).
+pollster = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true }
+# the integration tests inject images and read stages back
+lactea-render = { path = ".", features = ["diagnostics"] }
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]

@@ -1,0 +1,44 @@
+### a1
+shader_body
+{
+    ret = float3(asin(uv.x*3)*0.5, asin(uv.y*3)*0.5, 0.25);
+}
+### a2
+shader_body
+{
+    float nn = asin(3*uv.x);
+    ret = nn==nn ? float3(1,0,0) : float3(0,1,0);
+}
+### a3
+shader_body
+{
+    float nn = asin(3*uv.x);
+    ret = tex2D(sampler_main, uv + (nn-nn));
+}
+### a4
+shader_body
+{
+    float nn = asin(3*uv.x);
+    ret = tex2D(sampler_main, float2(nn, uv.y));
+}
+### a5
+shader_body
+{
+    ret = tex2D(sampler_main, float2(uv.x + 5.5 - 5.5, uv.y));
+}
+### a6
+shader_body
+{
+    ret = float3(asin(uv.x*3)*0.5+0.5, asin(-uv.x*3)*0.5+0.5, asin(uv.x*3-1.0)*0.5+0.5);
+}
+### orig
+shader_body
+{
+    uv = 0.05 + 0.9*uv;
+    ret = GetBlur1(uv);
+    uv += -.05*asin(3*ret.yx)+.05*cos(2*ret.zz)-0.025;
+    ret = tex2D(sampler_main,uv);
+    ret += GetBlur1(uv);
+    ret = saturate(ret);
+    ret *= ret;
+}

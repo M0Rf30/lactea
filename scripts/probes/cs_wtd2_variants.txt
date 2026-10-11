@@ -1,0 +1,48 @@
+### v1
+shader_body
+{
+uv = 0.6 + (uv-0.5)*0.5 - float2(0.0,0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### v2
+shader_body
+{
+float2 q = float2((bass*0.01),0.05);
+ret = float3(q.x*10, q.y*10, 0);
+}
+### v3
+shader_body
+{
+uv = 0.6 + (uv-0.5)*0.5 - float2(bass*0.01, 0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### v4
+shader_body
+{
+uv = uv - float2(0.1, 0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### v5
+shader_body
+{
+float2 w = uv - float2(0.1, 0.05);
+ret = float3(w.x, w.y, 0);
+}
+### v6
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5);
+ret = float3(uv.x, uv.y, 0);
+}
+### v7
+shader_body
+{
+float2 w = (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5);
+ret = float3(w.x+0.5, w.y+0.5, 0);
+}
+### v8
+shader_body
+{
+float2 w = (float2(0.1,-0.9)*cos(time)*0.1+0.5);
+ret = float3(w.x, w.y, 0);
+}

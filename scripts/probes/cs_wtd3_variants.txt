@@ -1,0 +1,36 @@
+### a
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2(0.0,0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### b
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2(bass*0.01,0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### c
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2((bass*0.01),0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### d
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2(0.01,0.05);
+ret = float3(uv.x, uv.y, 0);
+}
+### e
+shader_body
+{
+float2 q = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2(0.01,0.05);
+ret = float3(q.x, q.y, 0);
+}
+### f
+shader_body
+{
+uv = 0.6 + (uv-0.5)*(float2(0.1,-0.9)*cos(time)*0.1+0.5) - float2(0.01,0.05);
+ret = GetPixel(uv);
+}

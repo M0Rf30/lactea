@@ -1,0 +1,19 @@
+[package]
+name = "lactea-audio"
+description = "MilkDrop 2 audio analysis: FFT, bass/mid/treb, attenuated values, waveform/spectrum buffers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["milkdrop", "audio", "fft", "visualizer", "spectrum"]
+categories = ["multimedia::audio"]
+include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+
+[dependencies]
+
+[dev-dependencies]
+serde_json = { workspace = true }
+lactea-abi = { workspace = true }

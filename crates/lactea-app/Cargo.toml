@@ -1,0 +1,46 @@
+[package]
+name = "lactea-app"
+description = "Standalone lactea visualizer: window, audio capture/playback, preset browsing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "lactea"
+path = "src/main.rs"
+
+[features]
+default = ["engine", "pipewire"]
+# MilkDrop engine (crate `lactea`) as the default visualizer. Without it only the
+# built-in oscilloscope is available.
+engine = ["dep:lactea"]
+# Native PipeWire capture of the default sink monitor (Linux only; needs libpipewire-0.3
+# headers + clang at build time). Without it (or on other OSes) capture goes through cpal.
+pipewire = ["dep:pipewire"]
+
+[dependencies]
+lactea-abi = { workspace = true }
+lactea-jpeg = { workspace = true }
+lactea = { workspace = true, optional = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true }
+pollster = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+image = { workspace = true, features = ["jpeg", "tga", "bmp"] }
+parking_lot = "0.12"
+
+winit = "0.30"
+cpal = "0.18"
+rtrb = "0.4"
+# M0Rf30's Symphonia fork, pinned to the same revision as rmpd.
+symphonia = { git = "https://github.com/M0Rf30/Symphonia", rev = "1c2f6673688c197bffeaad47a8c4b77b8764309f", features = ["all"] }
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+fastrand = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.10", optional = true }

@@ -1021,6 +1021,8 @@ pub(super) fn build_blend_frame(
     let (uv, vert_alpha) = blend_mesh(&uv_new, &uv_old, &m.pattern, m.progress);
 
     let mut fi = frame_head(new, cx, &base_new, Vec::new(), uv, anim, false, Some(snap));
+    // MilkDrop 3 (`DisableBox`): no ob / ib borders while a blend is running
+    fi.borders.hidden |= cx.cfg.md3_disable_box && cx.cfg.compat.rules().md3_border_gate;
 
     // ShowToUser_NoShaders: the video echo flips its orientation / fades across the blend
     if base_new.video_echo_alpha > 0.01

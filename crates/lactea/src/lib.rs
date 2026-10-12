@@ -85,6 +85,9 @@ pub struct EngineConfig {
     /// (projectM's default) warps the new preset's first frame from the previous active preset's
     /// finished image. The very first preset always starts black.
     pub start_clean: bool,
+    /// MilkDrop 3's `DisableBox` setting (default on): under [`Compat::MilkDrop3`] the outer / inner borders
+    /// (`ob_*` / `ib_*`) are not drawn while a preset blend is running. Ignored by the other compat modes.
+    pub md3_disable_box: bool,
 }
 
 impl Default for EngineConfig {
@@ -101,6 +104,7 @@ impl Default for EngineConfig {
             fps: 60,
             preset_duration: 1e9,
             start_clean: false,
+            md3_disable_box: true,
         }
     }
 }
@@ -160,14 +164,14 @@ pub enum EngineError {
     /// The GPU backend rejected the preset's resources.
     #[error("render error: {0}")]
     Render(#[from] lactea_render::RenderError),
-}
-
-impl EngineError {
-    pub(crate) fn compile(what: &str, error: lactea_eel::CompileError) -> Self {
     /// An operation on the loaded preset (e.g. [`Engine::import_custom_wave`]) was called with
     /// no preset loaded.
     #[error("no preset loaded")]
     NoPreset,
+}
+
+impl EngineError {
+    pub(crate) fn compile(what: &str, error: lactea_eel::CompileError) -> Self {
         EngineError::Compile {
             what: what.to_string(),
             error,

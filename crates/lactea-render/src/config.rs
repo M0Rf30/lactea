@@ -192,6 +192,16 @@ pub struct CompatRules {
     pub custom_shape_image: bool,
     /// The no-shader composite pass samples the feedback image with the `Wrap` address mode; otherwise `Clamp`.
     pub noshader_comp_wrap: bool,
+    /// The main waveform follows MilkDrop 3 (`wavegen_md3::main_wave_geometry_md3_raw`): 17 modes `0..=16` selected by
+    /// the C remainder `(int)wave_mode % 17` (a negative result draws 480 zero vertices), one channel per formula.
+    pub md3_wave_modes: bool,
+    /// Largest `sides` a custom shape is drawn with (smallest is 3): projectM and MilkDrop 2 100, MilkDrop 3 500.
+    pub max_shape_sides: i32,
+    /// MilkDrop 3 adds the four warp `sin` / `cos` terms to the warp UV only when `|warp| > 0.0001`.
+    pub md3_warp_skip_tiny: bool,
+    /// MilkDrop 3 hides the outer / inner borders while a preset blend is running if the host's `DisableBox`
+    /// setting is on (`EngineConfig::md3_disable_box`).
+    pub md3_border_gate: bool,
 }
 
 impl Compat {
@@ -243,6 +253,10 @@ impl Compat {
                 warp_anim_projectm: true,
                 custom_shape_image: true,
                 noshader_comp_wrap: false,
+                md3_wave_modes: false,
+                max_shape_sides: 100,
+                md3_warp_skip_tiny: false,
+                md3_border_gate: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -289,9 +303,17 @@ impl Compat {
                 warp_anim_projectm: false,
                 custom_shape_image: false,
                 noshader_comp_wrap: true,
+                md3_wave_modes: false,
+                max_shape_sides: 100,
+                md3_warp_skip_tiny: false,
+                md3_border_gate: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
+                md3_wave_modes: true,
+                max_shape_sides: 500,
+                md3_warp_skip_tiny: true,
+                md3_border_gate: true,
                 ..Compat::MilkDrop2.rules()
             },
         }

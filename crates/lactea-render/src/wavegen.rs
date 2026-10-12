@@ -53,13 +53,33 @@ pub fn prepare_main_waveform(mw: &MainWave) -> (Vec<f32>, Vec<f32>) {
     (process(&mw.wave[0]), process(&mw.wave[1]))
 }
 
-fn volume_alpha_mod(mw: &MainWave, imm_rel: [f32; 3]) -> f32 {
+pub(crate) fn volume_alpha_mod(mw: &MainWave, imm_rel: [f32; 3]) -> f32 {
     ((imm_rel[0] + imm_rel[1] + imm_rel[2]) * 0.333 - mw.mod_alpha_start)
         / (mw.mod_alpha_end - mw.mod_alpha_start)
 }
 
+/// `DrawWave`'s colour: `wave_r/g/b` clamped to 0..1, then "maximize colour" (`wave_brighten`) divides by the largest
+/// component when it exceeds 0.01.
+pub(crate) fn wave_rgb(mw: &MainWave) -> [f32; 3] {
+    let mut c = [
+        mw.rgba[0].clamp(0.0, 1.0),
+        mw.rgba[1].clamp(0.0, 1.0),
+        mw.rgba[2].clamp(0.0, 1.0),
+    ];
+    if mw.brighten {
+        let amount = 1.0f32;
+        let max = c[0].max(c[1]).max(c[2]);
+        if max > 0.01 {
+            for x in &mut c {
+                *x = *x / max * amount + *x * (1.0 - amount);
+            }
+        }
+    }
+    c
+}
+
 /// The 2-point line used by wave modes 6, 7, 8 (clipped against +-1.1).
-fn line_edges(pos_x: f32, ang: f32) -> ([f32; 2], [f32; 2]) {
+pub(crate) fn line_edges(pos_x: f32, ang: f32) -> ([f32; 2], [f32; 2]) {
     let dx = ang.cos();
     let dy = ang.sin();
     let mut ex = [
@@ -157,24 +177,7 @@ pub fn main_wave_geometry_raw(
     let fl = wl;
     let fr = wr;
 
-    let mut cr = mw.rgba[0].clamp(0.0, 1.0);
-    let mut cg = mw.rgba[1].clamp(0.0, 1.0);
-    let mut cb = mw.rgba[2].clamp(0.0, 1.0);
-    if mw.brighten {
-        let amount = 1.0f32;
-        let mut max = cr;
-        if max < cg {
-            max = cg;
-        }
-        if max < cb {
-            max = cb;
-        }
-        if max > 0.01 {
-            cr = cr / max * amount + cr * (1.0 - amount);
-            cg = cg / max * amount + cg * (1.0 - amount);
-            cb = cb / max * amount + cb * (1.0 - amount);
-        }
-    }
+    let [cr, cg, cb] = wave_rgb(mw);
 
     let pos_x = mw.x * 2.0 - 1.0;
     let pos_y = mw.y * 2.0 - 1.0;

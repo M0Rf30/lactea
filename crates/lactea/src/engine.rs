@@ -1390,11 +1390,14 @@ fn eval_per_frame(
 /// The warp animation terms of the frame (`fWarpTime`, `fWarpScaleInv`, the four `f[]`).
 fn warp_anim(cx: &FrameCtx, base: &BaseValues) -> WarpAnim {
     let time = cx.clock.time as f32;
-    if cx.cfg.compat.rules().warp_anim_projectm {
+    let rules = cx.cfg.compat.rules();
+    let mut anim = if rules.warp_anim_projectm {
         WarpAnim::projectm(time, base.warp_anim_speed, base.warp_scale)
     } else {
         WarpAnim::new(time, base.warp_anim_speed, base.warp_scale)
-    }
+    };
+    anim.skip_tiny_warp = rules.md3_warp_skip_tiny;
+    anim
 }
 
 /// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values) and
@@ -1566,7 +1569,12 @@ fn frame_head(
     } else {
         base.wave_mode
     };
-    mw.mode = mode_src.rem_euclid(mode_mod);
+    mw.mode = if cfg.compat.rules().md3_wave_modes {
+        // the C remainder of the raw double, not `rem_euclid`: a negative value is not a mode
+        lactea_render::wavegen_md3::md3_wave_mode(pf.ctx.get(vars.wave_mode))
+    } else {
+        mode_src.rem_euclid(mode_mod)
+    };
     mw.rgba = [
         f32v(vars.wave_r),
         f32v(vars.wave_g),

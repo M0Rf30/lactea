@@ -180,7 +180,7 @@ pub(crate) fn sprite_quad(p: &QuadParams) -> [SpriteVertex; 4] {
     let (rx, ry) = (p.repeat_x, p.repeat_y);
     let uv = |k: usize| {
         let (du, dv) = (
-            if k % 2 == 0 { -0.5 } else { 0.5 },
+            if k.is_multiple_of(2) { -0.5 } else { 0.5 },
             if k < 2 { -0.5 } else { 0.5 },
         );
         [du * rx + 0.5, dv * ry + 0.5]
@@ -195,8 +195,8 @@ pub(crate) fn sprite_quad(p: &QuadParams) -> [SpriteVertex; 4] {
 /// (images without alpha count as opaque) becomes transparent black, before the mip chain is built.
 pub(crate) fn apply_color_key(rgba8: &mut [u8], key: u32) {
     let k = [(key >> 16) as u8, (key >> 8) as u8, key as u8, 255];
-    for px in rgba8.chunks_exact_mut(4) {
-        if px == k {
+    for px in rgba8.as_chunks_mut::<4>().0 {
+        if *px == k {
             px.fill(0);
         }
     }

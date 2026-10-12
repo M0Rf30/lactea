@@ -32,6 +32,10 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
 * `TextureProvider { fn load(&mut self, name) -> Option<Image{width,height,rgba8}>; fn random_pool(&self) -> Vec<String> }`.
   Names are lowercase, without `sampler_`/`fw_`-style prefixes and file extension. The pool must be
   sorted by name (it is part of the determinism contract). The engine never touches the filesystem.
+  `Compat::MilkDrop3` adds two provided methods: `load_md3_texture(name) -> Option<Media>` (shader textures, MD3 folder
+  order, GIFs) and `load_sprite(path) -> Option<Media>` (a preset sprite's path relative to the MD3 data root);
+  `Media` is a still `Image` or an `AnimatedImage` (full-canvas frames + delays, `lactea::decode_gif`). Hosts index their
+  files with `lactea::MediaFiles` (path arithmetic and search order only, no I/O). See `md3.md`, Sprites.
 * `PresetReport`: `warp`/`comp` `ShaderOutcome {NotUsed, User, Default, Fallback}`, `warnings`,
   `shader_fallbacks`, `unresolved_textures`, `resolved_textures`.
 * `EngineError {Parse, Compile{what,error}, Render}`. On error the previous preset stays active.

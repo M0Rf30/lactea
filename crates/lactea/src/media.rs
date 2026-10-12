@@ -251,8 +251,11 @@ impl<F: Clone> MediaFiles<F> {
 mod tests {
     use super::*;
 
+    /// `(left, top, width, height, indices, disposal, delay, transparent index)` of a test frame.
+    type TestFrame = (u16, u16, u16, u16, Vec<u8>, u8, u16, Option<u8>);
+
     /// A tiny GIF89a writer for the tests: global palette red, green, blue, white.
-    fn gif_bytes(frames: &[(u16, u16, u16, u16, Vec<u8>, u8, u16, Option<u8>)]) -> Vec<u8> {
+    fn gif_bytes(frames: &[TestFrame]) -> Vec<u8> {
         // (left, top, width, height, indices, disposal, delay, transparent)
         let (w, h) = (4u16, 4u16);
         let mut out = Vec::new();
@@ -260,15 +263,17 @@ mod tests {
             let palette = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
             let mut enc = gif::Encoder::new(&mut out, w, h, &palette).unwrap();
             for (l, t, fw, fh, idx, disp, delay, trans) in frames {
-                let mut f = gif::Frame::default();
-                f.left = *l;
-                f.top = *t;
-                f.width = *fw;
-                f.height = *fh;
-                f.buffer = std::borrow::Cow::Owned(idx.clone());
-                f.dispose = gif::DisposalMethod::from_u8(*disp).unwrap();
-                f.delay = *delay;
-                f.transparent = *trans;
+                let f = gif::Frame {
+                    left: *l,
+                    top: *t,
+                    width: *fw,
+                    height: *fh,
+                    buffer: std::borrow::Cow::Owned(idx.clone()),
+                    dispose: gif::DisposalMethod::from_u8(*disp).unwrap(),
+                    delay: *delay,
+                    transparent: *trans,
+                    ..Default::default()
+                };
                 enc.write_frame(&f).unwrap();
             }
         }

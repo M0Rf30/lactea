@@ -74,3 +74,12 @@ Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels
 | Item | projectM (default) | MilkDrop 2 / MilkDrop 3 |
 |---|---|---|
 | Joining of code lines (`md2_code_join`; init, per-frame, per-pixel, wave init / per-frame / per-point, shape init / per-frame) | lines joined with `\n`: an identifier split over two lines (`per_frame_22=k1 = is_` / `per_frame_23=beat*...;`) is two tokens and fails to compile | `CState::StripLinefeedCharsAndComments` (`state.cpp:1593`): the `\x01` separators are deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so the halves glue together (`k1 = is_beat*...;`). A block that is only blanks or strips to nothing compiles no code (`buf[0] == 0`). Shader text is not touched: it keeps its lines (`code_to_source`), `#define`s need them |
+
+## MilkDrop 3 (`Compat::MilkDrop3`, see [`md3.md`](md3.md))
+
+| Item | projectM / MilkDrop 2 | MilkDrop 3 |
+|---|---|---|
+| Preset sprite (`md3_preset_sprites`): `[SPRITE1_BEGIN]` block, one image, 11 blend modes, layers 0..4 | the block is ignored (projectM, MD2: no preset sprites) | the sprite is loaded with the preset and drawn every frame ([`md3.md`](md3.md#sprites)) |
+| Sprite burn in layers 1..4 (`md3_sprite_burn_twice`) | n/a | a burning sprite is drawn twice into the feedback image: `SpriteBurn=1` (every pack preset) makes additive / alpha sprites twice as strong as `SpriteBurn=0`. Measured against MD3 under Wine (spec open question 1) |
+| Shader textures from GIF / `sprites` / `gifs` (`md3_gif_textures`) | `sampler_<name>` searched in the texture folders with `jpg jpeg dds png tga bmp dib`; a still image | also `.jfif` / `.gif`, folders `textures`, `sprites`, `gifs`; an animated GIF shows frame `fmod(time, total)` of its delays |
+| Animated image provider API | `TextureProvider::load` returns one still image | `load_md3_texture` / `load_sprite` may return `Media::Animated` (frames + delays); hosts decode GIFs with `lactea::decode_gif` (GIF89a disposal) |

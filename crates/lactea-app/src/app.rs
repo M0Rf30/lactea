@@ -192,6 +192,41 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "engine")]
+fn parse_shader_overrides(
+    args: &Args,
+) -> Result<std::collections::HashMap<u64, lactea::ShaderOverride>, String> {
+    let mut out = std::collections::HashMap::<u64, lactea::ShaderOverride>::new();
+    for (spec, is_warp) in args
+        .shader_override_warp
+        .iter()
+        .map(|s| (s, true))
+        .chain(args.shader_override_comp.iter().map(|s| (s, false)))
+    {
+        let flag = if is_warp {
+            "--shader-override-warp"
+        } else {
+            "--shader-override-comp"
+        };
+        let Some((handle, file)) = spec.split_once('=') else {
+            return Err(format!("{flag}: expected HANDLE=FILE, got {spec:?}"));
+        };
+        let handle: u64 = handle
+            .trim()
+            .parse()
+            .map_err(|e| format!("{flag}: bad handle {handle:?}: {e}"))?;
+        let text =
+            std::fs::read_to_string(file).map_err(|e| format!("{flag}: reading {file}: {e}"))?;
+        let entry = out.entry(handle).or_default();
+        if is_warp {
+            entry.warp = Some(text);
+        } else {
+            entry.comp = Some(text);
+        }
+    }
+    Ok(out)
+}
+
 impl App {
     fn new(
         args: Args,
@@ -328,6 +363,7 @@ impl App {
                         compat: self.args.compat,
                         mesh: self.args.mesh,
                         auto_hard_cut_mode: self.args.auto_hard_cut,
+                        shader_overrides: parse_shader_overrides(&self.args)?,
                     },
                 )
                 .map(|v| Box::new(v) as Box<dyn Visualizer>)

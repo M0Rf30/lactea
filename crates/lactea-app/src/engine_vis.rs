@@ -21,6 +21,7 @@ pub struct EngineOptions {
     pub mesh: (u32, u32),
     /// Initial MD3 `AutoHardCutMode` (0..=7; acts only with `--compat milkdrop3`).
     pub auto_hard_cut_mode: u8,
+    pub shader_overrides: std::collections::HashMap<u64, lactea::ShaderOverride>,
 }
 
 /// The directories' textures for the engine: plain lookups through [`FsTextureProvider`], MilkDrop 3's sprites and
@@ -135,6 +136,7 @@ impl EngineVisualizer {
                 1e9
             },
             auto_hard_cut_mode: opts.auto_hard_cut_mode,
+            shader_overrides: opts.shader_overrides.clone(),
             ..Default::default()
         };
         let mut engine = Engine::new(device, queue, cfg);

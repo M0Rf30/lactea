@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `lactea`: the MilkDrop 3 `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch shader uniforms (and the
+  `MXD3QX1..16` / `MXD3QS1..12` prelude macros) are computed per frame and uploaded instead of being undeclared.
+- `lactea` app: `--shader-override-warp` / `--shader-override-comp HANDLE=FILE`, as in `fdrender`.
+
 ## [0.1.1] - 2026-10-12
 
 ### Fixed

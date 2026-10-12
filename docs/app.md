@@ -102,6 +102,8 @@ host switches this on or off after each successful load, following the preset's 
 --fullscreen
 --visualizer engine|scope   --seed N   --compat auto|projectm|milkdrop2|milkdrop3   --mesh WxH (both even)
 --texture-dir DIR      (repeatable; searched before the defaults)
+--shader-override-warp HANDLE=FILE / --shader-override-comp HANDLE=FILE
+                       (repeatable) run your own HLSL for a MilkDrop 3 MD31 (warp) / MD32 (composite) shader handle
 --capture-device NAME  cpal input, or (Windows/macOS) output captured as loopback (name, substring or id)
 --audio-backend auto|pipewire|cpal|cpal-loopback     --pipewire-target NODE
 --list-devices         cpal inputs/outputs + PipeWire sinks (* = default, [loopback] = capturable output), then exit

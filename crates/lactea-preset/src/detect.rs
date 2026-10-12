@@ -33,8 +33,8 @@ pub enum Evidence {
     /// A `.milk2` double preset (the four `[PRESET1_BEGIN]` .. `[PRESET2_END]` markers,
     /// [`milk2::is_double_preset`]).
     Milk2Container,
-    /// A key of MilkDrop 3's locked shaders (`MD31=` / `MD32=`).
-    LockedShaderKey(&'static str),
+    /// A key of MilkDrop 3's encrypted shaders (`MD31=` / `MD32=`).
+    EncryptedShaderKey(&'static str),
     /// A `[SPRITE1_BEGIN]` block or a non-empty `SpriteName=`.
     SpriteBlock,
     /// `MILKDROP_PRESET_VERSION=300`, the version MilkDrop 3 writes for presets with a sprite.
@@ -67,7 +67,7 @@ impl fmt::Display for Evidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Evidence::Milk2Container => f.write_str(".milk2 double preset"),
-            Evidence::LockedShaderKey(k) => write!(f, "locked shader key {k}"),
+            Evidence::EncryptedShaderKey(k) => write!(f, "encrypted shader key {k}"),
             Evidence::SpriteBlock => f.write_str("sprite block"),
             Evidence::PresetVersion(v) => write!(f, "MILKDROP_PRESET_VERSION={v}"),
             Evidence::ShapeSides { shape, sides } => {
@@ -116,17 +116,17 @@ pub fn detect_compat(bytes: &[u8]) -> DetectedCompat {
     }
 }
 
-/// Raw-text evidence (independent of how the importer reads the keys): locked shader keys and the sprite header.
+/// Raw-text evidence (independent of how the importer reads the keys): encrypted shader keys and the sprite header.
 fn scan_lines(bytes: &[u8], out: &mut Vec<Evidence>) {
     let (mut md31, mut md32, mut sprite) = (false, false, false);
     for line in bytes.split(|&b| b == b'\n') {
         let line = line.trim_ascii();
         if line.starts_with(b"MD31=") && !md31 {
             md31 = true;
-            out.push(Evidence::LockedShaderKey("MD31"));
+            out.push(Evidence::EncryptedShaderKey("MD31"));
         } else if line.starts_with(b"MD32=") && !md32 {
             md32 = true;
-            out.push(Evidence::LockedShaderKey("MD32"));
+            out.push(Evidence::EncryptedShaderKey("MD32"));
         } else if line == b"[SPRITE1_BEGIN]" && !sprite {
             sprite = true;
             out.push(Evidence::SpriteBlock);
@@ -418,13 +418,13 @@ mod tests {
     }
 
     #[test]
-    fn locked_shader_keys() {
+    fn encrypted_shader_keys() {
         let ev = evidence("MD31=abc\nMD32=def\n[preset00]\nzoom=1\n");
         assert_eq!(
             ev,
             [
-                Evidence::LockedShaderKey("MD31"),
-                Evidence::LockedShaderKey("MD32")
+                Evidence::EncryptedShaderKey("MD31"),
+                Evidence::EncryptedShaderKey("MD32")
             ]
         );
         // other keys that merely start alike

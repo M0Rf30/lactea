@@ -15,7 +15,7 @@ Select it with `--compat md3` (`fdrender`), `--compat milkdrop3` (`lactea` app),
 
 ## Provenance
 
-MD3 is closed source from 3.1 on: it descends from the MilkDrop 2 / BeatDrop line (the `vis_milk2` copy in
+MD3's source is unpublished from 3.1 on: it descends from the MilkDrop 2 / BeatDrop line (the `vis_milk2` copy in
 `third_party/md2` is the reference) and only its first alpha, 3.0.A, was ever published (see "Version history").
 Its behaviour was recovered by binary analysis, only to read and render MD3 preset files
 (interoperability), and written down as behavioural specs. The work is clean-room:
@@ -26,10 +26,10 @@ Its behaviour was recovered by binary analysis, only to read and render MD3 pres
   here;
 - no MD3 code, binaries, presets or data are in the repository; tests use small hand-written fixtures.
 
-MD3's paid, locked shaders (the `MD31` / `MD32` keys) are not shipped: lactea cannot and does not decrypt them.
+MD3's encrypted shaders (the `MD31` / `MD32` keys) are not shipped: lactea cannot and does not decrypt them.
 A preset that carries one still loads and runs the placeholder shader that stands in for it in the file, unless
-the host registers its own HLSL for the handle (`EngineConfig::shader_overrides`; library and `fdrender` only,
-no app or C API exposure).
+the host registers its own HLSL for the handle (`EngineConfig::shader_overrides`; library, `fdrender` and the app,
+no C API exposure).
 
 ## Resources
 
@@ -46,7 +46,7 @@ no app or C API exposure).
 | Sprites (`[SPRITE1_BEGIN]` blocks, layers 0-4, 11 blend modes, burn, GIF sprites and GIF shader textures) | Supported, see [Sprites](#sprites); no `sprites.ini`, user sprite or webcam layers |
 | Auto hard cuts (`AutoHardCutMode` 1..7) and the MD3 display time | Supported: "Auto hard cuts"; F8 / `--auto-hard-cut` / C API |
 | `.wave` / `.shape` files (single custom wave / shape import and export), MD3 `.milk` writer incl. sprite block | Supported (library / engine API; no app UI) |
-| Locked shaders (`MD31` / `MD32`) | The placeholder shader in the file runs unless the host registers its own HLSL for the handle (library + `fdrender`; no app or C API) |
+| Encrypted shaders (`MD31` / `MD32`) | The placeholder shader in the file runs unless the host registers its own HLSL for the handle (library, `fdrender`, app; no C API) |
 
 MD3 pack (`~/M0Rf30/md3-re`, local smoke runs only; `fdrender --compat md3 --texture-dir <pack>/textures`, 30 frames):
 all 331 `.milk` and all 146 `.milk2` render with exit code 0, no shader fallback and no warning (before the MD3 work:
@@ -99,7 +99,7 @@ prelude's.
 | Heuristic (`Evidence`) | Fires on | MD3 pack hits | projectM corpus hits |
 |---|---|---|---|
 | `Milk2Container` | the four `.milk2` markers (`milk2::is_double_preset`); the `.milk2` name is not needed and not enough | 146 of 146 `.milk2` | 0 |
-| `LockedShaderKey` | a line starting `MD31=` / `MD32=` (MD3's locked shaders) | 36 / 26 `.milk` | 0 |
+| `EncryptedShaderKey` | a line starting `MD31=` / `MD32=` (MD3's encrypted shaders) | 36 / 26 `.milk` | 0 |
 | `SpriteBlock` | a `[SPRITE1_BEGIN]` line, or a non-empty `SpriteName=` | 73 `.milk` | 0 |
 | `PresetVersion(300)` | `MILKDROP_PRESET_VERSION=300` (what MD3 writes for a preset with a sprite) | 73 `.milk` | 0 |
 | `ShapeSides` | an enabled custom shape with `sides` > 100 (MD2 / projectM clamp at 100, MD3 allows 500) | 0 | 0 |
@@ -392,7 +392,15 @@ the left button (window events only: MD3 reads the system-wide button state), `l
 **Legacy comp generator**: presets with a composite version but no `comp_N` text get MD2's original brighten
 (`sqrt(ret)`) and solarize (`ret*(1-ret)*4`).
 
-Not implemented (by design): `_mxd3q*` accumulators (locked shaders only), webcam, hot-key effect injection, `get_wave*`.
+Not implemented (by design): webcam, hot-key effect injection, `get_wave*`.
+
+The `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch uniforms are reconstructed and uploaded: the engine
+advances a per-engine block (`crates/lactea/src/mxd3q.rs`) once per frame from `bass`/`mid`/`treb`/`_att`, the frame
+rate, the elapsed time and the current state's `q64` (the first beat detector's minimum delay; the block steps right
+after that state's per-frame code, like MD3's `RunPerFrameEquations`, so a preset's own `q64 = ..` takes effect the
+same frame), and the MD3 prelude maps them to `mx.mxd3q[0..6]` (with the `MXD3QX1..16` / `MXD3QS1..12` component
+macros). Under silence the accumulators are linear in time; the nine latches differ by a ~35-frame start-up transient
+of the three beat detectors (the state starts at zero) and match the reference probe within the probe's resolution.
 
 ### Verification
 
@@ -936,13 +944,13 @@ concern and not implemented here: a host should call `import_custom_wave(8, byte
   old-state copy.
 - MD3 writes `FFTAttack` / `FFTDecay` from process globals; here they are the preset's own values.
 - `MD31` / `MD32` handles are passed through verbatim to keep the file loadable by MD3; lactea only uses them to
-  look up a user-supplied shader override (see "Locked shaders (MD31 / MD32)").
+  look up a user-supplied shader override (see "Encrypted shaders (MD31 / MD32)").
 - Under `Compat::ProjectM` only 4 custom slots run (`CompatRules::custom_slots`), so an import into slot >= 4
   edits the preset but draws nothing; hosts that send dropped files to slot 8 need a MilkDrop-family compat.
 
-## Locked shaders (MD31 / MD32)
+## Encrypted shaders (MD31 / MD32)
 
-MD3's paid shader packs ship presets whose warp / composite shader is *locked*: the `.milk` carries `MD31=<u64>`
+Some MD3 shader packs ship presets whose warp / composite shader is encrypted: the `.milk` carries `MD31=<u64>`
 (warp) and/or `MD32=<u64>` (comp) in its header, and the `warp_` / `comp_` text is only a stub
 (`// This shader works only with MD3 :)`, then `ret = tex2D(sampler_main, uv).xyz; ret *= <decay>;`). Rendered as
 written, such a preset just fades the previous frame.
@@ -963,17 +971,17 @@ Lactea renders the stub unless the host supplies HLSL for the handle:
   an entry with the matching side `None` leaves that shader as the preset wrote it.
 - `Engine::set_shader_override(handle, ShaderOverride)` adds or replaces an entry; it affects the next
   `load_preset`. The override is reported as `ShaderOutcome::User`.
-- `fdrender --shader-override-warp HANDLE=FILE` / `--shader-override-comp HANDLE=FILE` (repeatable) read the HLSL from
-  `FILE`.
+- `fdrender` and the `lactea` app: `--shader-override-warp HANDLE=FILE` / `--shader-override-comp HANDLE=FILE`
+  (repeatable) read the HLSL from `FILE`.
 
 Only HLSL the user already owns can be supplied this way. The handle is read independent of the stub marker, so an
 override applies whenever the key is present and the pass's `PSVERSION_*` is above 0.
 
-Test: `crates/lactea/tests/locked_shader_override.rs` (stub colour, then override colour; skipped without a GPU).
+Test: `crates/lactea/tests/encrypted_shader_override.rs` (stub colour, then override colour; skipped without a GPU).
 
 ### `.milk2`
 
-MD3 never reads `MD31` / `MD32` inside a `.milk2` half: the halves are loaded as plain presets, so a locked shader
+MD3 never reads `MD31` / `MD32` inside a `.milk2` half: the halves are loaded as plain presets, so an encrypted shader
 in a double preset stays its stub. Lactea's override lookup is per preset text, so a half whose own header carries
 `MD31` / `MD32` and a registered handle would be substituted; that is a Lactea extension, MD3 itself does not do it.
 
@@ -1008,7 +1016,7 @@ BeatDrop (`third_party/md2`, which is identical to the BeatDrop snapshot for the
 - What 3.0.A itself changed over stock MD2 is only the rebranding and the VS project (no `MilkDrop3`-specific code path
   appears in `plugin.cpp`); no stock MD2 source is on disk to diff against.
 
-Everything in the table below from 3.1 on is closed source, recovered from the 3.37 binary.
+Everything in the table below from 3.1 on is unpublished, recovered from the 3.37 binary.
 
 ### Open source (3.0.A) against the 3.37 binary: the expression engine
 
@@ -1045,7 +1053,7 @@ behaviour.
 | 3.27 (25/12/2024) | playlists; MilkPanel preset editing; start screen | host | `Playlist` in the app; no MilkPanel | no |
 | 3.28 (04/04/2025) | GPU auto selection; new HLSL presets; subdirectory playlists; **"Resolved an issue that prevented the use of q33-q64"** | yes: `q33..q64` work in all loops (spec E: all copies use 64) | `md3_extended_vars` (64 q, 16 t) | no: older builds simply broke `q33+`; nothing to emulate |
 | 3.31 (20/09/2025) | hi-res audio devices; AMD / ATI PS4 compatibility; shader cache (precompiled, "smart"); **"new custom VM with enhanced stability"**; **hard-cut mode #7**; VJ mode; all Q values on `N` `N`; MilkPanel shader editor | yes: the VM is the ns-eel2 x64 glue with an SEH guard and the "failed part is dropped" policy; mode 7 | `md3_ns_eel2`, `md3_drop_failed_code`; `AutoHardCutMode` 7; analysis `AnalysisMode::Md3` (hi-res box decimation) | no: the earlier VM is not in the binary |
-| 3.33 (03/03/2026) | installer asks for heavy shaders; **`get_fft(pos)` / `get_fft_hz(freq)`**; audio device choice; folder / playlist drag and drop; **`.milk2` blends** (`BlendMilk2`); **transitions `corner`, `patches`, `stars2`, `arrow` recoded** (no snap at the end; old `.milk2` using them "may look slightly different"; the README offers a retro option "if needed"); **mouse** (`mouse.x/y/z/w` for shaders: `mouse` is a `float4`, not an EEL variable); MilkPanel Q injection; audio sensitivity; **FFT attack / decay**; some shaders not open (locked `MD31` / `MD32`) | yes: all of it | shader FFT (`md3_shader_fft`, `FFTAttack` / `FFTDecay`), `Engine::set_mouse`, `VolumeSensitivity`, `.milk2` playback and `BlendMilk2`, recoded patterns (spec B: 3.33 forms: `corner` clamps `t`, `stars2` is `a=B+3`); locked shaders run their placeholder | no: the pre-3.33 formulas are not in the 3.37 binary and the README's retro option does not exist there, so they cannot be reproduced |
+| 3.33 (03/03/2026) | installer asks for heavy shaders; **`get_fft(pos)` / `get_fft_hz(freq)`**; audio device choice; folder / playlist drag and drop; **`.milk2` blends** (`BlendMilk2`); **transitions `corner`, `patches`, `stars2`, `arrow` recoded** (no snap at the end; old `.milk2` using them "may look slightly different"; the README offers a retro option "if needed"); **mouse** (`mouse.x/y/z/w` for shaders: `mouse` is a `float4`, not an EEL variable); MilkPanel Q injection; audio sensitivity; **FFT attack / decay**; some shaders encrypted (encrypted `MD31` / `MD32`) | yes: all of it | shader FFT (`md3_shader_fft`, `FFTAttack` / `FFTDecay`), `Engine::set_mouse`, `VolumeSensitivity`, `.milk2` playback and `BlendMilk2`, recoded patterns (spec B: 3.33 forms: `corner` clamps `t`, `stars2` is `a=B+3`); encrypted shaders run their placeholder | no: the pre-3.33 formulas are not in the 3.37 binary and the README's retro option does not exist there, so they cannot be reproduced |
 | 3.35 (11/09/2026) | **64-bit application** (~18 % CPU); **GIF** images as textures and sprites; show artist / title; new shaders; **webcam, two layers (Deep and Top)**; "rewritten bulletproof preset compilation"; sprites stay loaded (100, circular), preload 100 at start; code signing | yes: GIF, webcam layers, sprite cache; the 64-bit build is why the glue is x64 | GIF textures and sprites (`sprites.rs`); sprite cache of 100; compile policy as 3.31; **not** webcam layers (position only in spec D §9), no title overlay | no |
 | 3.36 (17/09/2026) | fully portable (no DirectX install); fix for non-Latin track titles; "show artist + title" setting | host | n/a | no |
 | 3.37 (26/09/2026) | Audio menu fixed; auto reconnect; desktop mode (Ctrl+Shift+W); audio capture can be disabled (no simple waveform is drawn then); Recycle Bin delete; faster playlist loading; MilkPanel LED restart | host (the waveform-off case is a host choice: a host without audio simply feeds silence) | the target of this document | no |

@@ -36,6 +36,7 @@ mod engine;
 mod idle;
 mod md3_inputs;
 mod media;
+mod mxd3q;
 mod playlist;
 mod rng;
 mod runtime;
@@ -145,8 +146,8 @@ pub struct EngineConfig {
     /// The patterns random soft cuts of [`Compat::MilkDrop3`] may pick (MD3's `[transitions]` settings; empty = only
     /// `zoom`). Default: the 13 patterns MD3 enables without a settings file.
     pub md3_transition_patterns: Vec<Md3Pattern>,
-    /// Locked-shader overrides keyed by the preset's `MD31` / `MD32` handle (`docs/md3.md`, "Locked shaders").
-    /// A matching entry replaces the preset's shader text (the locked stub). Override text is plain
+    /// Encrypted-shader overrides keyed by the preset's `MD31` / `MD32` handle (`docs/md3.md`, "Encrypted shaders").
+    /// A matching entry replaces the preset's shader text (the placeholder stub). Override text is plain
     /// `\n`-separated HLSL, not the `\x01` form of preset text. Default: empty.
     pub shader_overrides: HashMap<u64, ShaderOverride>,
 }

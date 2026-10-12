@@ -178,6 +178,15 @@ pub struct Args {
     #[arg(long, value_enum, default_value_t = CompatArg::Auto)]
     pub compat: CompatArg,
 
+    /// MilkDrop 3 encrypted warp shader (`MD31` handle): replace the preset's placeholder warp shader with the HLSL in
+    /// FILE. Repeatable.
+    #[arg(long, value_name = "HANDLE=FILE")]
+    pub shader_override_warp: Vec<String>,
+    /// MilkDrop 3 encrypted composite shader (`MD32` handle): replace the preset's placeholder composite shader with
+    /// the HLSL in FILE. Repeatable.
+    #[arg(long, value_name = "HANDLE=FILE")]
+    pub shader_override_comp: Vec<String>,
+
     /// Engine: warp mesh cells (both even, at least 2).
     #[arg(long, default_value = "48x36", value_parser = parse_mesh, value_name = "WxH")]
     pub mesh: (u32, u32),

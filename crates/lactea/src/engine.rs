@@ -1,7 +1,7 @@
 //! The engine: preset loading and the per-frame CPU pipeline (projectM `MilkdropPreset`).
 
 use crate::cache::{MediaCache, ShaderCache};
-use crate::md3_inputs::{Md3Frame, Md3Inputs, MouseState, new_analyzer, shader_ext};
+use crate::md3_inputs::{Md3Frame, Md3Inputs, MouseState, new_analyzer, shader_ext, state_q64};
 use crate::media::Media;
 use crate::rng::{ShaderStream, StreamRng, hue_offsets};
 use crate::runtime::{
@@ -23,9 +23,9 @@ use lactea_preset::{
 use lactea_render::warp_mesh::{self, VertexVars, WarpAnim};
 use lactea_render::wavegen::{CustomWaveSampling, NUM_WAVEFORM_SAMPLES};
 use lactea_render::{
-    Compat, CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom,
-    RenderConfig, Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams,
-    WarpGpu, WavePoint,
+    Compat, CompatRules, CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry,
+    PassRandom, RenderConfig, Renderer, ShapeInstance, TransitionBlender, TransitionKind,
+    TransitionParams, WarpGpu, WavePoint,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -499,7 +499,7 @@ impl Engine {
     // preset loading
     // -----------------------------------------------------------------------------------------
 
-    /// Register user HLSL for the locked preset(s) carrying `handle` as `MD31` / `MD32`
+    /// Register user HLSL for the preset(s) with encrypted shaders carrying `handle` as `MD31` / `MD32`
     /// ([`EngineConfig::shader_overrides`]). Takes effect on the next load.
     pub fn set_shader_override(&mut self, handle: u64, shader: ShaderOverride) {
         self.cfg.shader_overrides.insert(handle, shader);
@@ -1323,7 +1323,12 @@ impl Engine {
         if let Some(f) = &forced {
             f.override_audio(&mut audio);
         }
-        let md3 = self.md3.begin_frame(&self.cfg.compat.rules(), &audio);
+        let mut md3 = self.md3.begin_frame(
+            &self.cfg.compat.rules(),
+            &audio,
+            self.cfg.fps as f32,
+            clock.time as f32,
+        );
 
         // ProjectM::RenderFrame: timers, end of smoothing, end of the transition.
         self.clock.now = clock.time;
@@ -1362,6 +1367,9 @@ impl Engine {
 
         // The incoming preset renders first (its image only), then the active one.
         if let Some(inc) = self.incoming.as_mut().filter(|_| blending) {
+            // ProjectM's `incoming` slot never exists under MilkDrop 3: its soft cuts are MilkDrop 2 blends inside
+            // one pipeline (`md2_preset_blend`), so there are no MD3 shader inputs for it
+            debug_assert!(md3.is_none(), "an incoming slot under MilkDrop 3");
             let fi = prepare_slot(
                 inc,
                 &self.cfg,
@@ -1370,14 +1378,13 @@ impl Engine {
                 &audio,
                 forced_incoming.as_ref(),
                 None,
-                md3.as_ref(),
             );
             let _ = inc.renderer.render_frame_to_output(encoder, &fi);
         }
         let cfg = &self.cfg;
         match self.active.as_mut() {
             Some(act) => {
-                let fi = prepare_slot(
+                let mut fi = prepare_slot(
                     act,
                     cfg,
                     clock,
@@ -1385,8 +1392,22 @@ impl Engine {
                     &audio,
                     forced.as_ref(),
                     self.md2.as_mut(),
-                    md3.as_ref(),
                 );
+                // MilkDrop 3 runs the `_mxd3q*` block at the end of `RunPerFrameEquations`, after the per-frame code
+                // of the state it treats as current (`m_pState` = `active`; a blend's old state is `md2`) and reads
+                // that state's `q64`. It steps here, once per frame, before any shader input that carries its output
+                // is built.
+                if let Some(frame) = md3.as_mut() {
+                    self.md3.step_mxd3q(frame, state_q64(&act.loaded.pf));
+                    attach_md3_ext(
+                        &mut fi,
+                        &cfg.compat.rules(),
+                        frame,
+                        act,
+                        self.md2.as_ref(),
+                        clock.time,
+                    );
+                }
                 // `prepare_slot` builds `warp_uv` from the renderer's own mesh and `md2_blend` only with
                 // `Compat::md2_family`, the two inputs the renderer can reject
                 let _ = if blending {
@@ -1574,7 +1595,6 @@ fn slot_frame_vars(slot: &Slot) -> Vec<(String, f64)> {
 }
 
 /// Evaluate a slot's preset for this frame and hand the teacher-forced images to its renderer.
-#[allow(clippy::too_many_arguments)]
 fn prepare_slot(
     slot: &mut Slot,
     cfg: &EngineConfig,
@@ -1583,7 +1603,6 @@ fn prepare_slot(
     audio: &AudioFrame,
     forced: Option<&ForcedFrame>,
     md2: Option<&mut BlendState>,
-    md3: Option<&Md3Frame>,
 ) -> FrameInput {
     let g = slot.renderer.mesh_geometry();
     // sprite code sees `m_pState->m_fBlendProgress`: the blend's progress (`P` in a steady `.milk2`), 1 once none runs
@@ -1596,7 +1615,6 @@ fn prepare_slot(
                 clock,
                 progress,
                 audio,
-                md3,
             };
             build_blend_frame(&mut slot.loaded, &mut slot.last, m, &cx, forced)
         }
@@ -1609,7 +1627,6 @@ fn prepare_slot(
             audio,
             forced,
             &mut slot.last,
-            md3,
         ),
     };
     if cfg.compat.rules().md3_preset_sprites
@@ -1648,6 +1665,24 @@ fn prepare_slot(
     fi
 }
 
+/// The MilkDrop 3 shader inputs of the frame of `slot`'s preset (`ShaderExt`: mouse, `q33..q64`, the `_mxd3q*` block's
+/// output, shader time, FFT) once the block has stepped; `blend` is the running MilkDrop 2 blend whose old state's
+/// shader passes carry the same frame values and that state's own `q`, start time and no FFT.
+fn attach_md3_ext(
+    fi: &mut FrameInput,
+    rules: &CompatRules,
+    md3: &Md3Frame,
+    slot: &Slot,
+    blend: Option<&BlendState>,
+    now: f64,
+) {
+    let new = &slot.loaded;
+    fi.ext = shader_ext(rules, md3, &new.pf, new.start_time, now, true);
+    if let (Some(m), Some(b)) = (fi.md2_blend.as_mut(), blend) {
+        m.old.ext = shader_ext(rules, md3, &b.old.pf, b.old.start_time, now, false);
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // per-frame pipeline
 // ---------------------------------------------------------------------------------------------
@@ -1660,7 +1695,6 @@ struct FrameCtx<'a> {
     clock: FrameClock,
     progress: f32,
     audio: &'a AudioFrame,
-    md3: Option<&'a Md3Frame>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1673,7 +1707,6 @@ fn build_frame(
     audio: &AudioFrame,
     forced: Option<&ForcedFrame>,
     last: &mut LastFrame,
-    md3: Option<&Md3Frame>,
 ) -> FrameInput {
     let cx = FrameCtx {
         cfg,
@@ -1681,7 +1714,6 @@ fn build_frame(
         clock,
         progress,
         audio,
-        md3,
     };
     let base = l.preset.base.clone();
     let env = frame_env(&cx);
@@ -1836,9 +1868,6 @@ fn frame_head(
     let pf = &l.pf;
     for i in 0..NUM_Q {
         fi.q[i] = pf.q(i) as f32;
-    }
-    if let Some(m) = cx.md3 {
-        fi.ext = shader_ext(&cfg.compat.rules(), m, pf, l.start_time, clock.time, true);
     }
     fi.warp_uv = warp_uv;
     // projectM evaluates the warp UV formula on the GPU (the renderer ignores this for MilkDrop 2 compat)

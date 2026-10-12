@@ -464,7 +464,7 @@ fn sprite_code_runs_on_ns_eel2_and_a_failing_part_is_dropped() {
 fn milk2(sprite_header: &str, half1: &str, half2: &str, block: &str) -> String {
     let half = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\nfDecay=1\nfWaveAlpha=0\nfGammaAdj=1\n";
     format!(
-        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\n{sprite_header}blending_pattern=zoom\nblending_progress=1.00\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n\
+        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.example.org\n\n{sprite_header}blending_pattern=zoom\nblending_progress=1.00\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n\
          [PRESET1_BEGIN]\nNAME=first\n{half}{half1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=second\n{half}{half2}[PRESET2_END]\n{block}"
     )
 }

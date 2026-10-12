@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn locked_handles_from_extra() {
+    fn encrypted_handles_from_extra() {
         let p = Preset::parse(b"MD31=123\nMD32= 456 \nMD31=9\n").unwrap();
         assert_eq!(p.md31_handle(), Some(123));
         assert_eq!(p.md32_handle(), Some(456));

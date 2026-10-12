@@ -90,12 +90,12 @@ documented behaviour, nothing copied from MD3) declares:
 | `sampler2D sampler_fft;` | the shader FFT, `TexSource::Fft` (below) |
 | `get_fft(pos)` | macro: `tex2D(sampler_fft, float2(clamp(pos, 0, 1), 0.5)).r`, **no `sqrt`** (BeatDrop's has one) |
 | `get_fft_hz(freq)` | macro: `get_fft(clamp((freq) / 24000.0, 0, 1))` (MD3 assumes a 48 kHz capture; BeatDrop divides by 22050) |
+| `float4 _mxd3qxa .. _mxd3qxd, _mxd3qsa .. _mxd3qsc;` and the macros `MXD3QX1..16`, `MXD3QS1..12` | the audio-envelope / beat-latch block (see `docs/md3.md`); `_mxd3qxa.._d` / `_mxd3qsa.._c` are `mx.mxd3q[0..6]` |
 
 `get_fft*` are macros like in MD3, so the argument expression is pasted textually (once) into the `clamp` and nested
 macros (`get_fft(mouse_x)`, `get_fft(bass > 0.5 ? .25 : .75)`) work. Not declared, on purpose: `get_fft_peak*`,
-`get_wave*`, `HAS_FFT_PEAK`, `sysTime*`, `mouse_clicked`, `aspect_sd` (BeatDrop only), `_c15..` (MD3 never uploads
-them), `_mxd3qx*` / `_mxd3qs*` / `MXD3Q*` (engine-private accumulators of locked presets, not implemented). The
-prelude's `sampler_fft` counts as declared for the implicit `sampler_<name>` declarations.
+`get_wave*`, `HAS_FFT_PEAK`, `sysTime*`, `mouse_clicked`, `aspect_sd` (BeatDrop only) and `_c15..` (MD3 never uploads
+them). The prelude's `sampler_fft` counts as declared for the implicit `sampler_<name>` declarations.
 
 **Decisions**
 
@@ -153,8 +153,8 @@ only static scenes compare pixel for pixel):
 * `lara - Flexi Romanesco Uncompressed [MOUSE].milk` (PSVERSION 4/3, `mouse.x/.y/.z`, `get_fft` in the composite): the same
   faceted fractal with the same cyan-to-deep-blue palette and framing, morphing differently with time (and `mouse`, which is
   `(-1, -1, 0, 0)` in `fdrender`, an unknown real cursor in the oracle); the exact shape was not compared.
-* A locked preset (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
-  runs) while MD3 draws its licensed laser scene: expected, see `md3.md`.
+* A preset with encrypted shaders (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
+  runs) while MD3 draws its laser scene: expected, see `md3.md`.
 
 ## Verification
 

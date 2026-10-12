@@ -70,3 +70,7 @@ Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels
 
 `lactea-preset` reproduces MD2's import (`state.cpp`) byte-for-byte (`docs/preset.md` lists the quirks);
 `Flavor::Md2` serves the whole MD2 family, `Flavor::ProjectM` is projectM's `PresetFileParser`.
+
+| Item | projectM (default) | MilkDrop 2 / MilkDrop 3 |
+|---|---|---|
+| Joining of code lines (`md2_code_join`; init, per-frame, per-pixel, wave init / per-frame / per-point, shape init / per-frame) | lines joined with `\n`: an identifier split over two lines (`per_frame_22=k1 = is_` / `per_frame_23=beat*...;`) is two tokens and fails to compile | `CState::StripLinefeedCharsAndComments` (`state.cpp:1593`): the `\x01` separators are deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so the halves glue together (`k1 = is_beat*...;`). A block that is only blanks or strips to nothing compiles no code (`buf[0] == 0`). Shader text is not touched: it keeps its lines (`code_to_source`), `#define`s need them |

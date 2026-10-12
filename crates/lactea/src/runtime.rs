@@ -6,7 +6,10 @@
 
 use crate::vars::{PfVars, PpVars, ShVars, WfVars, WpVars};
 use lactea_eel::{CompileError, Context, GlobalMemory, Program};
-use lactea_preset::{BaseValues, CustomShape, CustomWave, code_to_source};
+use lactea_preset::{
+    BaseValues, CustomShape, CustomWave, LINEFEED_CONTROL_CHAR, code_to_source,
+    strip_linefeeds_and_comments,
+};
 use std::sync::Arc;
 
 pub const NUM_Q: usize = 32;
@@ -32,10 +35,25 @@ pub struct Env {
     pub inv_aspect: [f32; 2],
 }
 
-/// Compile `src` into `ctx`; empty source gives `None` (projectM leaves the handle null).
-/// A non-empty source that compiles to an empty program (comments only) is kept as `Some`.
-pub fn compile_opt(ctx: &mut Context, src: &str) -> Result<Option<Program>, CompileError> {
-    let src = code_to_source(src);
+/// Compile `src` (a joined code block, see `lactea_preset`) into `ctx`; empty source gives `None` (projectM leaves
+/// the handle null). A non-empty source that compiles to an empty program (comments only) is kept as `Some`.
+///
+/// `md2_join` (`CompatRules::md2_code_join`) selects MilkDrop 2's `StripLinefeedCharsAndComments` instead of the
+/// `\n` join: a block that is only blanks and separators or strips to nothing compiles no code, like MD2's
+/// `buf[0] == 0` test.
+pub fn compile_opt(
+    ctx: &mut Context,
+    src: &str,
+    md2_join: bool,
+) -> Result<Option<Program>, CompileError> {
+    let src = if md2_join {
+        if src.chars().all(|c| c == ' ' || c == LINEFEED_CONTROL_CHAR) {
+            return Ok(None);
+        }
+        strip_linefeeds_and_comments(src)
+    } else {
+        code_to_source(src)
+    };
     if src.is_empty() {
         return Ok(None);
     }
@@ -401,5 +419,50 @@ impl ShapeRt {
         set(c, v.border_g, f(s.border_g));
         set(c, v.border_b, f(s.border_b));
         set(c, v.border_a, f(s.border_a));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lactea_preset::Preset;
+    use lactea_render::Compat;
+
+    /// A statement split inside an identifier (`my_` / `var`), as MD2 presets written in the editor have it, and a
+    /// trailing comment: MD2 deletes the line separators without a replacement.
+    const SPLIT: &str = "per_frame_1=my_var = 5;\n\
+                         per_frame_2=q1 = my_\n\
+                         per_frame_3=var*2; // doubled\n\
+                         per_frame_4=q2 = q1 + 1;\n";
+
+    fn run(preset: &Preset, compat: Compat) -> Result<(f64, f64), CompileError> {
+        let gm = Arc::new(GlobalMemory::new());
+        let mut pf = PerFrame::new(&gm);
+        pf.prog = compile_opt(&mut pf.ctx, &preset.per_frame, compat.rules().md2_code_join)?;
+        pf.run();
+        Ok((pf.q(0), pf.q(1)))
+    }
+
+    #[test]
+    fn split_identifier_compiles_under_milkdrop_code_join_only() {
+        let preset = Preset::parse(SPLIT.as_bytes()).unwrap();
+        assert_eq!(run(&preset, Compat::MilkDrop2).unwrap(), (10.0, 11.0));
+        assert_eq!(run(&preset, Compat::MilkDrop3).unwrap(), (10.0, 11.0));
+        // projectM joins with `\n`: `my_` and `var` stay two tokens
+        assert!(run(&preset, Compat::ProjectM).is_err());
+    }
+
+    #[test]
+    fn blank_or_comment_only_code_is_no_code_under_milkdrop_join() {
+        let gm = Arc::new(GlobalMemory::new());
+        let mut ctx = Context::new(gm);
+        for src in ["", "\u{1}", "  \u{1} \u{1}", "// only a comment\u{1}"] {
+            assert!(
+                compile_opt(&mut ctx, src, true).unwrap().is_none(),
+                "{src:?}"
+            );
+        }
+        // projectM keeps a comment-only block as an empty program
+        assert!(compile_opt(&mut ctx, "// c\u{1}", false).unwrap().is_some());
     }
 }

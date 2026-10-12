@@ -32,6 +32,7 @@ in the file, exactly like a build without the license.
 | Resource | Status |
 |---|---|
 | `.milk` with MD2 keys and code (what MD2 / BeatDrop read) | Supported: the MD2 importer, expressions and renderer (`Flavor::Md2`) |
+| MD2 code-line joining (`CompatRules::md2_code_join`) | Supported: lines are glued without a separator, see `divergences.md` |
 | `.milk` MD3 extensions (additional keys, expression variables and functions, shader variables) | Not yet |
 | `.milk2` double presets (two presets plus a frozen soft cut) | Not yet |
 | Blend patterns of MD3 soft cuts (30 patterns) | Not yet |

@@ -563,10 +563,11 @@ pub fn code_to_source(code: &str) -> String {
     code.replace(LINEFEED_CONTROL_CHAR, "\n")
 }
 
-/// `CState::StripLinefeedCharsAndComments`: drop the line terminators (no replacement
-/// despite the MD2 comment) and `//` / `\\` comments up to the end of their line.
-#[cfg(test)]
-fn strip_linefeeds_and_comments(code: &str) -> String {
+/// `CState::StripLinefeedCharsAndComments`, the way MilkDrop 2 turns a joined block into the text its
+/// expression compiler sees: [`LINEFEED_CONTROL_CHAR`] is deleted (no replacement despite the MD2 comment, so a
+/// statement split over two lines is glued together) and `//` / `\\` comments are dropped up to the next
+/// separator. Compare [`code_to_source`], which projectM's parser needs.
+pub fn strip_linefeeds_and_comments(code: &str) -> String {
     let b = code.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut comment = false;

@@ -41,6 +41,7 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | custom wave / shape slots that run | 4 each (`CustomWaveformCount`, `CustomShapeCount`; slots 4..15 are ignored) | 16 each |
 /// | warp shader `sampler_main` (first `main` sampler in name order) | filter linear, address from `bTexWrap` (`WarpedBlit` rebinds unit 0) | whatever the shader's sampler prefix says |
 /// | preset change (`Transition::Soft`) | image-space cross-fade of two independently rendered presets by one of six built-in transition shaders (`md2_preset_blend = false`) | MD2's own blend inside one frame pipeline: both states' equations run, per-vertex UVs blended by a random pattern, old/new shaders drawn as alpha-tiled passes (`md2_preset_blend = true`) |
+/// | preset code lines (`md2_code_join`) | joined with `\n` | joined with nothing and `//` / `\\` comments stripped (`CState::StripLinefeedCharsAndComments`) |
 /// | gamma / echo / filter flags / main-wave mode and flags (`frame_vars_drive_post`) | the preset's initial values | the per-frame variable values |
 /// | shader random streams (`shared_shader_rand`) | separate warp / comp streams, constructor draws after `rand_preset` | one shared stream per preset |
 /// | warp animation terms (`warp_anim_projectm`) | projectM's `y` sign and GPU `pow` | MD2's |
@@ -173,6 +174,11 @@ pub struct CompatRules {
     /// `m_OldShaders`). projectM instead renders both presets to their own images and blends the finished images with
     /// one of six transition shaders ([`TransitionKind`](crate::TransitionKind)).
     pub md2_preset_blend: bool,
+    /// Preset code lines are joined like `CState::StripLinefeedCharsAndComments`: the `\x01` line separators are
+    /// deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so a statement
+    /// split across two lines glues its halves together (`k1 = is_` + `beat*...` is `k1 = is_beat*...`). Otherwise the
+    /// lines are joined with `\n` (projectM). Applies to every EEL code part, never to shader text.
+    pub md2_code_join: bool,
     /// `gamma`, `echo_*`, `brighten` / `darken` / `solarize` / `invert` and the main wave's `wave_mode` /
     /// `wave_thick` / `wave_usedots` / `wave_additive` take the per-frame variable values instead of the preset's
     /// initial values (projectM reads the file values).
@@ -231,6 +237,7 @@ impl Compat {
                 custom_slots: 4,
                 warp_main_sampler_from_wrap: true,
                 md2_preset_blend: false,
+                md2_code_join: false,
                 frame_vars_drive_post: false,
                 shared_shader_rand: false,
                 warp_anim_projectm: true,
@@ -276,6 +283,7 @@ impl Compat {
                 custom_slots: 16,
                 warp_main_sampler_from_wrap: false,
                 md2_preset_blend: true,
+                md2_code_join: true,
                 frame_vars_drive_post: true,
                 shared_shader_rand: true,
                 warp_anim_projectm: false,
@@ -403,5 +411,12 @@ mod tests {
         assert!(!Compat::ProjectM.md2_family());
         assert!(Compat::MilkDrop2.md2_family());
         assert!(Compat::MilkDrop3.md2_family());
+    }
+
+    #[test]
+    fn code_join_is_a_milkdrop_rule() {
+        assert!(!Compat::ProjectM.rules().md2_code_join);
+        assert!(Compat::MilkDrop2.rules().md2_code_join);
+        assert!(Compat::MilkDrop3.rules().md2_code_join);
     }
 }

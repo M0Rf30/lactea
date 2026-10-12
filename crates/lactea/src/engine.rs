@@ -577,6 +577,9 @@ impl Engine {
             ..Default::default()
         };
         let gm = Arc::new(GlobalMemory::sharing_rng_with(&self.rng_owner));
+        let rules = self.cfg.compat.rules();
+        let join = rules.md2_code_join;
+
         let env = self.init_env();
         let mut pf = PerFrame::new(&gm);
         let mut pp = PerPixel::new(&gm);
@@ -584,7 +587,7 @@ impl Engine {
 
         // ---- per-frame init + per-frame code, per-vertex code ------------------------------
         pf.load_state(&base, &env);
-        if let Some(prog) = compile_opt(&mut pf.ctx, &preset.per_frame_init)
+        if let Some(prog) = compile_opt(&mut pf.ctx, &preset.per_frame_init, join)
             .map_err(|e| EngineError::compile("per-frame init code", e))?
         {
             pf.ctx.run(&prog);
@@ -593,14 +596,14 @@ impl Engine {
             pf.q_after_init[i] = pf.q(i);
         }
         let mut frame_q = pf.q_after_init;
-        pf.prog = compile_opt(&mut pf.ctx, &preset.per_frame)
+        pf.prog = compile_opt(&mut pf.ctx, &preset.per_frame, join)
             .map_err(|e| EngineError::compile("per-frame code", e))?;
-        pp.prog = compile_opt(&mut pp.ctx, &preset.per_pixel)
+        pp.prog = compile_opt(&mut pp.ctx, &preset.per_pixel, join)
             .map_err(|e| EngineError::compile("per-pixel code", e))?;
 
         // ---- custom waves -----------------------------------------------------------------
         let mut waves = Vec::with_capacity(MAX_CUSTOM_WAVES);
-        let slots = self.cfg.compat.rules().custom_slots;
+        let slots = rules.custom_slots;
         for (i, cfg) in preset.waves.iter().take(slots).enumerate() {
             let mut w = WaveRt::new(&gm, cfg.clone());
             let enabled = w.enabled();
@@ -615,7 +618,7 @@ impl Engine {
                 Err(e) => Err(e),
             };
             w.load_state(&pf, &env);
-            let init = compile_opt(&mut w.pf, &cfg.init)
+            let init = compile_opt(&mut w.pf, &cfg.init, join)
                 .map_err(|e| EngineError::compile(&format!("custom wave {i} init code"), e));
             let r = init.map(|p| {
                 if let Some(p) = p {
@@ -626,11 +629,11 @@ impl Engine {
             for t in 0..crate::runtime::NUM_T {
                 w.t_after_init[t] = w.pf.get(w.pfv.t[t]);
             }
-            let r = compile_opt(&mut w.pf, &cfg.per_frame)
+            let r = compile_opt(&mut w.pf, &cfg.per_frame, join)
                 .map(|p| w.pf_prog = p)
                 .map_err(|e| EngineError::compile(&format!("custom wave {i} per-frame code"), e));
             step("per-frame", r, &mut report)?;
-            let r = compile_opt(&mut w.pp, &cfg.per_point)
+            let r = compile_opt(&mut w.pp, &cfg.per_point, join)
                 .map(|p| w.pp_prog = p)
                 .map_err(|e| EngineError::compile(&format!("custom wave {i} per-point code"), e));
             step("per-point", r, &mut report)?;
@@ -653,7 +656,7 @@ impl Engine {
                 Err(e) => Err(e),
             };
             s.load_state(&frame_q, &env, 0);
-            let init = compile_opt(&mut s.ctx, &cfg.init)
+            let init = compile_opt(&mut s.ctx, &cfg.init, join)
                 .map_err(|e| EngineError::compile(&format!("custom shape {i} init code"), e));
             let r = init.map(|p| {
                 if let Some(p) = p {
@@ -664,7 +667,7 @@ impl Engine {
             for t in 0..crate::runtime::NUM_T {
                 s.t_after_init[t] = s.ctx.get(s.v.t[t]);
             }
-            let r = compile_opt(&mut s.ctx, &cfg.per_frame)
+            let r = compile_opt(&mut s.ctx, &cfg.per_frame, join)
                 .map(|p| s.prog = p)
                 .map_err(|e| EngineError::compile(&format!("custom shape {i} per-frame code"), e));
             step("per-frame", r, &mut report)?;

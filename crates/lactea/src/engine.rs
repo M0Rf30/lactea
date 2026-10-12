@@ -555,6 +555,36 @@ impl Engine {
                     Err(_) => Err(rejected),
                 }
             }
+            // A preset projectM loaded but whose warp / comp shader fell back: projectM's HLSL flavour can fail where
+            // MilkDrop 2's translates (e.g. a swizzle on a constructor call). Retry under MilkDrop 2 and keep that load
+            // only when it translates every shader projectM failed on.
+            Ok(report) if want == Some(Compat::ProjectM) && !report.shader_fallbacks.is_empty() => {
+                let failed: Vec<PassKind> =
+                    report.shader_fallbacks.iter().map(|f| f.pass).collect();
+                match self.load_preset_resolved(bytes, name, transition, Some(Compat::MilkDrop2)) {
+                    Ok(mut retry)
+                        if retry
+                            .shader_fallbacks
+                            .iter()
+                            .all(|f| !failed.contains(&f.pass)) =>
+                    {
+                        let errs: Vec<&str> = report
+                            .shader_fallbacks
+                            .iter()
+                            .map(|f| f.reason.as_str())
+                            .collect();
+                        retry.warnings.push(format!(
+                            "fallback: projectM shader translation failed: {}",
+                            errs.join("; ")
+                        ));
+                        Ok(retry)
+                    }
+                    _ => {
+                        // keep projectM: reload it so the engine is back in its mode with its preset
+                        self.load_preset_resolved(bytes, name, transition, want)
+                    }
+                }
+            }
             result => result,
         }
     }

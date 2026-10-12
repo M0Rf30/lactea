@@ -415,3 +415,73 @@ fn after_a_switch_a_preset_renders_as_in_a_fixed_engine() {
         assert!(auto.run(1) == fixed.run(1));
     }
 }
+
+/// A flat preset whose per-frame code splits the identifier `is_beat` over two code lines. MilkDrop 2 glues the
+/// lines together (`is_` + `beat`), projectM keeps them apart and rejects the code.
+fn split_identifier(r: f32, g: f32, b: f32) -> String {
+    flat(
+        r,
+        g,
+        b,
+        "per_frame_1=is_beat = 1;\nper_frame_2=k1 =  is_\nper_frame_3=beat*0;\n",
+    )
+}
+
+#[test]
+fn a_projectm_compile_error_falls_back_to_milkdrop2() {
+    let text = split_identifier(0.0, 1.0, 0.0);
+    assert_eq!(compat_for_preset(text.as_bytes()), Compat::ProjectM);
+
+    // fixed modes are unchanged: projectM rejects it, MilkDrop 2 loads it
+    let mut fixed = rig!(cfg(Compat::ProjectM, false));
+    assert!(
+        fixed
+            .engine
+            .load_preset(text.as_bytes(), "s.milk", Transition::Cut)
+            .is_err()
+    );
+    let mut fixed2 = rig!(cfg(Compat::MilkDrop2, false));
+    fixed2.load(&text, "s.milk", Transition::Cut);
+
+    let mut rig = rig!(cfg(Compat::ProjectM, true));
+    rig.load(&q40(1.0, 0.0, 0.0), "q.milk", Transition::Cut);
+    rig.run(3);
+    let r = rig.load(&text, "s.milk", Transition::Soft { seconds: 1.0 });
+    assert_eq!(r.compat, Compat::MilkDrop2);
+    assert_eq!(rig.engine.current_compat(), Compat::MilkDrop2);
+    assert_eq!(rig.engine.renderer().compat(), Compat::MilkDrop2);
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.starts_with("fallback: projectM rejected: per-frame code")),
+        "{:?}",
+        r.warnings
+    );
+    // a hard cut (the mode changed from MilkDrop 3), and the preset renders
+    assert!(rig.engine.transition_info().is_none());
+    assert!(near(px(&rig.run(2), 32, 24), GREEN));
+
+    // the next plain preset goes back to projectM
+    let r = rig.load(&plain(0.0, 0.0, 1.0), "p.milk", Transition::Cut);
+    assert_eq!(r.compat, Compat::ProjectM);
+    assert!(r.warnings.is_empty());
+    assert_eq!(rig.engine.current_compat(), Compat::ProjectM);
+}
+
+#[test]
+fn a_preset_both_modes_reject_reports_the_projectm_error_and_keeps_the_mode() {
+    let mut rig = rig!(cfg(Compat::ProjectM, true));
+    rig.load(&plain(0.0, 1.0, 0.0), "a.milk", Transition::Cut);
+    rig.run(3);
+    let bad = flat(1.0, 0.0, 0.0, "per_frame_1=x = = 1;\n");
+    let err = rig
+        .engine
+        .load_preset(bad.as_bytes(), "bad.milk", Transition::Cut)
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with("per-frame code"), "{err}");
+    assert_eq!(rig.engine.current_compat(), Compat::ProjectM);
+    assert_eq!(rig.engine.active_preset_name(), Some("a.milk"));
+    assert_eq!(rig.engine.renderer().compat(), Compat::ProjectM);
+    assert!(near(px(&rig.run(2), 32, 24), GREEN));
+}

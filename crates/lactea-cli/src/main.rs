@@ -91,8 +91,9 @@ struct Args {
     #[arg(long)]
     inject_noise: Option<PathBuf>,
     /// projectm (default) | md2 | md3 | auto. `auto` picks projectm or md3 per preset from its content
-    /// (md2 is never chosen; a mode change on `--preset2` is a hard cut) and reports the choice in
-    /// fdrender.json (`compat_auto`, `compat_evidence`); the default stays projectm.
+    /// (md2 only as the fallback for a preset projectm rejects with a compile error; a mode change on
+    /// `--preset2` is a hard cut) and reports the choice in fdrender.json (`compat_auto`,
+    /// `compat_evidence`); the default stays projectm.
     #[arg(long, default_value = "projectm")]
     compat: String,
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
@@ -487,7 +488,7 @@ fn run(args: &Args) -> Result<i32> {
         );
     }
     let evidence = if auto_compat {
-        let (name, ev) = detect_note(&preset_bytes, report.compat);
+        let (name, ev) = detect_note(&preset_bytes, &report);
         eprintln!("fdrender: compat auto -> {name} (evidence: {ev})");
         if report.compat != Compat::MilkDrop3 {
             if args.mouse.is_some() {
@@ -504,7 +505,7 @@ fn run(args: &Args) -> Result<i32> {
                 );
             }
         }
-        detected_evidence(&preset_bytes)
+        detected_evidence(&preset_bytes, &report)
     } else {
         Vec::new()
     };
@@ -565,9 +566,9 @@ fn run(args: &Args) -> Result<i32> {
                         );
                     }
                     if auto_compat {
-                        let (name, ev) = detect_note(p2, r.compat);
+                        let (name, ev) = detect_note(p2, &r);
                         eprintln!("fdrender: compat auto -> {name} (preset2; {ev})");
-                        evidence2 = Some(detected_evidence(p2));
+                        evidence2 = Some(detected_evidence(p2, &r));
                     }
                     report2 = Some(r);
                 }
@@ -819,24 +820,33 @@ fn compat_name(c: Compat) -> &'static str {
     }
 }
 
-/// What `lactea_preset::detect_compat` found in `bytes`, one string per piece of evidence.
-fn detected_evidence(bytes: &[u8]) -> Vec<String> {
-    lactea_preset::detect_compat(bytes)
+/// What `lactea_preset::detect_compat` found in `bytes`, one string per piece of evidence, then the engine's
+/// `fallback: ...` note when the load fell back to MilkDrop 2.
+fn detected_evidence(bytes: &[u8], report: &lactea::PresetReport) -> Vec<String> {
+    let mut ev: Vec<String> = lactea_preset::detect_compat(bytes)
         .evidence
         .iter()
         .map(ToString::to_string)
-        .collect()
+        .collect();
+    ev.extend(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("fallback: "))
+            .cloned(),
+    );
+    ev
 }
 
 /// Name of the resolved mode and the evidence for the `--compat auto` log line.
-fn detect_note(bytes: &[u8], resolved: Compat) -> (&'static str, String) {
-    let ev = detected_evidence(bytes);
+fn detect_note(bytes: &[u8], report: &lactea::PresetReport) -> (&'static str, String) {
+    let ev = detected_evidence(bytes, report);
     let ev = if ev.is_empty() {
         "none".to_string()
     } else {
         ev.join(", ")
     };
-    (compat_name(resolved), ev)
+    (compat_name(report.compat), ev)
 }
 
 fn write_info(dir: &Path, v: serde_json::Value) -> Result<()> {

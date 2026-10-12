@@ -524,7 +524,24 @@ impl Engine {
             .cfg
             .auto_compat
             .then(|| crate::compat_for_preset(bytes));
-        self.load_preset_resolved(bytes, name, transition, want)
+        let result = self.load_preset_resolved(bytes, name, transition, want);
+        // Auto mode: a preset that resolved to projectM and was rejected because its code does not compile may still
+        // be a MilkDrop 2 preset (the MD2 code-line glueing joins what projectM keeps apart, e.g. an identifier split
+        // over two lines). Retry once under MilkDrop 2; if that fails too, the projectM error is the one reported.
+        match result {
+            Err(rejected @ EngineError::Compile { .. }) if want == Some(Compat::ProjectM) => {
+                match self.load_preset_resolved(bytes, name, transition, Some(Compat::MilkDrop2)) {
+                    Ok(mut report) => {
+                        report
+                            .warnings
+                            .push(format!("fallback: projectM rejected: {rejected}"));
+                        Ok(report)
+                    }
+                    Err(_) => Err(rejected),
+                }
+            }
+            result => result,
+        }
     }
 
     /// [`Engine::load_preset`] once the compatibility mode is known (`None`: keep the current one). A different mode

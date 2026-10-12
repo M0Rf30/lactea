@@ -66,7 +66,8 @@ pub use textures::{Image, TextureProvider};
 
 /// The compatibility mode [`EngineConfig::auto_compat`] picks for a preset file: [`Compat::MilkDrop3`] when
 /// [`lactea_preset::detect_compat`] finds evidence of a MilkDrop 3 feature, otherwise [`Compat::ProjectM`]
-/// (MilkDrop 2 files are indistinguishable from projectM ones, so it is never chosen). Pure on the bytes; the
+/// (MilkDrop 2 files are indistinguishable from projectM ones, so this never returns it; [`Engine::load_preset`]
+/// reaches it only by retrying a preset projectM rejects with a compile error). Pure on the bytes; the
 /// evidence itself is [`lactea_preset::detect_compat`].
 pub fn compat_for_preset(bytes: &[u8]) -> Compat {
     match lactea_preset::detect_compat(bytes).family {
@@ -92,8 +93,9 @@ pub struct EngineConfig {
     pub compat: Compat,
     /// Choose the compatibility mode per preset: every [`Engine::load_preset`] looks at the preset's bytes
     /// ([`lactea_preset::detect_compat`]: MilkDrop 3 when the file has evidence of a MilkDrop 3 feature, otherwise
-    /// projectM; MilkDrop 2 is never selected) and switches the engine to that mode when it differs from the current
-    /// one. A switch is always a hard cut. Default `false`: [`EngineConfig::compat`] is fixed. See `docs/md3.md`,
+    /// projectM) and switches the engine to that mode when it differs from the current one; a preset projectM
+    /// rejects with an expression compile error is retried once under MilkDrop 2. A switch is always a hard cut.
+    /// Default `false`: [`EngineConfig::compat`] is fixed. See `docs/md3.md`,
     /// "Automatic compatibility".
     pub auto_compat: bool,
     /// Added to warp UVs in texels (0 on modern APIs; MilkDrop 2 on D3D9 used 0.5).

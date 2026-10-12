@@ -28,6 +28,7 @@ use wgpu::util::DeviceExt;
 mod custom_io;
 mod md2_blend;
 use md2_blend::{BlendBase, BlendState, build_blend_frame};
+mod comp_effects;
 
 /// projectM's default composite shader (`FinalComposite.cpp`): plain copy of the main image.
 const PASSTHROUGH_COMP: &str = "shader_body\n{\nret = tex2D(sampler_main, uv).xyz;\n}";
@@ -204,6 +205,9 @@ pub struct Engine {
     md2_clocks: md2_blend::PatternClocks,
     md2_forced_pattern: Option<u32>,
     on_switch_failed: crate::callbacks::Hook<crate::callbacks::SwitchFailure>,
+    /// MD3 `AutoHardCutMode` state and the cuts it asked for since the host last called `take_auto_cuts`.
+    auto_cut: crate::auto_cut::AutoCut,
+    pending_auto_cuts: u32,
 }
 
 fn eel_seed(run_seed: u64) -> u64 {
@@ -266,6 +270,8 @@ impl Engine {
             md2_clocks: Default::default(),
             md2_forced_pattern: None,
             on_switch_failed: Default::default(),
+            auto_cut: crate::auto_cut::AutoCut::new(cfg.seed, cfg.auto_hard_cut_mode),
+            pending_auto_cuts: 0,
             cfg,
         }
     }
@@ -990,6 +996,7 @@ impl Engine {
         target: &wgpu::TextureView,
         clock: FrameClock,
     ) {
+        self.auto_cut_step(clock.time);
         let dt = (clock.time - self.last_time).max(0.0);
         self.last_time = clock.time;
         self.last_frame_no = clock.frame;

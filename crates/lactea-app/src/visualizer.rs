@@ -36,6 +36,18 @@ pub trait Visualizer {
     fn dump_stages(&mut self) -> Vec<(String, u32, u32, Vec<u8>)> {
         Vec::new()
     }
+    /// Instant preset changes the visualizer asked for in the frames rendered since the last call
+    /// (MD3 auto hard cuts, `docs/app.md`); the host loads ONE preset for any count > 0.
+    fn take_auto_cuts(&mut self) -> u32 {
+        0
+    }
+    /// Set the MD3 auto hard cut mode (0 = off, 1..=7); ignored by visualizers without it.
+    fn set_auto_hard_cut_mode(&mut self, _mode: u8) {}
+    /// The current auto hard cut mode, or `None` when the visualizer has no such feature or its
+    /// compat mode does not support it (the key then tells the user what to enable).
+    fn auto_hard_cut_mode(&self) -> Option<u8> {
+        None
+    }
 }
 
 #[repr(C)]

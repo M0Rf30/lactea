@@ -85,3 +85,12 @@ Differences of MilkDrop 3 from MilkDrop 2 (the second column of the sections abo
 | Custom-shape `sides` (`max_shape_sides`) | `3..=100` | `3..=100` | `3..=500` (`sides + 2` fan vertices) |
 | Warp `sin` / `cos` terms (`md3_warp_skip_tiny`) | always added (GPU vertex shader) | always added | added only if `\|warp\| > 0.0001` |
 | Borders during a preset blend (`md3_border_gate`, `EngineConfig::md3_disable_box`) | drawn | drawn | not drawn while blending when `DisableBox` is on (default) |
+
+## MilkDrop 3
+
+Rows of `Compat::MilkDrop3` against MilkDrop 2 / projectM; details in [`md3.md`](md3.md).
+
+| Item | projectM (default) | MilkDrop 2 | MilkDrop 3 |
+|---|---|---|---|
+| Auto hard cut (`md3_auto_hard_cut`; `EngineConfig::auto_hard_cut_mode`, `Engine::set_auto_hard_cut_mode`, F8 in the app, `--auto-hard-cut`) | none (projectM's own `hard_cut_*` volume-jump rule is a separate setting and stays) | none | modes 1..7 watch the previous frame's `bass` / `treb`: modes 1-6 request a blend-time-0 preset change (mode 4 can ask twice in a frame), mode 7 injects a random effect into the composite shader instead; independent of both hard-cut rules above |
+| Display time of a preset (`md3_preset_time_rand`; `PresetControl::set_md3_time_rand`) | gaussian (`easter_egg` sigma) around the preset duration | BeatDrop draws `uniform(0,1) * TimeBetweenPresetsRand`; `Compat::MilkDrop2` does not model it and keeps projectM's gaussian | `BlendTimeAuto + TimeBetweenPresets + (rand() % 1000) * TimeBetweenPresetsRand * 0.001` |

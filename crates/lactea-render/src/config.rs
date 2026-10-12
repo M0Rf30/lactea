@@ -202,6 +202,12 @@ pub struct CompatRules {
     /// MilkDrop 3 hides the outer / inner borders while a preset blend is running if the host's `DisableBox`
     /// setting is on (`EngineConfig::md3_disable_box`).
     pub md3_border_gate: bool,
+    /// MD3 `AutoHardCutMode` 1..7 (`lactea::auto_cut`) is active: the engine watches the previous frame's `bass` /
+    /// `treb` and asks for instant preset changes or injects composite-shader effects. Off under projectM and MD2.
+    pub md3_auto_hard_cut: bool,
+    /// MD3 display time of a preset: `BlendTimeAuto + TimeBetweenPresets + (rand() % 1000) * TimeBetweenPresetsRand *
+    /// 0.001` (hosts feed it to `PresetControl::set_md3_time_rand`) instead of projectM's gaussian easter egg.
+    pub md3_preset_time_rand: bool,
 }
 
 impl Compat {
@@ -257,6 +263,8 @@ impl Compat {
                 max_shape_sides: 100,
                 md3_warp_skip_tiny: false,
                 md3_border_gate: false,
+                md3_auto_hard_cut: false,
+                md3_preset_time_rand: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -307,6 +315,8 @@ impl Compat {
                 max_shape_sides: 100,
                 md3_warp_skip_tiny: false,
                 md3_border_gate: false,
+                md3_auto_hard_cut: false,
+                md3_preset_time_rand: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
@@ -314,6 +324,8 @@ impl Compat {
                 max_shape_sides: 500,
                 md3_warp_skip_tiny: true,
                 md3_border_gate: true,
+                md3_auto_hard_cut: true,
+                md3_preset_time_rand: true,
                 ..Compat::MilkDrop2.rules()
             },
         }

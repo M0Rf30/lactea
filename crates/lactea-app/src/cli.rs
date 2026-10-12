@@ -47,6 +47,14 @@ pub enum CompatArg {
     Milkdrop3,
 }
 
+impl CompatArg {
+    /// Whether this mode follows MilkDrop 3 (`CompatRules::md3_auto_hard_cut` /
+    /// `md3_preset_time_rand`); usable without the `engine` feature.
+    pub fn md3(self) -> bool {
+        self == CompatArg::Milkdrop3
+    }
+}
+
 fn parse_size(s: &str) -> Result<(u32, u32), String> {
     let (w, h) = s
         .split_once(['x', 'X'])
@@ -63,6 +71,7 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 ///
 /// Keys: N/Right/Space next preset, P/Left previous, R random, L lock/unlock auto-advance,
 /// F/F11 (or double-click) fullscreen, Esc/Q quit.
+/// F8 cycles the MD3 auto hard cut mode (`--compat milkdrop3` only).
 #[derive(Parser, Debug, Clone)]
 #[command(name = "lactea", version)]
 pub struct Args {
@@ -200,6 +209,22 @@ pub struct Args {
     /// Testing: scripted key presses, e.g. "30:n,60:p,90:l,120:esc" (frame:key).
     #[arg(long, value_name = "FRAME:KEY,...", hide = true)]
     pub inject_keys: Option<String>,
+
+    /// Engine, `--compat milkdrop3` only: initial MilkDrop 3 AutoHardCutMode, 0 = off. 1..=6 change the
+    /// preset instantly (a hard cut, whatever --transition-duration) on beat/loudness triggers; 7 injects a
+    /// random effect into the composite shader without changing the preset. F8 cycles it at runtime.
+    #[arg(
+        long,
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=7),
+        value_name = "N"
+    )]
+    pub auto_hard_cut: u8,
+
+    /// `--compat milkdrop3` only: MD3 TimeBetweenPresetsRand. A preset stays for --transition-duration +
+    /// --duration + a random 0..SECONDS (negative = 0) instead of --duration alone.
+    #[arg(long, default_value_t = 10.0, value_name = "SECONDS")]
+    pub duration_rand: f64,
 }
 
 #[cfg(test)]
@@ -260,5 +285,24 @@ mod tests {
         assert_eq!(a.dir.len(), 2);
         assert!(parse(&["--size", "0x5"]).is_err());
         assert!(parse(&["--size", "640"]).is_err());
+    }
+
+    #[test]
+    fn auto_hard_cut_and_duration_rand() {
+        let a = parse(&[]).unwrap();
+        assert_eq!(a.auto_hard_cut, 0);
+        assert_eq!(a.duration_rand, 10.0);
+        let a = parse(&["--auto-hard-cut", "7", "--duration-rand", "2.5"]).unwrap();
+        assert_eq!((a.auto_hard_cut, a.duration_rand), (7, 2.5));
+        assert_eq!(parse(&["--auto-hard-cut", "0"]).unwrap().auto_hard_cut, 0);
+        assert!(parse(&["--auto-hard-cut", "8"]).is_err());
+        assert!(parse(&["--auto-hard-cut", "-1"]).is_err());
+        assert!(parse(&["--auto-hard-cut", "x"]).is_err());
+    }
+
+    #[test]
+    fn only_milkdrop3_is_md3() {
+        assert!(CompatArg::Milkdrop3.md3());
+        assert!(!CompatArg::Milkdrop2.md3() && !CompatArg::Projectm.md3());
     }
 }

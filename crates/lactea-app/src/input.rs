@@ -13,15 +13,18 @@ pub enum Action {
     /// Write every pipeline stage of the last frame as `lactea-debug-<frame>-<stage>.png` into
     /// `$LACTEA_DEBUG_DIR` (default: `<temp dir>/lactea-debug`).
     DumpStages,
+    /// Cycle the MD3 auto hard cut mode off, 1..=7, off (MD3's F8; needs `--compat milkdrop3`).
+    CycleAutoHardCut,
 }
 
-/// N/Right/Space next, P/Left previous, R random, L lock, F/F11 fullscreen, D dump pipeline stages, Esc/Q quit.
+/// N/Right/Space next, P/Left previous, R random, L lock, F/F11 fullscreen, D dump pipeline stages, F8 auto hard cut mode, Esc/Q quit.
 pub fn action_for_key(key: &Key) -> Option<Action> {
     match key {
         Key::Named(NamedKey::Escape) => Some(Action::Quit),
         Key::Named(NamedKey::ArrowRight | NamedKey::Space) => Some(Action::Navigate(Nav::Next)),
         Key::Named(NamedKey::ArrowLeft) => Some(Action::Navigate(Nav::Prev)),
         Key::Named(NamedKey::F11) => Some(Action::ToggleFullscreen),
+        Key::Named(NamedKey::F8) => Some(Action::CycleAutoHardCut),
         Key::Character(c) => match c.to_ascii_lowercase().as_str() {
             "q" => Some(Action::Quit),
             "n" => Some(Action::Navigate(Nav::Next)),
@@ -37,7 +40,7 @@ pub fn action_for_key(key: &Key) -> Option<Action> {
 }
 
 /// Scripted key presses for tests: `"30:n,60:p,90:l"` = frame 30 -> `n`, ...
-/// Key names: a single character or one of `space right left esc f11`.
+/// Key names: a single character or one of `space right left esc f11 f8`.
 pub fn parse_script(s: &str) -> Result<Vec<(u64, Key)>, String> {
     let mut out = Vec::new();
     for item in s.split(',').map(str::trim).filter(|i| !i.is_empty()) {
@@ -54,6 +57,7 @@ pub fn parse_script(s: &str) -> Result<Vec<(u64, Key)>, String> {
             "left" => Key::Named(NamedKey::ArrowLeft),
             "esc" | "escape" => Key::Named(NamedKey::Escape),
             "f11" => Key::Named(NamedKey::F11),
+            "f8" => Key::Named(NamedKey::F8),
             k if k.chars().count() == 1 => Key::Character(k.into()),
             k => return Err(format!("'{item}': unknown key '{k}'")),
         };
@@ -89,6 +93,7 @@ mod tests {
             (ch("f"), ToggleFullscreen),
             (ch("d"), DumpStages),
             (Key::Named(NamedKey::F11), ToggleFullscreen),
+            (Key::Named(NamedKey::F8), CycleAutoHardCut),
         ];
         for (k, want) in cases {
             assert_eq!(action_for_key(&k), Some(want), "{k:?}");
@@ -106,6 +111,7 @@ mod tests {
         assert_eq!(action_for_key(&s[2].1), Some(Action::Navigate(Nav::Next)));
         assert!(parse_script("x").is_err());
         assert!(parse_script("1:foo").is_err());
+        assert_eq!(parse_script("5:f8").unwrap()[0].1, Key::Named(NamedKey::F8));
         assert!(parse_script("").unwrap().is_empty());
     }
 }

@@ -28,6 +28,7 @@
 
 #![warn(missing_docs)]
 
+pub mod auto_cut;
 mod callbacks;
 mod control;
 mod engine;
@@ -88,6 +89,10 @@ pub struct EngineConfig {
     /// MilkDrop 3's `DisableBox` setting (default on): under [`Compat::MilkDrop3`] the outer / inner borders
     /// (`ob_*` / `ib_*`) are not drawn while a preset blend is running. Ignored by the other compat modes.
     pub md3_disable_box: bool,
+    /// MilkDrop 3 `AutoHardCutMode` (0 = off, 1..=7, see [`auto_cut`]). Only honoured with
+    /// [`Compat::MilkDrop3`]; the other compat modes ignore it. [`Engine::set_auto_hard_cut_mode`] changes it
+    /// at runtime.
+    pub auto_hard_cut_mode: u8,
 }
 
 impl Default for EngineConfig {
@@ -105,6 +110,7 @@ impl Default for EngineConfig {
             preset_duration: 1e9,
             start_clean: false,
             md3_disable_box: true,
+            auto_hard_cut_mode: 0,
         }
     }
 }

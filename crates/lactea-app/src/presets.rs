@@ -127,6 +127,10 @@ pub struct PresetBrowser {
     duration: Duration,
     loaded_at: Instant,
     rng: fastrand::Rng,
+    /// MD3 display time (`BlendTimeAuto`, `TimeBetweenPresetsRand` in seconds); `None` = `duration` alone.
+    md3_time: Option<(Duration, f64)>,
+    /// Random part of the current preset's MD3 display time, drawn by `commit`.
+    md3_extra: Duration,
 }
 
 impl PresetBrowser {
@@ -140,6 +144,27 @@ impl PresetBrowser {
             duration,
             loaded_at: Instant::now(),
             rng: fastrand::Rng::with_seed(seed),
+            md3_time: None,
+            md3_extra: Duration::ZERO,
+        }
+    }
+
+    /// Use MD3's display time for the presets started from now on: `blend + duration + (r % 1000) * rand *
+    /// 0.001` with `r` from the seeded stream, one draw per `commit` (MD3 3.37, docs/md3.md §Auto hard cuts).
+    /// `blend` is `BlendTimeAuto` (the soft cut length), `rand` is `TimeBetweenPresetsRand` (negative = 0).
+    /// A zero `duration` still never rotates.
+    pub fn set_md3_time(&mut self, blend: Duration, rand: f64) {
+        self.md3_time = Some((blend, rand.max(0.0)));
+    }
+
+    /// Time a preset stays before the timer asks for the next one.
+    fn period(&self) -> Duration {
+        match self.md3_time {
+            Some((blend, _)) => self
+                .duration
+                .saturating_add(blend)
+                .saturating_add(self.md3_extra),
+            None => self.duration,
         }
     }
 
@@ -180,7 +205,7 @@ impl PresetBrowser {
             return None;
         }
         Some(
-            self.duration
+            self.period()
                 .saturating_sub(now.saturating_duration_since(self.loaded_at)),
         )
     }
@@ -241,6 +266,10 @@ impl PresetBrowser {
         }
         self.current = Some(idx);
         self.loaded_at = now;
+        if let Some((_, rand)) = self.md3_time {
+            let secs = f64::from(self.rng.u32(..1000)) * rand * 0.001;
+            self.md3_extra = Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO);
+        }
     }
 
     /// Index to try after a failed load of `failed` during `nav` (so a broken preset is skipped
@@ -324,6 +353,75 @@ mod tests {
         let mut b = browser(1);
         go(&mut b, Nav::Next);
         assert!(!b.auto_due(Instant::now() + Duration::from_secs(3600)));
+    }
+
+    /// Time the browser waits after a commit at `t0` (`auto_remaining(t0)` is the whole period).
+    fn period_after_commit(b: &mut PresetBrowser, t0: Instant) -> Duration {
+        let i = b.pick(Nav::Next).unwrap();
+        b.commit(i, Nav::Next, t0);
+        b.auto_remaining(t0).unwrap()
+    }
+
+    fn md3_browser(seed: u64, duration: u64, blend: u64, rand: f64) -> PresetBrowser {
+        let mut b = PresetBrowser::new(entries(3), false, Duration::from_secs(duration), seed);
+        b.set_md3_time(Duration::from_secs(blend), rand);
+        b
+    }
+
+    #[test]
+    fn md3_time_is_blend_plus_duration_plus_a_seeded_draw() {
+        let t0 = Instant::now();
+        let mut b = md3_browser(7, 30, 3, 10.0);
+        let periods: Vec<_> = (0..200).map(|_| period_after_commit(&mut b, t0)).collect();
+        let (lo, hi) = (Duration::from_secs(33), Duration::from_secs(43));
+        assert!(periods.iter().all(|p| (lo..hi).contains(p)), "{periods:?}");
+        // the draw varies, and the first preset gets one: the first value of the seeded stream
+        assert!(periods.iter().any(|p| *p != periods[0]));
+        let first = f64::from(fastrand::Rng::with_seed(7).u32(..1000)) * 10.0 * 0.001;
+        assert_eq!(periods[0], lo + Duration::from_secs_f64(first));
+
+        // same seed, same sequence; another seed, another one
+        let again: Vec<_> = {
+            let mut b = md3_browser(7, 30, 3, 10.0);
+            (0..200).map(|_| period_after_commit(&mut b, t0)).collect()
+        };
+        assert_eq!(periods, again);
+        let mut other = md3_browser(8, 30, 3, 10.0);
+        let others: Vec<_> = (0..200)
+            .map(|_| period_after_commit(&mut other, t0))
+            .collect();
+        assert_ne!(periods, others);
+    }
+
+    #[test]
+    fn md3_time_edge_cases() {
+        let t0 = Instant::now();
+        // negative rand = 0: exactly blend + duration
+        let mut b = md3_browser(1, 30, 3, -5.0);
+        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+        // rand 0 likewise
+        let mut b = md3_browser(1, 30, 3, 0.0);
+        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+        // zero duration never rotates, whatever blend and rand are
+        let mut b = md3_browser(1, 0, 3, 10.0);
+        let i = b.pick(Nav::Next).unwrap();
+        b.commit(i, Nav::Next, t0);
+        assert_eq!(b.auto_remaining(t0), None);
+        assert!(!b.auto_due(t0 + Duration::from_secs(3600)));
+        // due once the (drawn) period elapsed
+        let mut b = md3_browser(1, 30, 3, 10.0);
+        let p = period_after_commit(&mut b, t0);
+        assert!(!b.auto_due(t0 + p - Duration::from_millis(1)));
+        assert!(b.auto_due(t0 + p));
+    }
+
+    #[test]
+    fn md3_time_disabled_is_the_plain_duration() {
+        let t0 = Instant::now();
+        let mut b = browser(3);
+        for _ in 0..5 {
+            assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(30));
+        }
     }
 
     #[test]

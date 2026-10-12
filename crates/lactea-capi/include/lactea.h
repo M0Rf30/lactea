@@ -85,10 +85,18 @@ typedef struct {
   uint32_t fps;
   // Seconds a preset is meant to run (`progress = elapsed / duration`).
   double preset_duration;
+  // MilkDrop 3 `AutoHardCutMode`: 0 = off, 1..=6 beat-driven instant preset changes (reported as
+  // hard-cut requests, see `lactea_poll_switch_request`), 7 = a random effect injected into the
+  // composite shader without a preset change; larger values count as 7. Acts only with
+  // `LACTEA_COMPAT_MILKDROP3` (stored and ignored otherwise); `lactea_set_auto_hard_cut_mode`
+  // changes it at runtime.
+  uint8_t auto_hard_cut_mode;
 } LacteaConfig;
 
 // Called when a rendered frame asks for another preset (display time up or a beat-driven hard cut,
-// see `lactea_set_switch_settings`). The request is *also*
+// see `lactea_set_switch_settings`). With `LACTEA_COMPAT_MILKDROP3` an auto hard cut
+// (`lactea_set_auto_hard_cut_mode`) calls it too, with `is_hard_cut = true`; `preset_locked`
+// silences every request. The request is *also*
 // kept for `lactea_poll_switch_request`. The callback runs synchronously on the calling thread,
 // inside `lactea_render*`, after the frame is submitted: it must not call any lactea function
 // with the same engine (no re-entrancy); set a flag or queue the request and act on it afterwards.
@@ -103,9 +111,9 @@ typedef void (*LacteaSwitchFailedFn)(const char *preset_name, const char *messag
 // projectM's preset-switching settings in one struct (`projectm_set_*` / `projectm_get_*` of beat
 // sensitivity, aspect correction, easter egg, preset lock, preset / soft-cut / hard-cut timing).
 // Defaults (what a fresh engine reports): 1.0, true, 1.0, false, `config.preset_duration`, 3.0, false,
-// 20.0, 2.0. `beat_sensitivity` is clamped to 0..2 and, like `aspect_correction`, stored only (projectM
-// does not use either anywhere else); reading `hard_cut_duration` back truncates it to whole seconds
-// like projectM.
+// 20.0, 2.0, 10.0. `beat_sensitivity` is clamped to 0..2 and, like `aspect_correction`, stored only
+// (projectM does not use either anywhere else); reading `hard_cut_duration` back truncates it to
+// whole seconds like projectM.
 typedef struct {
   // Stored only; clamped to 0..=2.
   float beat_sensitivity;
@@ -125,6 +133,12 @@ typedef struct {
   double hard_cut_duration;
   // Beat loudness (as a multiple of the running average) that triggers a hard cut.
   float hard_cut_sensitivity;
+  // MilkDrop 3 `TimeBetweenPresetsRand` in seconds. With `LACTEA_COMPAT_MILKDROP3` the display
+  // time of a preset is `soft_cut_duration` (MD3's `BlendTimeAuto`) + `preset_duration`
+  // (`TimeBetweenPresets`) + a seeded random 0..`preset_duration_rand` seconds in 1 ms steps, and
+  // `easter_egg` is ignored; applies to presets started afterwards. Negative counts as 0. With
+  // the other compat modes it is stored and read back but inert. Default 10.0.
+  double preset_duration_rand;
 } LacteaSwitchSettings;
 
 // The host's Vulkan objects. Dispatchable handles are passed as pointers, strings as arrays of
@@ -378,6 +392,23 @@ LacteaStatus lactea_set_texel_offset(LacteaEngine *engine, float x, float y);
 // `engine` NULL or valid; the pointers NULL or writable.
 void lactea_get_texel_offset(const LacteaEngine *engine, float *x, float *y);
 
+// MilkDrop 3 `AutoHardCutMode` (`LacteaConfig::auto_hard_cut_mode`): 0 = off, 1..=6 = beat-driven
+// instant preset changes (they raise a hard-cut request, see `lactea_poll_switch_request`), 7 = a
+// random effect is injected into the composite shader and the preset stays; larger values are
+// clamped to 7. Takes effect on the next frame. Only acts with `LACTEA_COMPAT_MILKDROP3`: with the
+// other compat modes the mode is stored and read back but never does anything.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_set_auto_hard_cut_mode(LacteaEngine *engine, uint8_t mode);
+
+// The auto hard cut mode in use (`lactea_set_auto_hard_cut_mode`, after the clamp to 7), whether or
+// not the compat mode lets it act.
+//
+// # Safety
+// `engine` valid; `out` writable.
+LacteaStatus lactea_get_auto_hard_cut_mode(const LacteaEngine *engine, uint8_t *out);
+
 // Read the preset-switching settings (see `LacteaSwitchSettings`).
 //
 // # Safety
@@ -394,12 +425,15 @@ LacteaStatus lactea_set_switch_settings(LacteaEngine *engine, const LacteaSwitch
 // Did the last rendered frames ask for a preset change (`projectm_preset_switch_requested_event`)?
 // Returns `true` once per request and stores `*is_hard_cut` (beat-driven cut vs display time up;
 // NULL is allowed). The host then loads the next preset itself. Requests only happen while a preset
-// loaded through this API is running, the preset is not locked, and (hard cuts) hard cuts are enabled.
+// loaded through this API is running, the preset is not locked, and (projectM beat hard cuts) hard
+// cuts are enabled. With `LACTEA_COMPAT_MILKDROP3` and a non-zero auto hard cut mode
+// (`LacteaConfig::auto_hard_cut_mode`, `lactea_set_auto_hard_cut_mode`) a beat-driven auto hard
+// cut also raises a request with `*is_hard_cut = true`, independent of the projectM hard-cut
+// settings: load the next preset with a cut. `preset_locked` suppresses it like any other request.
 //
 // # Safety
 // `engine` valid; `is_hard_cut` NULL or writable.
-bool lactea_poll_switch_request(LacteaEngine *engine,
-                                bool *is_hard_cut);
+bool lactea_poll_switch_request(LacteaEngine *engine, bool *is_hard_cut);
 
 // `projectm_touch`. A documented no-op, exactly like projectM 4.2 (whose touch functions are empty
 // stubs): hosts written against projectM link unchanged and get the same pixels. These symbols

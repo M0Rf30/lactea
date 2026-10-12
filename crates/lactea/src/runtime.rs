@@ -4,12 +4,14 @@
 //! `WaveformPerFrameContext` / `WaveformPerPointContext`, `ShapePerFrameContext` and
 //! `MilkdropPreset::{PerFrameUpdate, CompileCodeAndRunInitExpressions}`.
 
+use crate::EngineError;
 use crate::vars::{PfVars, PpVars, ShVars, WfVars, WpVars};
-use lactea_eel::{CompileError, Context, GlobalMemory, Program};
+use lactea_eel::{CompileError, Context, Dialect, GlobalMemory, Program};
 use lactea_preset::{
     BaseValues, CustomShape, CustomWave, LINEFEED_CONTROL_CHAR, code_to_source,
     strip_linefeeds_and_comments,
 };
+use lactea_render::CompatRules;
 use std::sync::Arc;
 
 pub const NUM_Q: usize = 32;
@@ -58,6 +60,38 @@ pub fn compile_opt(
         return Ok(None);
     }
     ctx.compile(&src).map(Some)
+}
+
+/// [`compile_opt`] for one named code part of a preset load, under the compat rules' code-failure policy.
+///
+/// A part that does not compile rejects the preset ([`EngineError::Compile`]), except with
+/// `CompatRules::md3_drop_failed_code` (MilkDrop 3): the whole part is dropped, the reason is pushed to `warnings`
+/// and the load goes on without that code (`Ok(None)`, exactly like a part the preset does not have).
+pub fn compile_part(
+    ctx: &mut Context,
+    src: &str,
+    rules: &CompatRules,
+    what: &str,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Program>, EngineError> {
+    match compile_opt(ctx, src, rules.md2_code_join) {
+        Ok(p) => Ok(p),
+        Err(e) if rules.md3_drop_failed_code => {
+            warnings.push(format!("{what} dropped: {e}"));
+            Ok(None)
+        }
+        Err(e) => Err(EngineError::compile(what, e)),
+    }
+}
+
+/// The expression language a compat mode runs (`CompatRules::md3_ns_eel2`): the dialect the engine's
+/// [`GlobalMemory`] owner is created with, which every context built from it follows.
+pub fn eel_dialect(rules: &CompatRules) -> Dialect {
+    if rules.md3_ns_eel2 {
+        Dialect::NsEel2
+    } else {
+        Dialect::ProjectMEval
+    }
 }
 
 fn set(ctx: &mut Context, v: lactea_eel::Var, x: f64) {
@@ -464,5 +498,104 @@ mod tests {
         }
         // projectM keeps a comment-only block as an empty program
         assert!(compile_opt(&mut ctx, "// c\u{1}", false).unwrap().is_some());
+    }
+
+    fn gm(compat: Compat) -> Arc<GlobalMemory> {
+        Arc::new(GlobalMemory::with_dialect(eel_dialect(&compat.rules())))
+    }
+
+    fn part(compat: Compat, src: &str) -> (Result<Option<Program>, EngineError>, Vec<String>) {
+        let mut ctx = Context::new(gm(compat));
+        let mut warnings = Vec::new();
+        let r = compile_part(
+            &mut ctx,
+            src,
+            &compat.rules(),
+            "per-frame code",
+            &mut warnings,
+        );
+        (r, warnings)
+    }
+
+    #[test]
+    fn only_milkdrop3_runs_ns_eel2() {
+        assert_eq!(
+            eel_dialect(&Compat::ProjectM.rules()),
+            Dialect::ProjectMEval
+        );
+        assert_eq!(
+            eel_dialect(&Compat::MilkDrop2.rules()),
+            Dialect::ProjectMEval
+        );
+        assert_eq!(eel_dialect(&Compat::MilkDrop3.rules()), Dialect::NsEel2);
+    }
+
+    /// MD3 3.37 rejects a '.' inside identifiers (measured on the real program), so a part that
+    /// reads `mouse.x` as source text is dropped; a name the host registers is still found verbatim.
+    #[test]
+    fn dotted_names_do_not_parse_under_milkdrop3() {
+        let (r, warnings) = part(Compat::MilkDrop3, "q1 = mouse.x * 2;\u{1}");
+        assert!(r.unwrap().is_none());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let mut ctx = Context::new(gm(Compat::MilkDrop3));
+        let x = ctx.var("mouse.x");
+        ctx.set(x, 0.5);
+        assert_eq!(ctx.find_var("Mouse.X").map(|v| ctx.get(v)), Some(0.5));
+    }
+
+    /// ns-eel2 numerics through the preset contexts: the unguarded `/` is filtered by `=`, `%` is integer.
+    #[test]
+    fn per_frame_code_follows_the_ns_eel2_numerics_under_milkdrop3() {
+        let preset =
+            Preset::parse(b"per_frame_1=q1 = 1/0; a = -7; q2 = a % 3; q3 = int(-2.5);\n").unwrap();
+        let run = |compat: Compat| {
+            let mut pf = PerFrame::new(&gm(compat));
+            pf.prog =
+                compile_opt(&mut pf.ctx, &preset.per_frame, compat.rules().md2_code_join).unwrap();
+            pf.run();
+            (pf.q(0), pf.q(1), pf.q(2))
+        };
+        assert_eq!(run(Compat::MilkDrop3), (0.0, 1.0, -3.0));
+        assert_eq!(run(Compat::MilkDrop2), (0.0, -1.0, -3.0));
+    }
+
+    #[test]
+    fn a_failing_part_is_dropped_under_milkdrop3_and_rejects_the_preset_otherwise() {
+        let bad = "q1 = (;\u{1}";
+        for compat in [Compat::ProjectM, Compat::MilkDrop2] {
+            let (r, warnings) = part(compat, bad);
+            assert!(matches!(r, Err(EngineError::Compile { .. })), "{compat:?}");
+            assert!(warnings.is_empty());
+        }
+        let (r, warnings) = part(Compat::MilkDrop3, bad);
+        assert!(r.unwrap().is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].starts_with("per-frame code dropped: "),
+            "{warnings:?}"
+        );
+        // a good part is untouched
+        let (r, warnings) = part(Compat::MilkDrop3, "q1 = 1;\u{1}");
+        assert!(r.unwrap().is_some() && warnings.is_empty());
+    }
+
+    /// The whole part goes, not just the failing statement.
+    #[test]
+    fn the_good_statements_of_a_failing_part_do_not_run() {
+        let preset = Preset::parse(b"per_frame_1=q1 = 5;\nper_frame_2=q2 = (;\n").unwrap();
+        let compat = Compat::MilkDrop3;
+        let mut pf = PerFrame::new(&gm(compat));
+        let mut warnings = Vec::new();
+        pf.prog = compile_part(
+            &mut pf.ctx,
+            &preset.per_frame,
+            &compat.rules(),
+            "per-frame code",
+            &mut warnings,
+        )
+        .unwrap();
+        pf.run();
+        assert!(pf.prog.is_none());
+        assert_eq!((pf.q(0), pf.q(1)), (0.0, 0.0));
     }
 }

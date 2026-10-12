@@ -47,6 +47,8 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | warp animation terms (`warp_anim_projectm`) | projectM's `y` sign and GPU `pow` | MD2's |
 /// | `shapecode_N_image` key (`custom_shape_image`) | read | not a key (stays in `extra`) |
 /// | no-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
+/// | expression language (`md3_ns_eel2`) | projectm-eval | projectm-eval / projectm-eval / ns-eel2 (MilkDrop 3 only) |
+/// | preset code that fails to compile (`md3_drop_failed_code`) | the preset is rejected | the preset is rejected (MilkDrop 2 itself drops the part; not ported) / MilkDrop 3 drops the part and loads |
 ///
 /// `MilkDrop3` is `MilkDrop2` plus the MilkDrop 3 deltas (see `docs/md3.md`); every MD3 delta is a field of
 /// [`CompatRules`], and [`Compat::md2_family`] is true for both variants.
@@ -192,6 +194,14 @@ pub struct CompatRules {
     pub custom_shape_image: bool,
     /// The no-shader composite pass samples the feedback image with the `Wrap` address mode; otherwise `Clamp`.
     pub noshader_comp_wrap: bool,
+    /// Preset expressions run on ns-eel2 (`lactea_eel::Dialect::NsEel2`, MilkDrop 3's engine: unguarded `/`,
+    /// assignment filtering, integer `%`, `$PI` constants, dotted identifiers, 8M-entry `megabuf`, wrapping `gmegabuf`
+    /// and registers that outlive presets, ...) instead of projectm-eval. `docs/md3.md`, "Expression engine".
+    pub md3_ns_eel2: bool,
+    /// A code part that fails to compile is dropped (with a warning) and the preset still loads: a failed init part
+    /// zeroes the post-init `q` values, a failed per-frame / per-vertex / wave / shape part simply does not run.
+    /// Otherwise the first failing part rejects the preset (`EngineError::Compile`).
+    pub md3_drop_failed_code: bool,
 }
 
 impl Compat {
@@ -243,6 +253,8 @@ impl Compat {
                 warp_anim_projectm: true,
                 custom_shape_image: true,
                 noshader_comp_wrap: false,
+                md3_ns_eel2: false,
+                md3_drop_failed_code: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -289,9 +301,13 @@ impl Compat {
                 warp_anim_projectm: false,
                 custom_shape_image: false,
                 noshader_comp_wrap: true,
+                md3_ns_eel2: false,
+                md3_drop_failed_code: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
+                md3_ns_eel2: true,
+                md3_drop_failed_code: true,
                 ..Compat::MilkDrop2.rules()
             },
         }
@@ -418,5 +434,15 @@ mod tests {
         assert!(!Compat::ProjectM.rules().md2_code_join);
         assert!(Compat::MilkDrop2.rules().md2_code_join);
         assert!(Compat::MilkDrop3.rules().md2_code_join);
+    }
+
+    #[test]
+    fn ns_eel2_and_dropped_code_are_milkdrop3_only() {
+        for c in [Compat::ProjectM, Compat::MilkDrop2] {
+            assert!(!c.rules().md3_ns_eel2);
+            assert!(!c.rules().md3_drop_failed_code);
+        }
+        assert!(Compat::MilkDrop3.rules().md3_ns_eel2);
+        assert!(Compat::MilkDrop3.rules().md3_drop_failed_code);
     }
 }

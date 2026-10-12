@@ -1401,7 +1401,7 @@ mod tests {
         };
         let file = |p1: &str, p2: &str| {
             format!(
-                "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{p2}[PRESET2_END]\n"
+                "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.example.org\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{p2}[PRESET2_END]\n"
             )
         };
         let mut e = Engine::new(
@@ -1467,7 +1467,7 @@ mod tests {
         let view = tex.create_view(&Default::default());
         let half = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\nfDecay=1\n";
         let file = format!(
-            "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{half}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{half}[PRESET2_END]\n"
+            "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.example.org\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{half}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{half}[PRESET2_END]\n"
         );
         let mut e = Engine::new(
             &device,
@@ -1527,5 +1527,93 @@ mod tests {
         let old = e.md2.as_ref().unwrap().old.start_time;
         assert_eq!(old, p1_start, "PRESET1 keeps its own start");
         assert!((new - 5.0).abs() < 0.05, "PRESET2 starts with leg B: {new}");
+    }
+
+    /// The `_mxd3q*` block reads `q64` of the state MD3 treats as current (`active`, `m_pState`) right after that
+    /// state's own per-frame code, in the same frame. `q64` is the first detector's minimum delay: a preset that
+    /// writes `q64 = 1` suppresses the start-up beats (latch L0 keeps counting from the first frame), otherwise the
+    /// transient resets L0 on frame 4. In a double preset the new state is PRESET2, not the old PRESET1.
+    #[test]
+    fn the_mxd3q_block_reads_the_current_states_q64_after_its_per_frame_code() {
+        use crate::{Compat, Engine, EngineConfig, FrameClock, Transition};
+        let device_queue = {
+            let instance = wgpu::Instance::default();
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()
+                .and_then(|a| {
+                    pollster::block_on(a.request_device(&wgpu::DeviceDescriptor::default())).ok()
+                })
+        };
+        let Some((device, queue)) = device_queue else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 24,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        // `qsa.w` (latch L0) after 10 silent frames at 60 fps, the first at `elapsed = 1/60`
+        let latch_after_ten_frames = |preset: &str, name: &str| {
+            let mut e = Engine::new(
+                &device,
+                &queue,
+                EngineConfig {
+                    width: 32,
+                    height: 24,
+                    mesh: [8, 8],
+                    compat: Compat::MilkDrop3,
+                    ..Default::default()
+                },
+            );
+            e.load_preset(preset.as_bytes(), name, Transition::Cut)
+                .unwrap();
+            for frame in 0..10u32 {
+                let mut enc = device.create_command_encoder(&Default::default());
+                e.render(
+                    &mut enc,
+                    &view,
+                    FrameClock {
+                        time: f64::from(frame + 1) / 60.0,
+                        frame,
+                    },
+                );
+                queue.submit(Some(enc.finish()));
+            }
+            e.md3.last_mxd3q().qsa[3]
+        };
+        let half = |code: &str| {
+            format!(
+                "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\nfDecay=1\nper_frame_1={code}\n"
+            )
+        };
+        let double = |p1: &str, p2: &str| {
+            format!(
+                "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.example.org\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{p2}[PRESET2_END]\n"
+            )
+        };
+        let (held, free) = (10.0 / 60.0, 6.0 / 60.0);
+        let near = |got: f32, want: f32| assert!((got - want).abs() < 1e-5, "{got} != {want}");
+        near(latch_after_ten_frames(&half("q64 = 1;"), "held"), held);
+        near(latch_after_ten_frames(&half("q1 = 1;"), "free"), free);
+        let (sets, silent) = (half("q64 = 1;"), half("q1 = 1;"));
+        near(
+            latch_after_ten_frames(&double(&silent, &sets), "held.milk2"),
+            held,
+        );
+        near(
+            latch_after_ten_frames(&double(&sets, &silent), "free.milk2"),
+            free,
+        );
     }
 }

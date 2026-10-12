@@ -1,9 +1,11 @@
 //! MilkDrop 3 inputs of the expressions and shaders that come from the host rather than from the preset: the mouse,
 //! the shader FFT (`sampler_fft`) and the sticky `FFTAttack` / `FFTDecay` globals (`docs/md3.md`, shader inputs).
 //!
-//! Everything is sampled **once per rendered frame** at the top of [`crate::Engine::render`], like MD3 does at the
-//! top of its render function, and shared by every state drawn that frame (the incoming and the outgoing preset of a
-//! soft cut see the same cursor and the same spectrum).
+//! The mouse and the shader FFT are sampled **once per rendered frame** at the top of [`crate::Engine::render`], like
+//! MD3 does at the top of its render function, and shared by every state drawn that frame (the incoming and the
+//! outgoing preset of a soft cut see the same cursor and the same spectrum). The `_mxd3q*` block is the exception: MD3
+//! runs it at the end of `RunPerFrameEquations` and reads the current state's `q64` there, so the frame only captures
+//! its inputs and [`Md3Inputs::step_mxd3q`] steps it, once, after that state's per-frame code.
 
 use crate::EngineConfig;
 use crate::mxd3q::{Mxd3q, Mxd3qAudio, Mxd3qBlock};
@@ -43,8 +45,18 @@ pub(crate) struct Md3Frame {
     pub mouse: MouseFrame,
     /// The shader FFT after this frame's step (`None` unless `CompatRules::md3_shader_fft`).
     pub fft: Option<Arc<[f32; FFT_BINS]>>,
-    /// The `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch float4s after this frame's step.
+    /// The `_mxd3qxa.._d` / `_mxd3qsa.._c` float4s: the previous frame's output until [`Md3Inputs::step_mxd3q`] ran
+    /// this frame's step, this frame's after it.
     pub mxd3q: Mxd3q,
+    /// The `_mxd3q*` block's inputs of this frame, until it steps.
+    pending: Option<PendingStep>,
+}
+
+/// The inputs of one step of the `_mxd3q*` block, captured at the top of the frame.
+struct PendingStep {
+    audio: Mxd3qAudio,
+    fps: f32,
+    elapsed: f32,
 }
 
 /// Engine-wide MD3 input state; lives as long as the engine and is never reset by a preset change.
@@ -93,8 +105,9 @@ impl Md3Inputs {
         (self.attack, self.decay)
     }
 
-    /// Sample the frame's inputs: the mouse (always advances the release edge) and, once per rendered frame, one step
-    /// of the shader FFT from the left spectrum of `audio` and one step of the `_mxd3q*` audio-envelope block.
+    /// Sample the frame's inputs: the mouse (always advances the release edge), once per rendered frame one step of the
+    /// shader FFT from the left spectrum of `audio`, and the inputs of the frame's `_mxd3q*` block step (see
+    /// [`Md3Inputs::step_mxd3q`]).
     pub fn begin_frame(
         &mut self,
         rules: &CompatRules,
@@ -109,8 +122,8 @@ impl Md3Inputs {
         let fft = rules
             .md3_shader_fft
             .then(|| Arc::new(*self.fft.step(&audio.spectrum[0], self.attack, self.decay)));
-        let mxd3q = self.mxd3q.step(
-            &Mxd3qAudio {
+        let pending = PendingStep {
+            audio: Mxd3qAudio {
                 bass: audio.bass,
                 mid: audio.mid,
                 treb: audio.treb,
@@ -120,8 +133,29 @@ impl Md3Inputs {
             },
             fps,
             elapsed,
-        );
-        Some(Md3Frame { mouse, fft, mxd3q })
+        };
+        Some(Md3Frame {
+            mouse,
+            fft,
+            mxd3q: self.mxd3q.last(),
+            pending: Some(pending),
+        })
+    }
+
+    /// Step the `_mxd3q*` block with this frame's inputs and `q64`, the `q64` variable (see [`state_q64`]) of the state
+    /// MD3 treats as current after its per-frame code, and publish the output in `frame.mxd3q`. Call it after that
+    /// per-frame code and before any [`shader_ext`] of the frame; the block steps exactly once per frame, a second call
+    /// does nothing.
+    pub fn step_mxd3q(&mut self, frame: &mut Md3Frame, q64: f32) {
+        if let Some(p) = frame.pending.take() {
+            frame.mxd3q = self.mxd3q.step(&p.audio, p.fps, p.elapsed, q64);
+        }
+    }
+
+    /// The last output of the `_mxd3q*` block.
+    #[cfg(test)]
+    pub fn last_mxd3q(&self) -> Mxd3q {
+        self.mxd3q.last()
     }
 
     fn sample_mouse(&mut self) -> MouseFrame {
@@ -193,6 +227,17 @@ pub(crate) fn shader_ext(
         ext.fft = md3.fft.clone();
     }
     ext
+}
+
+/// `q64` of a state after its per-frame code, the minimum delay of the `_mxd3q*` block's first detector; `0` for a
+/// state that has no `q33..q64` (it can never have written it).
+pub(crate) fn state_q64(pf: &PerFrame) -> f32 {
+    const Q64: usize = lactea_abi::NUM_Q_MD3 - 1;
+    if Q64 < pf.v.q.len() {
+        pf.q(Q64) as f32
+    } else {
+        0.0
+    }
 }
 
 #[cfg(test)]
@@ -285,5 +330,95 @@ mod tests {
             i.begin_frame(&Compat::MilkDrop3.rules(), &audio, 60.0, 1.0)
                 .is_some_and(|f| f.fft.is_some())
         );
+    }
+
+    fn silent_audio() -> AudioFrame {
+        let mut a = AudioFrame::default();
+        (a.bass, a.mid, a.treb) = (1.0, 1.0, 1.0);
+        (a.bass_att, a.mid_att, a.treb_att) = (1.0, 1.0, 1.0);
+        a
+    }
+
+    /// `frames` silent frames of 1/60 s (the first at `elapsed = 1/60`), every step with `q64`.
+    fn run_mxd3q(q64: f32, frames: usize) -> Mxd3q {
+        let rules = Compat::MilkDrop3.rules();
+        let mut i = Md3Inputs::new();
+        let mut last = Mxd3q::default();
+        for f in 1..=frames {
+            let mut m = i
+                .begin_frame(&rules, &silent_audio(), 60.0, f as f32 / 60.0)
+                .unwrap();
+            i.step_mxd3q(&mut m, q64);
+            last = m.mxd3q;
+        }
+        last
+    }
+
+    #[test]
+    fn the_mxd3q_block_steps_once_per_frame_when_asked_and_not_before() {
+        let rules = Compat::MilkDrop3.rules();
+        let mut i = Md3Inputs::new();
+        let mut m = i
+            .begin_frame(&rules, &silent_audio(), 60.0, 1.0 / 60.0)
+            .unwrap();
+        // `begin_frame` only captures the inputs: the frame carries the block's last output (zero before the first)
+        assert_eq!(m.mxd3q, Mxd3q::default());
+        assert_eq!(i.last_mxd3q(), Mxd3q::default());
+        i.step_mxd3q(&mut m, 0.0);
+        let first = m.mxd3q;
+        assert_eq!(first.qxa, [1.0, 2.0, 3.0, 27.0]);
+        assert_eq!(i.last_mxd3q(), first);
+        // a second call in the same frame (another state, another `q64`) does not step again
+        i.step_mxd3q(&mut m, 5.0);
+        assert_eq!(m.mxd3q, first);
+        assert_eq!(i.last_mxd3q(), first);
+        // the next frame starts from that output
+        let m = i
+            .begin_frame(&rules, &silent_audio(), 60.0, 2.0 / 60.0)
+            .unwrap();
+        assert_eq!(m.mxd3q, first);
+    }
+
+    #[test]
+    fn q64_given_to_the_step_is_the_first_detectors_minimum_delay() {
+        let dt = 1.0 / 60.0;
+        // the first six silent frames all pass the envelope test: with no delay L0 is reset on the fourth, a delay
+        // longer than the elapsed time (0.167 s after 10 frames) suppresses every beat
+        let free = run_mxd3q(0.0, 10);
+        let held = run_mxd3q(1.0, 10);
+        assert!((free.qsa[3] - 6.0 * dt).abs() < 1e-6, "{:?}", free.qsa);
+        assert!((held.qsa[3] - 10.0 * dt).abs() < 1e-6, "{:?}", held.qsa);
+    }
+
+    #[test]
+    fn state_q64_reads_the_64th_q_and_defaults_to_zero() {
+        let gm = std::sync::Arc::new(lactea_eel::GlobalMemory::new());
+        let mut pf = PerFrame::new(&gm);
+        assert_eq!(state_q64(&pf), 0.0, "no q33..q64 before the MD3 extension");
+        pf.extend_md3();
+        assert_eq!(state_q64(&pf), 0.0);
+        pf.ctx.set(pf.v.q[63], 2.5);
+        assert_eq!(state_q64(&pf), 2.5);
+    }
+
+    #[test]
+    fn the_shader_ext_carries_the_block_output_published_by_the_step() {
+        let rules = Compat::MilkDrop3.rules();
+        let gm = std::sync::Arc::new(lactea_eel::GlobalMemory::new());
+        let mut pf = PerFrame::new(&gm);
+        pf.extend_md3();
+        let mut i = Md3Inputs::new();
+        let mut m = i
+            .begin_frame(&rules, &silent_audio(), 60.0, 1.0 / 60.0)
+            .unwrap();
+        // before the step the frame still holds the previous output, so a `shader_ext` built too early is stale
+        assert_eq!(
+            shader_ext(&rules, &m, &pf, 0.0, 0.0, true).mxd3q,
+            [[0.0; 4]; 7]
+        );
+        i.step_mxd3q(&mut m, 0.0);
+        let ext = shader_ext(&rules, &m, &pf, 0.0, 0.0, true);
+        assert_eq!(ext.mxd3q[0], [1.0, 2.0, 3.0, 27.0]);
+        assert_eq!(ext.mxd3q[1], m.mxd3q.qxb);
     }
 }

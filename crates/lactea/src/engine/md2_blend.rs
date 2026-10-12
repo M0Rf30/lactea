@@ -1116,23 +1116,13 @@ pub(super) fn build_blend_frame(
     for (i, q) in q.iter_mut().enumerate() {
         *q = opf.q(i) as f32;
     }
-    let ext = match cx.md3 {
-        Some(md3) => crate::md3_inputs::shader_ext(
-            &cfg.compat.rules(),
-            md3,
-            opf,
-            m.old.start_time,
-            cx.clock.time,
-            false,
-        ),
-        None => Default::default(),
-    };
     fi.md2_blend = Some(lactea_render::Md2Blend {
         progress: m.progress,
         vert_alpha,
         old: Md2OldPass {
             q,
-            ext,
+            // MilkDrop 3: filled by `attach_md3_ext` once the `_mxd3q*` block has stepped
+            ext: Default::default(),
             blur: BlurParams {
                 min: [
                     f32v(opf.v.blur1_min),

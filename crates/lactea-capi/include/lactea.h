@@ -353,6 +353,27 @@ LacteaStatus lactea_set_fps(LacteaEngine *engine, uint32_t fps);
 // `engine` NULL or valid.
 uint32_t lactea_get_fps(const LacteaEngine *engine);
 
+// MilkDrop 3 mouse (`LACTEA_COMPAT_MILKDROP3`; ignored by the other modes): the cursor as fractions of the
+// visualizer's size, `(x, y) = (px / width, py / height)` with the origin at the **top left**, and the left button.
+// `inside == false` says the cursor is outside the window (`x` and `y` are then ignored). Call it whenever the
+// state changes; the engine reads the latest values once per rendered frame and derives the one-frame "released"
+// edge of `mouse.w` itself, so a press and release between two rendered frames is not seen.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_set_mouse(LacteaEngine *engine,
+                              float x,
+                              float y,
+                              bool inside,
+                              bool left_down);
+
+// MilkDrop 3 `VolumeSensitivity`: linear gain (default 1) on the 8-bit quantised audio input. Only
+// `LACTEA_COMPAT_MILKDROP3` uses it.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_set_volume_sensitivity(LacteaEngine *engine, float sensitivity);
+
 // Warp-mesh resolution in cells (`projectm_set_mesh_size`): odd sizes round up to even, each axis
 // is limited to 8..=300. Read the value in use back with `lactea_get_mesh_size`.
 //

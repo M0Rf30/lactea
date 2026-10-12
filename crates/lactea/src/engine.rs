@@ -1,7 +1,8 @@
 //! The engine: preset loading and the per-frame CPU pipeline (projectM `MilkdropPreset`).
 
+use crate::md3_inputs::{Md3Frame, Md3Inputs, MouseState, new_analyzer, shader_ext};
 use crate::rng::{ShaderStream, StreamRng, hue_offsets};
-use crate::runtime::{Env, NUM_Q, PerFrame, PerPixel, ShapeRt, WaveRt, compile_opt};
+use crate::runtime::{Env, MAX_Q, NUM_Q, PerFrame, PerPixel, ShapeRt, WaveRt, compile_opt};
 use crate::textures::{Image, TextureProvider, pick_random, rand_slot};
 use crate::{
     EngineConfig, EngineError, ForcedFrame, FrameClock, PresetReport, ShaderFallback,
@@ -67,7 +68,10 @@ struct Loaded {
     waves: Vec<WaveRt>,
     shapes: Vec<ShapeRt>,
     /// `PresetState::frameQVariables`.
-    frame_q: [f64; NUM_Q],
+    frame_q: [f64; MAX_Q],
+    /// Engine time at which this state's preset was loaded (`m_fPresetStartTime`): MilkDrop 3's shader `time` counts
+    /// from it.
+    start_time: f64,
     warp_stream: Option<ShaderStream>,
     comp_stream: Option<ShaderStream>,
     hue_offsets: [f32; 4],
@@ -203,6 +207,8 @@ pub struct Engine {
     md2_clocks: md2_blend::PatternClocks,
     md2_forced_pattern: Option<u32>,
     on_switch_failed: crate::callbacks::Hook<crate::callbacks::SwitchFailure>,
+    /// MilkDrop 3 host inputs (mouse, shader FFT, sticky `FFTAttack` / `FFTDecay`).
+    md3: Md3Inputs,
 }
 
 fn eel_seed(run_seed: u64) -> u64 {
@@ -232,7 +238,7 @@ impl Engine {
         let rng_owner = GlobalMemory::new();
         rng_owner.set_rng_seed(eel_seed(cfg.seed));
         Self {
-            analyzer: Analyzer::new(cfg.sample_rate),
+            analyzer: new_analyzer(&cfg),
             device: device.clone(),
             queue: queue.clone(),
             provider: None,
@@ -265,6 +271,7 @@ impl Engine {
             md2_clocks: Default::default(),
             md2_forced_pattern: None,
             on_switch_failed: Default::default(),
+            md3: Md3Inputs::new(),
             cfg,
         }
     }
@@ -373,6 +380,19 @@ impl Engine {
     /// Interleaved float PCM (`-1..1`), any channel count (only the first two are used).
     pub fn push_pcm_f32(&mut self, interleaved: &[f32], channels: usize) {
         self.analyzer.push_pcm_f32(interleaved, channels);
+    }
+
+    /// MilkDrop 3: the mouse for the following frames (see [`MouseState`]). The engine samples it once per rendered
+    /// frame; ignored (but harmless) under the other compat modes.
+    pub fn set_mouse(&mut self, mouse: MouseState) {
+        self.md3.set_mouse(mouse);
+    }
+
+    /// MilkDrop 3 `VolumeSensitivity` (linear gain on the quantised input, default 1); only with
+    /// [`Compat::MilkDrop3`](crate::Compat::MilkDrop3).
+    pub fn set_volume_sensitivity(&mut self, sensitivity: f32) {
+        self.cfg.volume_sensitivity = sensitivity;
+        self.analyzer.set_volume_sensitivity(sensitivity);
     }
 
     /// Every renderer the engine owns (active, incoming, idle spare).
@@ -583,6 +603,10 @@ impl Engine {
         let env = self.init_env();
         let mut pf = PerFrame::new(&gm);
         let mut pp = PerPixel::new(&gm);
+        if rules.md3_extended_vars {
+            pf.extend_md3();
+            pp.extend_md3();
+        }
         let base = preset.base.clone();
 
         // ---- per-frame init + per-frame code, per-vertex code ------------------------------
@@ -592,7 +616,7 @@ impl Engine {
         {
             pf.ctx.run(&prog);
         }
-        for i in 0..NUM_Q {
+        for i in 0..pf.v.q.len() {
             pf.q_after_init[i] = pf.q(i);
         }
         let mut frame_q = pf.q_after_init;
@@ -606,6 +630,9 @@ impl Engine {
         let slots = rules.custom_slots;
         for (i, cfg) in preset.waves.iter().take(slots).enumerate() {
             let mut w = WaveRt::new(&gm, cfg.clone());
+            if rules.md3_extended_vars {
+                w.extend_md3();
+            }
             let enabled = w.enabled();
             let step = |what: &str, r: Result<(), EngineError>, report: &mut PresetReport| match r {
                 Ok(()) => Ok(()),
@@ -626,7 +653,7 @@ impl Engine {
                 }
             });
             step("init", r, &mut report)?;
-            for t in 0..crate::runtime::NUM_T {
+            for t in 0..w.pfv.t.len() {
                 w.t_after_init[t] = w.pf.get(w.pfv.t[t]);
             }
             let r = compile_opt(&mut w.pf, &cfg.per_frame, join)
@@ -644,6 +671,9 @@ impl Engine {
         let mut shapes = Vec::with_capacity(MAX_CUSTOM_SHAPES);
         for (i, cfg) in preset.shapes.iter().take(slots).enumerate() {
             let mut s = ShapeRt::new(&gm, cfg.clone());
+            if rules.md3_extended_vars {
+                s.extend_md3();
+            }
             let enabled = s.enabled();
             let step = |what: &str, r: Result<(), EngineError>, report: &mut PresetReport| match r {
                 Ok(()) => Ok(()),
@@ -664,7 +694,7 @@ impl Engine {
                 }
             });
             step("init", r, &mut report)?;
-            for t in 0..crate::runtime::NUM_T {
+            for t in 0..s.v.t.len() {
                 s.t_after_init[t] = s.ctx.get(s.v.t[t]);
             }
             let r = compile_opt(&mut s.ctx, &cfg.per_frame, join)
@@ -718,7 +748,9 @@ impl Engine {
             has_comp,
             frames: 0,
             floats: Default::default(),
+            start_time: self.last_time,
         };
+        self.md3.on_preset_loaded(&rules, &loaded.preset.base);
         Ok((loaded, report))
     }
 
@@ -751,6 +783,7 @@ impl Engine {
         let mut opts = HlslOptions::default();
         opts.floor_mod = !md2;
         opts.projectm_flavor = !md2;
+        opts.md3 = self.cfg.compat.rules().md3_shader_prelude;
         let to_compiled = |t: lactea_hlsl::Translated, report: &mut PresetReport| {
             report.warnings.extend(t.warnings.iter().cloned());
             CompiledShader {
@@ -807,6 +840,7 @@ impl Engine {
                     p.base.darken,
                     p.base.solarize,
                     p.base.invert,
+                    self.cfg.compat.rules().md3_md2_comp_effects,
                 )
             } else {
                 PASSTHROUGH_COMP.to_string()
@@ -1000,6 +1034,7 @@ impl Engine {
         if let Some(f) = &forced {
             f.override_audio(&mut audio);
         }
+        let md3 = self.md3.begin_frame(&self.cfg.compat.rules(), &audio);
 
         // ProjectM::RenderFrame: timers, end of smoothing, end of the transition.
         self.clock.now = clock.time;
@@ -1039,6 +1074,7 @@ impl Engine {
                 &audio,
                 forced_incoming.as_ref(),
                 None,
+                md3.as_ref(),
             );
             let _ = inc.renderer.render_frame_to_output(encoder, &fi);
         }
@@ -1053,6 +1089,7 @@ impl Engine {
                     &audio,
                     forced.as_ref(),
                     self.md2.as_mut(),
+                    md3.as_ref(),
                 );
                 // `prepare_slot` builds `warp_uv` from the renderer's own mesh and `md2_blend` only with
                 // `Compat::md2_family`, the two inputs the renderer can reject
@@ -1241,6 +1278,7 @@ fn slot_frame_vars(slot: &Slot) -> Vec<(String, f64)> {
 }
 
 /// Evaluate a slot's preset for this frame and hand the teacher-forced images to its renderer.
+#[allow(clippy::too_many_arguments)]
 fn prepare_slot(
     slot: &mut Slot,
     cfg: &EngineConfig,
@@ -1249,6 +1287,7 @@ fn prepare_slot(
     audio: &AudioFrame,
     forced: Option<&ForcedFrame>,
     md2: Option<&mut BlendState>,
+    md3: Option<&Md3Frame>,
 ) -> FrameInput {
     let g = slot.renderer.mesh_geometry();
     let fi = match md2 {
@@ -1259,6 +1298,7 @@ fn prepare_slot(
                 clock,
                 progress,
                 audio,
+                md3,
             };
             build_blend_frame(&mut slot.loaded, &mut slot.last, m, &cx, forced)
         }
@@ -1271,6 +1311,7 @@ fn prepare_slot(
             audio,
             forced,
             &mut slot.last,
+            md3,
         ),
     };
     slot.last.audio = Some(audio.clone());
@@ -1304,6 +1345,7 @@ struct FrameCtx<'a> {
     clock: FrameClock,
     progress: f32,
     audio: &'a AudioFrame,
+    md3: Option<&'a Md3Frame>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1316,6 +1358,7 @@ fn build_frame(
     audio: &AudioFrame,
     forced: Option<&ForcedFrame>,
     last: &mut LastFrame,
+    md3: Option<&Md3Frame>,
 ) -> FrameInput {
     let cx = FrameCtx {
         cfg,
@@ -1323,6 +1366,7 @@ fn build_frame(
         clock,
         progress,
         audio,
+        md3,
     };
     let base = l.preset.base.clone();
     let env = frame_env(&cx);
@@ -1357,6 +1401,7 @@ fn frame_env(cx: &FrameCtx) -> Env {
         pixels: [w, h],
         aspect: [ax, ay],
         inv_aspect: [1.0 / ax, 1.0 / ay],
+        mouse: cx.md3.map_or([0.0; 4], |m| m.mouse.eel),
     }
 }
 
@@ -1377,7 +1422,7 @@ fn eval_per_frame(
         f.apply_vars(&mut l.pf.ctx);
     }
     l.pp.load_q(&l.pf);
-    for i in 0..NUM_Q {
+    for i in 0..l.pf.v.q.len() {
         l.frame_q[i] = l.pf.q(i);
     }
     l.pf.clamp();
@@ -1469,6 +1514,9 @@ fn frame_head(
     let pf = &l.pf;
     for i in 0..NUM_Q {
         fi.q[i] = pf.q(i) as f32;
+    }
+    if let Some(m) = cx.md3 {
+        fi.ext = shader_ext(&cfg.compat.rules(), m, pf, l.start_time, clock.time, true);
     }
     fi.warp_uv = Some(warp_uv);
     // projectM evaluates the warp UV formula on the GPU (the renderer ignores this for MilkDrop 2 compat)

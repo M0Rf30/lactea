@@ -31,6 +31,9 @@ pub trait Visualizer {
     );
     /// The target size changed (physical pixels, never 0).
     fn resize(&mut self, w: u32, h: u32);
+    /// The mouse for the next frame: the cursor as fractions of the target size (`px / width`, `py / height`, origin
+    /// top left; `None` outside the window) and the left button. Only the MilkDrop 3 engine mode uses it.
+    fn set_mouse(&mut self, _position: Option<[f32; 2]>, _left_down: bool) {}
     /// Pixels of every pipeline stage of the last rendered frame (`name`, width, height, RGBA8),
     /// for the debug dump key. Visualizers without internal stages return nothing.
     fn dump_stages(&mut self) -> Vec<(String, u32, u32, Vec<u8>)> {

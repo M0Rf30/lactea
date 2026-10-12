@@ -13,7 +13,10 @@ use lactea_preset::{
 use std::sync::Arc;
 
 pub const NUM_Q: usize = 32;
-pub const NUM_T: usize = 8;
+/// `q1..q64` / `t1..t16` of MilkDrop 3: the capacity of every q / t array. A context registers [`NUM_Q`] q (and 8 t)
+/// variables, or all of them after `extend_md3`; the loops follow the registered handles.
+pub const MAX_Q: usize = lactea_abi::NUM_Q_MD3;
+pub const MAX_T: usize = lactea_abi::NUM_T_MD3;
 
 /// What the contexts see of the host: projectM's `RenderContext` + `FrameAudioData` (floats).
 #[derive(Clone, Debug, Default)]
@@ -33,6 +36,8 @@ pub struct Env {
     /// `renderContext.aspectX/Y` and their inverses.
     pub aspect: [f32; 2],
     pub inv_aspect: [f32; 2],
+    /// MilkDrop 3 `mouse.x/.y/.z/.w` as the expressions see them (`y` is bottom-origin; `-1, -1` outside the window).
+    pub mouse: [f32; 4],
 }
 
 /// Compile `src` (a joined code block, see `lactea_preset`) into `ctx`; empty source gives `None` (projectM leaves
@@ -72,7 +77,9 @@ pub struct PerFrame {
     pub ctx: Context,
     pub v: PfVars,
     pub prog: Option<Program>,
-    pub q_after_init: [f64; NUM_Q],
+    pub q_after_init: [f64; MAX_Q],
+    /// MilkDrop 3: handles of `mouse.x/.y/.z/.w` (registered by [`PerFrame::extend_md3`]).
+    pub mouse: Option<[lactea_eel::Var; 4]>,
 }
 
 impl PerFrame {
@@ -84,8 +91,16 @@ impl PerFrame {
             ctx,
             v,
             prog: None,
-            q_after_init: [0.0; NUM_Q],
+            q_after_init: [0.0; MAX_Q],
+            mouse: None,
         }
+    }
+
+    /// MilkDrop 3: `q33..q64` and `mouse.x/.y/.z/.w` join the context's variables (`monitor2` / `monitor3` are plain
+    /// user variables and persist like `monitor`).
+    pub fn extend_md3(&mut self) {
+        crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
+        self.mouse = Some(crate::vars::register_mouse(&mut self.ctx));
     }
 
     pub fn q(&self, i: usize) -> f64 {
@@ -116,8 +131,13 @@ impl PerFrame {
         set(c, v.mid_att, f(e.mid_att));
         set(c, v.treb_att, f(e.treb_att));
         set(c, v.frame, f64::from(e.frame));
-        for (i, q) in self.q_after_init.iter().enumerate() {
-            c.set(v.q[i], *q);
+        for (q, &var) in self.q_after_init.iter().zip(&v.q) {
+            c.set(var, *q);
+        }
+        if let Some(m) = &self.mouse {
+            for (k, &var) in m.iter().enumerate() {
+                c.set(var, f(e.mouse[k]));
+            }
         }
         set(c, v.progress, f(e.progress));
         set(c, v.decay, f(b.decay));
@@ -204,6 +224,8 @@ pub struct PerPixel {
     pub ctx: Context,
     pub v: PpVars,
     pub prog: Option<Program>,
+    /// MilkDrop 3: handles of `mouse.x/.y/.z/.w` (registered by [`PerPixel::extend_md3`]).
+    pub mouse: Option<[lactea_eel::Var; 4]>,
 }
 
 impl PerPixel {
@@ -211,7 +233,18 @@ impl PerPixel {
         let mut ctx = Context::new(gm.clone());
         ctx.reset_vars();
         let v = PpVars::register(&mut ctx);
-        Self { ctx, v, prog: None }
+        Self {
+            ctx,
+            v,
+            prog: None,
+            mouse: None,
+        }
+    }
+
+    /// MilkDrop 3: `q33..q64` and `mouse.x/.y/.z/.w` join the context's variables.
+    pub fn extend_md3(&mut self) {
+        crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
+        self.mouse = Some(crate::vars::register_mouse(&mut self.ctx));
     }
 
     /// `PerPixelContext::LoadStateReadOnlyVariables` (note: `aspectx/y` are the *non*-inverse
@@ -236,12 +269,18 @@ impl PerPixel {
         set(c, v.pixelsy, f64::from(e.pixels[1]));
         set(c, v.aspectx, f64::from(e.aspect[0]));
         set(c, v.aspecty, f64::from(e.aspect[1]));
+        // MD3: the per-frame `mouse.*` values (loaded before the per-frame code) are copied once per frame
+        if let (Some(dst), Some(src)) = (&self.mouse, &pf.mouse) {
+            for (d, s) in dst.iter().zip(src) {
+                c.set(*d, pf.ctx.get(*s));
+            }
+        }
     }
 
     /// `PerPixelContext::LoadPerFrameQVariables` (once per frame, not per vertex).
     pub fn load_q(&mut self, pf: &PerFrame) {
-        for i in 0..NUM_Q {
-            self.ctx.set(self.v.q[i], pf.q(i));
+        for (i, &var) in self.v.q.iter().enumerate() {
+            self.ctx.set(var, pf.q(i));
         }
     }
 }
@@ -258,7 +297,7 @@ pub struct WaveRt {
     pub pp: Context,
     pub ppv: WpVars,
     pub pp_prog: Option<Program>,
-    pub t_after_init: [f64; NUM_T],
+    pub t_after_init: [f64; MAX_T],
 }
 
 impl WaveRt {
@@ -277,8 +316,14 @@ impl WaveRt {
             pp,
             ppv,
             pp_prog: None,
-            t_after_init: [0.0; NUM_T],
+            t_after_init: [0.0; MAX_T],
         }
+    }
+
+    /// MilkDrop 3: `q33..q64` and `t9..t16` join both contexts' variables.
+    pub fn extend_md3(&mut self) {
+        crate::vars::extend_md3(&mut self.pf, &mut self.pfv.q, &mut self.pfv.t);
+        crate::vars::extend_md3(&mut self.pp, &mut self.ppv.q, &mut self.ppv.t);
     }
 
     pub fn enabled(&self) -> bool {
@@ -300,11 +345,11 @@ impl WaveRt {
         set(c, v.bass_att, f(e.bass_att));
         set(c, v.mid_att, f(e.mid_att));
         set(c, v.treb_att, f(e.treb_att));
-        for i in 0..NUM_Q {
-            c.set(v.q[i], parent.q(i));
+        for (i, &var) in v.q.iter().enumerate() {
+            c.set(var, parent.q(i));
         }
-        for i in 0..NUM_T {
-            c.set(v.t[i], self.t_after_init[i]);
+        for (&var, &t) in v.t.iter().zip(self.t_after_init.iter()) {
+            c.set(var, t);
         }
         set(c, v.r, f(self.cfg.r));
         set(c, v.g, f(self.cfg.g));
@@ -332,13 +377,13 @@ impl WaveRt {
 
     /// `InitPerPointEvaluationVariables`: q/t of the per-frame context go to the per-point one.
     pub fn init_point_qt(&mut self) {
-        for i in 0..NUM_Q {
-            let x = self.pf.get(self.pfv.q[i]);
-            self.pp.set(self.ppv.q[i], x);
+        for (&src, &dst) in self.pfv.q.iter().zip(&self.ppv.q) {
+            let x = self.pf.get(src);
+            self.pp.set(dst, x);
         }
-        for i in 0..NUM_T {
-            let x = self.pf.get(self.pfv.t[i]);
-            self.pp.set(self.ppv.t[i], x);
+        for (&src, &dst) in self.pfv.t.iter().zip(&self.ppv.t) {
+            let x = self.pf.get(src);
+            self.pp.set(dst, x);
         }
     }
 }
@@ -352,7 +397,7 @@ pub struct ShapeRt {
     pub ctx: Context,
     pub v: ShVars,
     pub prog: Option<Program>,
-    pub t_after_init: [f64; NUM_T],
+    pub t_after_init: [f64; MAX_T],
 }
 
 impl ShapeRt {
@@ -365,8 +410,13 @@ impl ShapeRt {
             ctx,
             v,
             prog: None,
-            t_after_init: [0.0; NUM_T],
+            t_after_init: [0.0; MAX_T],
         }
+    }
+
+    /// MilkDrop 3: `q33..q64` and `t9..t16` join the context's variables.
+    pub fn extend_md3(&mut self) {
+        crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
     }
 
     pub fn enabled(&self) -> bool {
@@ -374,7 +424,7 @@ impl ShapeRt {
     }
 
     /// `ShapePerFrameContext::LoadStateVariables`; `frame_q` is `PresetState::frameQVariables`.
-    pub fn load_state(&mut self, frame_q: &[f64; NUM_Q], e: &Env, inst: i32) {
+    pub fn load_state(&mut self, frame_q: &[f64; MAX_Q], e: &Env, inst: i32) {
         let c = &mut self.ctx;
         let v = &self.v;
         let s = &self.cfg;
@@ -389,10 +439,10 @@ impl ShapeRt {
         set(c, v.bass_att, f(e.bass_att));
         set(c, v.mid_att, f(e.mid_att));
         set(c, v.treb_att, f(e.treb_att));
-        for (&var, &q) in v.q.iter().zip(frame_q.iter()).take(NUM_Q) {
+        for (&var, &q) in v.q.iter().zip(frame_q.iter()) {
             c.set(var, q);
         }
-        for (&var, &t) in v.t.iter().zip(self.t_after_init.iter()).take(NUM_T) {
+        for (&var, &t) in v.t.iter().zip(self.t_after_init.iter()) {
             c.set(var, t);
         }
         set(c, v.x, f(s.x));
@@ -464,5 +514,84 @@ mod tests {
         }
         // projectM keeps a comment-only block as an empty program
         assert!(compile_opt(&mut ctx, "// c\u{1}", false).unwrap().is_some());
+    }
+
+    /// The data flow of Annex A 4.7: q1..q64 restart from the init snapshot every frame, go pf -> pv, and the
+    /// custom waves / shapes see the *current* preset q (64) and their own t (16); mouse.* is loaded into the
+    /// per-frame context and copied to the per-vertex one before the per-frame code runs.
+    #[test]
+    fn md3_q64_t16_and_mouse_data_flow() {
+        let gm = Arc::new(GlobalMemory::new());
+        let (mut pf, mut pp) = (PerFrame::new(&gm), PerPixel::new(&gm));
+        pf.extend_md3();
+        pp.extend_md3();
+        assert_eq!((pf.v.q.len(), pp.v.q.len()), (64, 64));
+        let mut wave = WaveRt::new(&gm, CustomWave::default());
+        wave.extend_md3();
+        let mut shape = ShapeRt::new(&gm, CustomShape::default());
+        shape.extend_md3();
+        assert_eq!((wave.pfv.t.len(), wave.ppv.q.len()), (16, 64));
+        assert_eq!((shape.v.q.len(), shape.v.t.len()), (64, 16));
+
+        // init code: q64 and q33 survive as the post-init snapshot
+        pf.prog = compile_opt(&mut pf.ctx, "q64 = 7; q33 = 3;", false).unwrap();
+        pf.run();
+        for i in 0..64 {
+            pf.q_after_init[i] = pf.q(i);
+        }
+        // frame: per-frame code changes q64 and writes q40; the next frame starts from the snapshot again
+        pf.prog = compile_opt(&mut pf.ctx, "q40 = q64 + 1; q64 = 99;", false).unwrap();
+        let env = Env {
+            mouse: [0.25, 0.75, 1.0, 0.0],
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            pf.load_state(&BaseValues::default(), &env);
+            pp.load_readonly(&pf, &env);
+            let m = pf.mouse.unwrap();
+            assert_eq!(pf.ctx.get(m[0]), 0.25);
+            assert_eq!(pf.ctx.get(m[1]), 0.75);
+            assert_eq!(pf.q(63), 7.0, "q64 restarts from the init value");
+            pf.run();
+            assert_eq!(pf.q(39), 8.0);
+        }
+        let pm = pp.mouse.unwrap();
+        assert_eq!(
+            pm.map(|v| pp.ctx.get(v)),
+            [0.25, 0.75, 1.0, 0.0],
+            "per-vertex mouse"
+        );
+        pp.load_q(&pf);
+        assert_eq!(
+            (pp.ctx.get(pp.v.q[39]), pp.ctx.get(pp.v.q[63])),
+            (8.0, 99.0)
+        );
+        // waves and shapes receive the current preset q, all 64
+        wave.load_state(&pf, &env);
+        assert_eq!(wave.pf.get(wave.pfv.q[39]), 8.0);
+        assert_eq!(wave.pf.get(wave.pfv.q[63]), 99.0);
+        let mut frame_q = [0.0; MAX_Q];
+        for (i, q) in frame_q.iter_mut().enumerate() {
+            *q = pf.q(i);
+        }
+        shape.t_after_init[15] = 0.5;
+        shape.load_state(&frame_q, &env, 0);
+        assert_eq!(shape.ctx.get(shape.v.q[63]), 99.0);
+        assert_eq!(shape.ctx.get(shape.v.t[15]), 0.5);
+        // the wave's per-frame q/t go to its per-point context
+        wave.pf.set(wave.pfv.t[12], 4.0);
+        wave.pf.set(wave.pfv.q[50], 5.0);
+        wave.init_point_qt();
+        assert_eq!(wave.pp.get(wave.ppv.t[12]), 4.0);
+        assert_eq!(wave.pp.get(wave.ppv.q[50]), 5.0);
+    }
+
+    #[test]
+    fn projectm_contexts_keep_32_q_and_8_t_and_no_mouse() {
+        let gm = Arc::new(GlobalMemory::new());
+        let (pf, wave) = (PerFrame::new(&gm), WaveRt::new(&gm, CustomWave::default()));
+        assert_eq!((pf.v.q.len(), wave.pfv.t.len()), (32, 8));
+        assert!(pf.mouse.is_none());
+        assert!(pf.ctx.find_var("q33").is_none());
     }
 }

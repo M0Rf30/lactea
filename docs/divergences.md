@@ -74,3 +74,19 @@ Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels
 | Item | projectM (default) | MilkDrop 2 / MilkDrop 3 |
 |---|---|---|
 | Joining of code lines (`md2_code_join`; init, per-frame, per-pixel, wave init / per-frame / per-point, shape init / per-frame) | lines joined with `\n`: an identifier split over two lines (`per_frame_22=k1 = is_` / `per_frame_23=beat*...;`) is two tokens and fails to compile | `CState::StripLinefeedCharsAndComments` (`state.cpp:1593`): the `\x01` separators are deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so the halves glue together (`k1 = is_beat*...;`). A block that is only blanks or strips to nothing compiles no code (`buf[0] == 0`). Shader text is not touched: it keeps its lines (`code_to_source`), `#define`s need them |
+
+## MilkDrop 3
+
+`Compat::MilkDrop3` = MilkDrop 2 plus the rows below (columns: MilkDrop 2 / BeatDrop, MilkDrop 3). Details and
+verification in [`md3.md`](md3.md).
+
+| Item | MilkDrop 2 / BeatDrop | MilkDrop 3 |
+|---|---|---|
+| Audio analysis (`md3_audio_analysis`, `AnalysisMode::Md3`) | BeatDrop: mono `(L+R)/2`, Hz bands, silence 0 | left channel only, 576-sample Hann FFT zero-padded to 1024 on the aligned 8-bit-quantised waveform times `VolumeSensitivity`, bins `[0,85)`, `[85,170)`, `[170,256)` summed, silence 1.0 |
+| `get_fft` / `sampler_fft` data (`md3_shader_fft`) | BeatDrop: mono 1024-bin RMS-normalised FFT, FPS-independent attack / decay, `sqrt`, peak-hold row | left equalised spectrum, per-frame max-normalised, 0.2 gate, squared, 3-bin smear, attack `0.5a+0.5` / decay `0.1d+0.9` once per rendered frame; the state survives preset changes |
+| `FFTAttack` / `FFTDecay` (`md3_shader_fft`) | per state, blended in soft cuts | process-global, replaced by every preset load (file value or 0.5 / 0.7), never blended |
+| Shader prelude (`md3_shader_prelude`) | `get_fft` = `sqrt(tex2D(sampler_fft, (x, .25)))`, `get_fft_hz` `/22050`, `get_fft_peak*`, `get_wave*`, `sampler_wave`, `_c15` / `_c16` time / date | `get_fft` without `sqrt` at v = 0.5, `get_fft_hz` `/24000`, none of the other helpers; `_c14` mouse, `mouse*` macros, `q33..q64` (`_qi.._qp`) |
+| `q` / `t` variables (`md3_extended_vars`) | `q1..q32`, `t1..t8` | `q1..q64`, `t1..t16` in every VM that has them, `monitor2` / `monitor3` persisted like `monitor`, no q blending |
+| Mouse (`md3_extended_vars`) | BeatDrop `mousex` ... | EEL `mouse.x/.y/.z/.w` (bottom-origin y) in the per-frame and per-vertex VMs, shader `_c14` (top-origin y); `mouse.x/.y` are blended in soft cuts, `.z/.w` are not |
+| Shader `time` (`md3_shader_time`, `_c2.x`) | absolute frame time | seconds since this state's preset started, modulo 10000 (the outgoing state of a blend uses its own start) |
+| Generated composite shader of presets without `comp_N` (`md3_md2_comp_effects`) | brighten `1-(1-ret)^2`, solarize `*2` | brighten `sqrt(ret)`, solarize `*4` |

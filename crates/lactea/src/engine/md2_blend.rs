@@ -274,6 +274,14 @@ pub(super) fn blend_vars(new: &mut PerFrame, old: &PerFrame, mix: f64, snap: f64
         blur3_max,
         blur1_edge_darken
     );
+    // MD3: `mouse.x` / `mouse.y` blend like the other per-frame outputs; `mouse.z` / `mouse.w` are neither blended
+    // nor snapped
+    if let (Some(n), Some(o)) = (new.mouse, old.mouse) {
+        for (&nv, &ov) in n.iter().zip(&o).take(2) {
+            let (a, b) = (new.ctx.get(nv), old.ctx.get(ov));
+            new.ctx.set(nv, mix * a + mix2 * b);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1075,11 +1083,23 @@ pub(super) fn build_blend_frame(
     for (i, q) in q.iter_mut().enumerate() {
         *q = opf.q(i) as f32;
     }
+    let ext = match cx.md3 {
+        Some(md3) => crate::md3_inputs::shader_ext(
+            &cfg.compat.rules(),
+            md3,
+            opf,
+            m.old.start_time,
+            cx.clock.time,
+            false,
+        ),
+        None => Default::default(),
+    };
     fi.md2_blend = Some(lactea_render::Md2Blend {
         progress: m.progress,
         vert_alpha,
         old: Md2OldPass {
             q,
+            ext,
             blur: BlurParams {
                 min: [
                     f32v(opf.v.blur1_min),

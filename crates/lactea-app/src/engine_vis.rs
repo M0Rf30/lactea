@@ -170,4 +170,11 @@ impl Visualizer for EngineVisualizer {
     fn resize(&mut self, w: u32, h: u32) {
         self.engine.resize(w, h);
     }
+
+    fn set_mouse(&mut self, position: Option<[f32; 2]>, left_down: bool) {
+        self.engine.set_mouse(lactea::MouseState {
+            position,
+            left_down,
+        });
+    }
 }

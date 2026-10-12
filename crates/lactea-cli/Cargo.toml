@@ -24,6 +24,4 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
 image = { workspace = true, features = ["jpeg", "bmp", "tga"] }
-
-[dev-dependencies]
 lactea-preset = { workspace = true }

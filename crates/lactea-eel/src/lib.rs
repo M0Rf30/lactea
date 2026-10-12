@@ -14,6 +14,13 @@
 //!   variable slots (no hashing at run time).  The tree is self-contained so a bytecode or
 //!   cranelift backend can be added behind [`Context::run`] later.
 //!
+//! # Dialects
+//!
+//! [`Dialect::ProjectMEval`] (the default) is the behaviour described above.
+//! [`Dialect::NsEel2`] is Cockos ns-eel2 as MilkDrop 3 ships it (numeric rules, name rules, RAM
+//! model, function set; see `docs/md3.md`).  The dialect is chosen when the shared
+//! [`GlobalMemory`] is created ([`GlobalMemory::with_dialect`]); every [`Context`] on it follows.
+//!
 //! ```
 //! use std::sync::Arc;
 //! use lactea_eel::{Context, GlobalMemory};
@@ -33,10 +40,12 @@ mod eval;
 mod fast;
 mod lexer;
 mod memory;
+mod ns;
 mod parser;
 mod rng;
 mod tree;
 
 pub use context::{CompileError, Context, Program, Var};
 pub use memory::{GlobalMemory, MEM_ITEMS};
+pub use ns::Dialect;
 pub use rng::PROJECTM_DEFAULT_SEED;

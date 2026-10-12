@@ -36,6 +36,7 @@ mod engine;
 mod idle;
 mod md3_inputs;
 mod media;
+mod mxd3q;
 mod playlist;
 mod rng;
 mod runtime;

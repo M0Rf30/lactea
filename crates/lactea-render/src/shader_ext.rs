@@ -23,6 +23,8 @@ pub struct ShaderExt {
     /// the frame is drawn. `None` keeps the texture as it is (zeros until the first upload). The texture is
     /// renderer-global: for [`crate::Md2OldPass::ext`] this field is ignored, the new state's one is used.
     pub fft: Option<Arc<[f32; FFT_BINS]>>,
+    /// The `_mxd3qxa .. _mxd3qsc` audio-envelope / beat-latch float4s (the MilkDrop 3 block).
+    pub mxd3q: [[f32; 4]; 7],
 }
 
 impl Default for ShaderExt {
@@ -32,6 +34,7 @@ impl Default for ShaderExt {
             q_hi: [0.0; 32],
             time: None,
             fft: None,
+            mxd3q: [[0.0; 4]; 7],
         }
     }
 }
@@ -41,6 +44,7 @@ impl ShaderExt {
     pub fn uniforms(&self) -> MilkExtUniforms {
         let mut u = MilkExtUniforms {
             mouse: self.mouse,
+            mxd3q: self.mxd3q,
             ..Default::default()
         };
         for (i, bank) in u.q_hi.iter_mut().enumerate() {

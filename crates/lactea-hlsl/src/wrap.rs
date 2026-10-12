@@ -139,8 +139,8 @@ pub(crate) fn implicit_declarations(user: &str, md3: bool) -> String {
 ///
 /// * `get_fft` / `get_fft_hz` are macros (as in MD3) so argument expressions are substituted textually; there is no
 ///   `sqrt` (BeatDrop's has one) and `get_fft_hz` assumes a 48 kHz capture (`/ 24000`).
-/// * Not declared on purpose: `get_fft_peak*`, `get_wave*`, `sampler_wave`, `HAS_FFT_PEAK` (BeatDrop only), `_c15..`
-///   (never uploaded by MD3) and the engine-private `_mxd3q*` accumulators of locked presets.
+/// * Not declared on purpose: `get_fft_peak*`, `get_wave*`, `sampler_wave`, `HAS_FFT_PEAK` (BeatDrop only) and `_c15..`
+///   (never uploaded by MD3).
 static MD3_PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let mut s = String::from("float4 _c14;\n");
     for (name, sel) in [
@@ -159,6 +159,19 @@ static MD3_PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let reg = char::from(b'a' + (n - 1) / 4);
         let comp = ["x", "y", "z", "w"][usize::from((n - 1) % 4)];
         s.push_str(&format!("#define q{n} _q{reg}.{comp}\n"));
+    }
+    // `_mxd3qxa.._d` / `_mxd3qsa.._c`: the audio-envelope / beat-latch float4s of the engine block, and the
+    // `MXD3QX1..16` / `MXD3QS1..12` component macros of MD3's prelude.
+    s.push_str("float4 _mxd3qxa, _mxd3qxb, _mxd3qxc, _mxd3qxd, _mxd3qsa, _mxd3qsb, _mxd3qsc;\n");
+    for n in 1..=16usize {
+        let reg = ["xa", "xb", "xc", "xd"][(n - 1) / 4];
+        let comp = ["x", "y", "z", "w"][(n - 1) % 4];
+        s.push_str(&format!("#define MXD3QX{n} _mxd3q{reg}.{comp}\n"));
+    }
+    for n in 1..=12usize {
+        let reg = ["sa", "sb", "sc"][(n - 1) / 4];
+        let comp = ["x", "y", "z", "w"][(n - 1) % 4];
+        s.push_str(&format!("#define MXD3QS{n} _mxd3q{reg}.{comp}\n"));
     }
     s.push_str("sampler2D sampler_fft;\n");
     s.push_str("#define get_fft(pos) tex2D(sampler_fft, float2(clamp(pos, 0, 1), 0.5)).r\n");

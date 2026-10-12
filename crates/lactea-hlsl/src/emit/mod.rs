@@ -230,6 +230,22 @@ pub(crate) fn builtin_uniform(name: &str, md3: bool) -> Option<String> {
             return Some(format!("mx.q_hi[{}]", b - b'i'));
         }
     }
+    if md3
+        && let Some(n) = name.strip_prefix("_mxd3q")
+        && n.len() == 2
+    {
+        let idx = match n.as_bytes() {
+            [b'x', b'a'] => 0,
+            [b'x', b'b'] => 1,
+            [b'x', b'c'] => 2,
+            [b'x', b'd'] => 3,
+            [b's', b'a'] => 4,
+            [b's', b'b'] => 5,
+            [b's', b'c'] => 6,
+            _ => return None,
+        };
+        return Some(format!("mx.mxd3q[{idx}]"));
+    }
     match name {
         "rand_frame" => return Some("mu.rand_frame".into()),
         "rand_preset" => return Some("mu.rand_preset".into()),

@@ -75,14 +75,28 @@ fn prelude_sits_between_include_and_pass_defines() {
     ] {
         assert!(w.contains(m), "{m}");
     }
-    // BeatDrop-only names and the engine-private accumulators are not declared
+    // the audio-envelope / beat-latch uniforms and their component macros
+    assert!(
+        w.contains("float4 _mxd3qxa, _mxd3qxb, _mxd3qxc, _mxd3qxd, _mxd3qsa, _mxd3qsb, _mxd3qsc;")
+    );
+    for m in [
+        "#define MXD3QX1 _mxd3qxa.x\n",
+        "#define MXD3QX4 _mxd3qxa.w\n",
+        "#define MXD3QX5 _mxd3qxb.x\n",
+        "#define MXD3QX16 _mxd3qxd.w\n",
+        "#define MXD3QS1 _mxd3qsa.x\n",
+        "#define MXD3QS4 _mxd3qsa.w\n",
+        "#define MXD3QS5 _mxd3qsb.x\n",
+        "#define MXD3QS12 _mxd3qsc.w\n",
+    ] {
+        assert!(w.contains(m), "{m}");
+    }
+    // BeatDrop-only names are not declared
     for absent in [
         "get_fft_peak",
         "get_wave",
         "sampler_wave",
         "HAS_FFT_PEAK",
-        "_mxd3q",
-        "MXD3Q",
         "_c15",
     ] {
         assert!(!w.contains(absent), "{absent}");

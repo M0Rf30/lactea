@@ -392,7 +392,12 @@ the left button (window events only: MD3 reads the system-wide button state), `l
 **Legacy comp generator**: presets with a composite version but no `comp_N` text get MD2's original brighten
 (`sqrt(ret)`) and solarize (`ret*(1-ret)*4`).
 
-Not implemented (by design): `_mxd3q*` accumulators (locked shaders only), webcam, hot-key effect injection, `get_wave*`.
+Not implemented (by design): webcam, hot-key effect injection, `get_wave*`.
+
+The `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch uniforms are reconstructed and uploaded: the engine
+advances a per-engine block (`crates/lactea/src/mxd3q.rs`) once per frame from `bass`/`mid`/`treb`/`_att`, the frame
+rate and the elapsed time, and the MD3 prelude maps them to `mx.mxd3q[0..6]` (with the `MXD3QX1..16` / `MXD3QS1..12`
+component macros). Under silence they reduce to linear recurrences in time and match the reference probe.
 
 ### Verification
 

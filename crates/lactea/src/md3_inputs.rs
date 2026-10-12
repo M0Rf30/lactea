@@ -6,6 +6,7 @@
 //! soft cut see the same cursor and the same spectrum).
 
 use crate::EngineConfig;
+use crate::mxd3q::{Mxd3q, Mxd3qAudio, Mxd3qBlock};
 use crate::runtime::PerFrame;
 use lactea_abi::{FFT_BINS, NUM_Q};
 use lactea_audio::{AnalysisMode, Analyzer, AudioFrame, ShaderFft};
@@ -42,6 +43,8 @@ pub(crate) struct Md3Frame {
     pub mouse: MouseFrame,
     /// The shader FFT after this frame's step (`None` unless `CompatRules::md3_shader_fft`).
     pub fft: Option<Arc<[f32; FFT_BINS]>>,
+    /// The `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch float4s after this frame's step.
+    pub mxd3q: Mxd3q,
 }
 
 /// Engine-wide MD3 input state; lives as long as the engine and is never reset by a preset change.
@@ -53,6 +56,8 @@ pub(crate) struct Md3Inputs {
     /// `FFTAttack` / `FFTDecay`: process-global in MD3, set by every preset load, never blended.
     attack: f32,
     decay: f32,
+    /// The `_mxd3q*` audio-envelope / beat-latch block (engine-wide, never reset by a preset change).
+    mxd3q: Mxd3qBlock,
 }
 
 impl Md3Inputs {
@@ -63,6 +68,7 @@ impl Md3Inputs {
             fft: ShaderFft::new(),
             attack: 0.5,
             decay: 0.7,
+            mxd3q: Mxd3qBlock::default(),
         }
     }
 
@@ -88,8 +94,14 @@ impl Md3Inputs {
     }
 
     /// Sample the frame's inputs: the mouse (always advances the release edge) and, once per rendered frame, one step
-    /// of the shader FFT from the left spectrum of `audio`.
-    pub fn begin_frame(&mut self, rules: &CompatRules, audio: &AudioFrame) -> Option<Md3Frame> {
+    /// of the shader FFT from the left spectrum of `audio` and one step of the `_mxd3q*` audio-envelope block.
+    pub fn begin_frame(
+        &mut self,
+        rules: &CompatRules,
+        audio: &AudioFrame,
+        fps: f32,
+        elapsed: f32,
+    ) -> Option<Md3Frame> {
         if !(rules.md3_extended_vars || rules.md3_shader_fft || rules.md3_shader_time) {
             return None;
         }
@@ -97,7 +109,19 @@ impl Md3Inputs {
         let fft = rules
             .md3_shader_fft
             .then(|| Arc::new(*self.fft.step(&audio.spectrum[0], self.attack, self.decay)));
-        Some(Md3Frame { mouse, fft })
+        let mxd3q = self.mxd3q.step(
+            &Mxd3qAudio {
+                bass: audio.bass,
+                mid: audio.mid,
+                treb: audio.treb,
+                bass_att: audio.bass_att,
+                mid_att: audio.mid_att,
+                treb_att: audio.treb_att,
+            },
+            fps,
+            elapsed,
+        );
+        Some(Md3Frame { mouse, fft, mxd3q })
     }
 
     fn sample_mouse(&mut self) -> MouseFrame {
@@ -152,6 +176,15 @@ pub(crate) fn shader_ext(
                 *q = pf.q(NUM_Q + i) as f32;
             }
         }
+        ext.mxd3q = [
+            md3.mxd3q.qxa,
+            md3.mxd3q.qxb,
+            md3.mxd3q.qxc,
+            md3.mxd3q.qxd,
+            md3.mxd3q.qsa,
+            md3.mxd3q.qsb,
+            md3.mxd3q.qsc,
+        ];
     }
     if rules.md3_shader_time {
         ext.time = Some(now - start);
@@ -244,9 +277,12 @@ mod tests {
     fn nothing_is_sampled_outside_milkdrop3() {
         let audio = AudioFrame::default();
         let mut i = Md3Inputs::new();
-        assert!(i.begin_frame(&Compat::MilkDrop2.rules(), &audio).is_none());
         assert!(
-            i.begin_frame(&Compat::MilkDrop3.rules(), &audio)
+            i.begin_frame(&Compat::MilkDrop2.rules(), &audio, 60.0, 1.0)
+                .is_none()
+        );
+        assert!(
+            i.begin_frame(&Compat::MilkDrop3.rules(), &audio, 60.0, 1.0)
                 .is_some_and(|f| f.fft.is_some())
         );
     }

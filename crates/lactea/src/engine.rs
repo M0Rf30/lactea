@@ -1323,7 +1323,12 @@ impl Engine {
         if let Some(f) = &forced {
             f.override_audio(&mut audio);
         }
-        let md3 = self.md3.begin_frame(&self.cfg.compat.rules(), &audio);
+        let md3 = self.md3.begin_frame(
+            &self.cfg.compat.rules(),
+            &audio,
+            self.cfg.fps as f32,
+            clock.time as f32,
+        );
 
         // ProjectM::RenderFrame: timers, end of smoothing, end of the transition.
         self.clock.now = clock.time;

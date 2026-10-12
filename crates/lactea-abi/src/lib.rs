@@ -82,6 +82,7 @@ impl Default for MilkUniforms {
 /// - `mouse` = `_c14`: `(x, y, held, released)`; `x = px/W`, `y = py/H` (top origin) and `-1, -1` when the cursor is
 ///   outside the window; `held` is 1 while the left button is down, `released` 1 for the one frame after it.
 /// - `q_hi` = `_qi .. _qp`: `q33 == q_hi[0][0]`, `q64 == q_hi[7][3]`.
+/// - `mxd3q` = `_mxd3qxa .. _mxd3qsc`: the audio-envelope / beat-latch float4s of the MilkDrop 3 block.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct MilkExtUniforms {
@@ -89,6 +90,8 @@ pub struct MilkExtUniforms {
     pub mouse: [f32; 4],
     /// `_qi` .. `_qp`.
     pub q_hi: [[f32; 4]; 8],
+    /// `_mxd3qxa` .. `_mxd3qsc`.
+    pub mxd3q: [[f32; 4]; 7],
 }
 
 impl Default for MilkExtUniforms {
@@ -96,6 +99,7 @@ impl Default for MilkExtUniforms {
         Self {
             mouse: [-1.0, -1.0, 0.0, 0.0],
             q_hi: [[0.0; 4]; 8],
+            mxd3q: [[0.0; 4]; 7],
         }
     }
 }
@@ -132,6 +136,7 @@ struct MilkUniforms {
 struct MilkExt {
     mouse: vec4<f32>,
     q_hi: array<vec4<f32>, 8>,
+    mxd3q: array<vec4<f32>, 7>,
 };
 @group(0) @binding(1) var<uniform> mx: MilkExt;
 
@@ -454,7 +459,7 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<PassUniforms>(), 16 * 16);
         assert_eq!(std::mem::size_of::<MeshVertex>(), 4 * 12);
-        assert_eq!(std::mem::size_of::<MilkExtUniforms>(), 16 + 16 * 8);
+        assert_eq!(std::mem::size_of::<MilkExtUniforms>(), 16 + 16 * 8 + 16 * 7);
         assert_eq!(MilkExtUniforms::default().mouse, [-1.0, -1.0, 0.0, 0.0]);
     }
 

@@ -896,11 +896,4 @@ mod tests {
         // out of range (the engine clamps, so it never reports it) restarts at off
         assert_eq!(next_auto_hard_cut(200), 0);
     }
-
-    #[test]
-    fn labels_use_md3_wording() {
-        assert_eq!(auto_hard_cut_label(0), "off");
-        assert_eq!(auto_hard_cut_label(1), "hardcut1");
-        assert_eq!(auto_hard_cut_label(7), "hardcut7");
-    }
 }

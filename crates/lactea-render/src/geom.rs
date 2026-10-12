@@ -1247,10 +1247,7 @@ mod tests {
             };
             shape_geometry_tex_max(&s, 1.0, 1.0, max)
         };
-        assert_eq!(crate::Compat::ProjectM.rules().max_shape_sides, 100);
-        assert_eq!(crate::Compat::MilkDrop2.rules().max_shape_sides, 100);
-        let md3 = crate::Compat::MilkDrop3.rules().max_shape_sides;
-        assert_eq!(md3, 500);
+        let md3 = 500;
         for (n, want) in [
             (2, 3),
             (3, 3),

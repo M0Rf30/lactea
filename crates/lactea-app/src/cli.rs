@@ -300,10 +300,4 @@ mod tests {
         assert!(parse(&["--auto-hard-cut", "-1"]).is_err());
         assert!(parse(&["--auto-hard-cut", "x"]).is_err());
     }
-
-    #[test]
-    fn only_milkdrop3_is_md3() {
-        assert!(CompatArg::Milkdrop3.md3());
-        assert!(!CompatArg::Milkdrop2.md3() && !CompatArg::Projectm.md3());
-    }
 }

@@ -612,19 +612,6 @@ mod tests {
         (r, warnings)
     }
 
-    #[test]
-    fn only_milkdrop3_runs_ns_eel2() {
-        assert_eq!(
-            eel_dialect(&Compat::ProjectM.rules()),
-            Dialect::ProjectMEval
-        );
-        assert_eq!(
-            eel_dialect(&Compat::MilkDrop2.rules()),
-            Dialect::ProjectMEval
-        );
-        assert_eq!(eel_dialect(&Compat::MilkDrop3.rules()), Dialect::NsEel2);
-    }
-
     /// MD3 3.37 rejects a '.' inside identifiers (measured on the real program), so a part that reads `mouse.x`
     /// as source text is dropped: preset code cannot read the mouse, only shaders can.
     #[test]

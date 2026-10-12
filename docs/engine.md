@@ -241,6 +241,7 @@ injects the previous `main` image. Frames 0..n-1 still run so megabuf and expres
 fdrender --preset P --audio WAV --out DIR [--size 640x360] [--mesh 48x36] [--fps 60] [--frames 300]
          [--seed 1] [--texel-offset 0,0] [--stages final,main,warped,blur1,blur2,blur3|all|none]
          [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2|md3]
+         [--auto-hard-cut 0..7]
 ```
 
 Same flags and output layout as `oracle/refrender` (`lactea_abi::dump`, producer
@@ -257,6 +258,11 @@ Soft cuts (mirror of `refrender`'s transition flags): `--preset2 P --switch-fram
 feeds the reference's `old_out` / `new_out` to the transition pass. Extra dump stages (not ABI, written like `warpsrc`):
 `old_out`, `new_out` (the two images before the blend), `new_main`, `new_warped`, `new_blur1..3`, `new_warpsrc`,
 `new_vars/` (the incoming preset's, on the frames the blend is drawn). `oracle/transition_pairs.txt` lists the pair set.
+
+`--auto-hard-cut N` sets MilkDrop 3's `AutoHardCutMode` (0 = off, 1..=6 beat-driven instant preset changes, 7 composite-shader
+effects; only with `--compat md3`, ignored with a note otherwise; N > 7 is a usage error). The tool has no preset switching, so the
+cuts of modes 1..=6 are only counted (`"auto_cuts"` in `fdrender.json`, present when the mode is active); mode 7's effects show in
+the rendered frames.
 
 `scripts/fidelity.sh SET [FILTER]` runs free + teacher runs for a whole oracle set and `fdcompare corpus`
 (see the script header); `scripts/fdq.py` (quick PSNR probe)

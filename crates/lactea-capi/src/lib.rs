@@ -85,12 +85,21 @@ pub struct LacteaConfig {
     pub fps: u32,
     /// Seconds a preset is meant to run (`progress = elapsed / duration`).
     pub preset_duration: f64,
+    /// MilkDrop 3 `AutoHardCutMode`: 0 = off, 1..=6 beat-driven instant preset changes (reported as
+    /// hard-cut requests, see `lactea_poll_switch_request`), 7 = a random effect injected into the
+    /// composite shader without a preset change; larger values count as 7. Acts only with
+    /// `LACTEA_COMPAT_MILKDROP3` (stored and ignored otherwise); `lactea_set_auto_hard_cut_mode`
+    /// changes it at runtime.
+    pub auto_hard_cut_mode: u8,
 }
 
 /// Largest accepted render width or height, in pixels. Larger requests would exceed what GPUs
 /// can allocate and are rejected with `LACTEA_STATUS_INVALID_ARGUMENT`.
 pub const LACTEA_MAX_DIMENSION: u32 = 16384;
 const MAX_DIMENSION: u32 = LACTEA_MAX_DIMENSION;
+
+/// MilkDrop 3's default `TimeBetweenPresetsRand` in seconds (`LacteaSwitchSettings::preset_duration_rand`).
+const MD3_TIME_BETWEEN_PRESETS_RAND: f64 = 10.0;
 
 /// The engine's own render target (self-contained mode; absent for engines made by
 /// `lactea_create_vulkan`, which render into host images).
@@ -120,6 +129,9 @@ pub struct LacteaEngine {
     vulkan: Option<vulkan::VulkanState>,
     /// Read-back staging buffer for `lactea_render_to_buffer`, sized for the current target.
     readback: Option<wgpu::Buffer>,
+    /// MilkDrop 3 `TimeBetweenPresetsRand` as the host last set it (`lactea_set_switch_settings`);
+    /// kept here because `control` only holds it under `LACTEA_COMPAT_MILKDROP3`.
+    md3_time_rand: f64,
 }
 
 thread_local! {
@@ -301,6 +313,7 @@ pub unsafe extern "C" fn lactea_config_default(out: *mut LacteaConfig) {
             sample_rate: d.sample_rate,
             fps: d.fps,
             preset_duration: d.preset_duration,
+            auto_hard_cut_mode: 0,
         });
     }
 }
@@ -366,6 +379,7 @@ unsafe fn engine_config(config: *const LacteaConfig) -> Option<EngineConfig> {
         cfg.sample_rate = c.sample_rate;
         cfg.fps = c.fps;
         cfg.preset_duration = c.preset_duration;
+        cfg.auto_hard_cut_mode = c.auto_hard_cut_mode;
     }
     Some(cfg)
 }
@@ -381,6 +395,10 @@ fn build_engine(
     let engine = Engine::new(&device, &queue, cfg.clone());
     let mut control = PresetControl::new(cfg.seed);
     control.set_preset_duration(cfg.preset_duration);
+    // MD3 display time: BlendTimeAuto + TimeBetweenPresets + a random part up to TimeBetweenPresetsRand.
+    if cfg.compat.rules().md3_preset_time_rand {
+        control.set_md3_time_rand(Some(MD3_TIME_BETWEEN_PRESETS_RAND));
+    }
     Box::into_raw(Box::new(LacteaEngine {
         engine,
         device,
@@ -394,6 +412,7 @@ fn build_engine(
         restore_soft_cut: None,
         vulkan,
         readback: None,
+        md3_time_rand: MD3_TIME_BETWEEN_PRESETS_RAND,
     }))
 }
 
@@ -654,7 +673,11 @@ fn encode_frame(
 ) -> (wgpu::CommandEncoder, Option<SwitchRequest>) {
     let mut enc = e.device.create_command_encoder(&Default::default());
     e.engine.render(&mut enc, view, FrameClock { time, frame });
-    let request = e.control.update(time, e.engine.audio_frame().vol);
+    let request = e.control.update_with_auto_cuts(
+        time,
+        e.engine.audio_frame().vol,
+        e.engine.take_auto_cuts(),
+    );
     if !e.control.is_smoothing()
         && let Some(d) = e.restore_soft_cut.take()
     {
@@ -1068,12 +1091,53 @@ pub unsafe extern "C" fn lactea_get_texel_offset(
     }
 }
 
+/// MilkDrop 3 `AutoHardCutMode` (`LacteaConfig::auto_hard_cut_mode`): 0 = off, 1..=6 = beat-driven
+/// instant preset changes (they raise a hard-cut request, see `lactea_poll_switch_request`), 7 = a
+/// random effect is injected into the composite shader and the preset stays; larger values are
+/// clamped to 7. Takes effect on the next frame. Only acts with `LACTEA_COMPAT_MILKDROP3`: with the
+/// other compat modes the mode is stored and read back but never does anything.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_set_auto_hard_cut_mode(
+    engine: *mut LacteaEngine,
+    mode: u8,
+) -> LacteaStatus {
+    guard(|| {
+        let Some(e) = (unsafe { engine.as_mut() }) else {
+            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
+        };
+        e.engine.set_auto_hard_cut_mode(mode);
+        LacteaStatus::Ok
+    })
+}
+
+/// The auto hard cut mode in use (`lactea_set_auto_hard_cut_mode`, after the clamp to 7), whether or
+/// not the compat mode lets it act.
+///
+/// # Safety
+/// `engine` valid; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_get_auto_hard_cut_mode(
+    engine: *const LacteaEngine,
+    out: *mut u8,
+) -> LacteaStatus {
+    guard(|| {
+        let (Some(e), false) = (unsafe { engine.as_ref() }, out.is_null()) else {
+            return fail(LacteaStatus::InvalidArgument, "engine or out is NULL");
+        };
+        unsafe { out.write(e.engine.auto_hard_cut_mode()) };
+        LacteaStatus::Ok
+    })
+}
+
 /// projectM's preset-switching settings in one struct (`projectm_set_*` / `projectm_get_*` of beat
 /// sensitivity, aspect correction, easter egg, preset lock, preset / soft-cut / hard-cut timing).
 /// Defaults (what a fresh engine reports): 1.0, true, 1.0, false, `config.preset_duration`, 3.0, false,
-/// 20.0, 2.0. `beat_sensitivity` is clamped to 0..2 and, like `aspect_correction`, stored only (projectM
-/// does not use either anywhere else); reading `hard_cut_duration` back truncates it to whole seconds
-/// like projectM.
+/// 20.0, 2.0, 10.0. `beat_sensitivity` is clamped to 0..2 and, like `aspect_correction`, stored only
+/// (projectM does not use either anywhere else); reading `hard_cut_duration` back truncates it to
+/// whole seconds like projectM.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LacteaSwitchSettings {
@@ -1095,6 +1159,12 @@ pub struct LacteaSwitchSettings {
     pub hard_cut_duration: f64,
     /// Beat loudness (as a multiple of the running average) that triggers a hard cut.
     pub hard_cut_sensitivity: f32,
+    /// MilkDrop 3 `TimeBetweenPresetsRand` in seconds. With `LACTEA_COMPAT_MILKDROP3` the display
+    /// time of a preset is `soft_cut_duration` (MD3's `BlendTimeAuto`) + `preset_duration`
+    /// (`TimeBetweenPresets`) + a seeded random 0..`preset_duration_rand` seconds in 1 ms steps, and
+    /// `easter_egg` is ignored; applies to presets started afterwards. Negative counts as 0. With
+    /// the other compat modes it is stored and read back but inert. Default 10.0.
+    pub preset_duration_rand: f64,
 }
 
 /// Read the preset-switching settings (see `LacteaSwitchSettings`).
@@ -1122,6 +1192,7 @@ pub unsafe extern "C" fn lactea_get_switch_settings(
                 hard_cut_enabled: c.hard_cut_enabled(),
                 hard_cut_duration: c.hard_cut_duration(),
                 hard_cut_sensitivity: c.hard_cut_sensitivity(),
+                preset_duration_rand: e.md3_time_rand,
             });
         }
         LacteaStatus::Ok
@@ -1155,6 +1226,10 @@ pub unsafe extern "C" fn lactea_set_switch_settings(
         c.set_hard_cut_enabled(s.hard_cut_enabled);
         c.set_hard_cut_duration(s.hard_cut_duration);
         c.set_hard_cut_sensitivity(s.hard_cut_sensitivity);
+        e.md3_time_rand = s.preset_duration_rand.max(0.0);
+        if e.engine.config().compat.rules().md3_preset_time_rand {
+            c.set_md3_time_rand(Some(e.md3_time_rand));
+        }
         e.engine.set_preset_duration(s.preset_duration);
         LacteaStatus::Ok
     })
@@ -1163,7 +1238,11 @@ pub unsafe extern "C" fn lactea_set_switch_settings(
 /// Did the last rendered frames ask for a preset change (`projectm_preset_switch_requested_event`)?
 /// Returns `true` once per request and stores `*is_hard_cut` (beat-driven cut vs display time up;
 /// NULL is allowed). The host then loads the next preset itself. Requests only happen while a preset
-/// loaded through this API is running, the preset is not locked, and (hard cuts) hard cuts are enabled.
+/// loaded through this API is running, the preset is not locked, and (projectM beat hard cuts) hard
+/// cuts are enabled. With `LACTEA_COMPAT_MILKDROP3` and a non-zero auto hard cut mode
+/// (`LacteaConfig::auto_hard_cut_mode`, `lactea_set_auto_hard_cut_mode`) a beat-driven auto hard
+/// cut also raises a request with `*is_hard_cut = true`, independent of the projectM hard-cut
+/// settings: load the next preset with a cut. `preset_locked` suppresses it like any other request.
 ///
 /// # Safety
 /// `engine` valid; `is_hard_cut` NULL or writable.
@@ -1332,6 +1411,10 @@ mod tests {
     use std::ptr::{null, null_mut};
 
     fn engine() -> Option<*mut LacteaEngine> {
+        engine_with(LacteaCompat::Projectm, 0)
+    }
+
+    fn engine_with(compat: LacteaCompat, auto_hard_cut_mode: u8) -> Option<*mut LacteaEngine> {
         let instance = wgpu::Instance::default();
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;
@@ -1340,6 +1423,7 @@ mod tests {
             lactea_config_default(cfg.as_mut_ptr());
             let mut cfg = cfg.assume_init();
             (cfg.width, cfg.height, cfg.mesh_x, cfg.mesh_y) = (64, 36, 16, 12);
+            (cfg.compat, cfg.auto_hard_cut_mode) = (compat, auto_hard_cut_mode);
             lactea_create(&cfg)
         };
         assert!(!e.is_null());
@@ -1725,6 +1809,218 @@ mod tests {
             lactea_load_preset(e, junk.as_ptr(), junk.len(), null());
             assert_eq!(seen.failed.len(), 2);
             lactea_destroy(e);
+        }
+    }
+
+    /// `lactea_get_auto_hard_cut_mode`, which must succeed.
+    unsafe fn auto_mode(e: *const LacteaEngine) -> u8 {
+        let mut m = 255u8;
+        assert_eq!(
+            unsafe { lactea_get_auto_hard_cut_mode(e, &mut m) },
+            LacteaStatus::Ok
+        );
+        m
+    }
+
+    /// The engine's switch settings.
+    unsafe fn switch_settings(e: *const LacteaEngine) -> LacteaSwitchSettings {
+        let mut s = std::mem::MaybeUninit::<LacteaSwitchSettings>::uninit();
+        assert_eq!(
+            unsafe { lactea_get_switch_settings(e, s.as_mut_ptr()) },
+            LacteaStatus::Ok
+        );
+        unsafe { s.assume_init() }
+    }
+
+    /// Silence the display timer (a huge display time, no easter egg) so only auto cuts can ask.
+    unsafe fn quiet_timer(e: *mut LacteaEngine) -> LacteaSwitchSettings {
+        let mut s = unsafe { switch_settings(e) };
+        (s.preset_duration, s.easter_egg) = (1.0e6, 0.0);
+        assert_eq!(
+            unsafe { lactea_set_switch_settings(e, &s) },
+            LacteaStatus::Ok
+        );
+        s
+    }
+
+    /// A v100 preset whose per-frame code pins `bass` to 2 (a loud beat for the auto hard cut).
+    const BASS2: &[u8] = b"MILKDROP_PRESET_VERSION=100\nper_frame_1=bass=2;\n";
+
+    #[test]
+    fn auto_hard_cut_mode_config_setter_and_getter() {
+        // the config field needs no GPU: default 0, and it reaches the engine config
+        let mut cfg = std::mem::MaybeUninit::<LacteaConfig>::uninit();
+        let mut cfg = unsafe {
+            lactea_config_default(cfg.as_mut_ptr());
+            cfg.assume_init()
+        };
+        assert_eq!(cfg.auto_hard_cut_mode, 0);
+        cfg.auto_hard_cut_mode = 5;
+        let ec = unsafe { engine_config(&cfg) }.unwrap();
+        assert_eq!(ec.auto_hard_cut_mode, 5);
+        assert_eq!(
+            unsafe { lactea_get_auto_hard_cut_mode(null(), &mut 0u8) },
+            LacteaStatus::InvalidArgument
+        );
+        assert_eq!(
+            unsafe { lactea_set_auto_hard_cut_mode(null_mut(), 1) },
+            LacteaStatus::InvalidArgument
+        );
+
+        let Some(e) = engine() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        unsafe {
+            assert_eq!(auto_mode(e), 0);
+            assert_eq!(lactea_set_auto_hard_cut_mode(e, 3), LacteaStatus::Ok);
+            assert_eq!(auto_mode(e), 3);
+            // more than 7 clamps to 7 (MD3 has 7 modes)
+            assert_eq!(lactea_set_auto_hard_cut_mode(e, 200), LacteaStatus::Ok);
+            assert_eq!(auto_mode(e), 7);
+            assert_eq!(lactea_set_auto_hard_cut_mode(e, 0), LacteaStatus::Ok);
+            assert_eq!(auto_mode(e), 0);
+            assert_eq!(
+                lactea_get_auto_hard_cut_mode(e, null_mut()),
+                LacteaStatus::InvalidArgument
+            );
+            lactea_destroy(e);
+        }
+
+        // the setting is stored under every compat; the config value is clamped too
+        for compat in [LacteaCompat::Projectm, LacteaCompat::Milkdrop3] {
+            let Some(e) = engine_with(compat, 9) else {
+                return;
+            };
+            unsafe {
+                assert_eq!(auto_mode(e), 7, "{compat:?}");
+                lactea_destroy(e);
+            }
+        }
+    }
+
+    #[test]
+    fn md3_auto_hard_cut_raises_a_hard_cut_request_only_under_milkdrop_3() {
+        let Some(e) = engine_with(LacteaCompat::Milkdrop3, 6) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let mut seen = Seen::default();
+        let user = (&raw mut seen).cast::<c_void>();
+        unsafe {
+            let mut s = quiet_timer(e);
+            assert_eq!(
+                lactea_set_switch_requested_callback(e, Some(on_requested), user),
+                LacteaStatus::Ok
+            );
+            assert_eq!(
+                lactea_load_preset(e, BASS2.as_ptr(), BASS2.len(), c"loud".as_ptr()),
+                LacteaStatus::Ok
+            );
+            let mut hard = false;
+            // frame 0 reads no levels yet: the per-frame code of this frame sets them for the next
+            assert_eq!(lactea_render(e, 0.0, 0), LacteaStatus::Ok);
+            assert!(!lactea_poll_switch_request(e, &mut hard));
+            assert!(seen.requested.is_empty());
+            // frame 1 sees bass = 2: mode 6 asks for an instant change, a normal hard-cut request
+            assert_eq!(lactea_render(e, 1.0 / 60.0, 1), LacteaStatus::Ok);
+            assert!(lactea_poll_switch_request(e, &mut hard));
+            assert!(hard);
+            assert_eq!(seen.requested, vec![true]);
+            // polled once: the request is gone until the next cut
+            assert!(!lactea_poll_switch_request(e, null_mut()));
+
+            // a locked preset ignores auto cuts
+            s.preset_locked = true;
+            assert_eq!(lactea_set_switch_settings(e, &s), LacteaStatus::Ok);
+            for frame in 2..12u32 {
+                lactea_render(e, f64::from(frame) / 60.0, frame);
+            }
+            assert!(!lactea_poll_switch_request(e, null_mut()));
+            assert_eq!(seen.requested.len(), 1);
+
+            // unlocked again, the next loud frame asks (the lock was what held it back)
+            s.preset_locked = false;
+            assert_eq!(lactea_set_switch_settings(e, &s), LacteaStatus::Ok);
+            lactea_render(e, 12.0 / 60.0, 12);
+            assert!(lactea_poll_switch_request(e, &mut hard));
+            assert!(hard);
+            assert_eq!(seen.requested, vec![true, true]);
+
+            // mode 0 switches it off
+            assert_eq!(lactea_set_auto_hard_cut_mode(e, 0), LacteaStatus::Ok);
+            for frame in 13..20u32 {
+                lactea_render(e, f64::from(frame) / 60.0, frame);
+            }
+            assert!(!lactea_poll_switch_request(e, null_mut()));
+            assert_eq!(seen.requested.len(), 2);
+            lactea_destroy(e);
+        }
+    }
+
+    #[test]
+    fn auto_hard_cut_mode_is_inert_under_projectm() {
+        let Some(e) = engine_with(LacteaCompat::Projectm, 6) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let mut seen = Seen::default();
+        let user = (&raw mut seen).cast::<c_void>();
+        unsafe {
+            quiet_timer(e);
+            assert_eq!(
+                lactea_set_switch_requested_callback(e, Some(on_requested), user),
+                LacteaStatus::Ok
+            );
+            assert_eq!(
+                lactea_load_preset(e, BASS2.as_ptr(), BASS2.len(), c"loud".as_ptr()),
+                LacteaStatus::Ok
+            );
+            for frame in 0..12u32 {
+                assert_eq!(
+                    lactea_render(e, f64::from(frame) / 60.0, frame),
+                    LacteaStatus::Ok
+                );
+            }
+            // the mode is stored but never acts
+            assert_eq!(auto_mode(e), 6);
+            assert!(!lactea_poll_switch_request(e, null_mut()));
+            assert!(seen.requested.is_empty());
+            lactea_destroy(e);
+        }
+    }
+
+    #[test]
+    fn preset_duration_rand_is_stored_and_reaches_the_control_only_under_milkdrop_3() {
+        for (compat, md3) in [
+            (LacteaCompat::Projectm, false),
+            (LacteaCompat::Milkdrop2, false),
+            (LacteaCompat::Milkdrop3, true),
+        ] {
+            let Some(e) = engine_with(compat, 0) else {
+                eprintln!("skipping: no wgpu adapter");
+                return;
+            };
+            unsafe {
+                // MD3's default TimeBetweenPresetsRand under every compat; only MD3 feeds the control
+                let mut s = switch_settings(e);
+                assert_eq!(s.preset_duration_rand, 10.0, "{compat:?}");
+                assert_eq!(
+                    (*e).control.md3_time_rand(),
+                    md3.then_some(10.0),
+                    "{compat:?}"
+                );
+                s.preset_duration_rand = 2.5;
+                assert_eq!(lactea_set_switch_settings(e, &s), LacteaStatus::Ok);
+                assert_eq!(switch_settings(e).preset_duration_rand, 2.5);
+                assert_eq!((*e).control.md3_time_rand(), md3.then_some(2.5));
+                // negative counts as 0
+                s.preset_duration_rand = -4.0;
+                assert_eq!(lactea_set_switch_settings(e, &s), LacteaStatus::Ok);
+                assert_eq!(switch_settings(e).preset_duration_rand, 0.0);
+                assert_eq!((*e).control.md3_time_rand(), md3.then_some(0.0));
+                lactea_destroy(e);
+            }
         }
     }
 }

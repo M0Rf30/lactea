@@ -55,6 +55,8 @@ is `crates/lactea/src/control.rs`, `Playlist` is `crates/lactea/src/playlist.rs`
 | window size get/set | `parameters.h:362,371` | **Equivalent**: `Engine::resize` + `Engine::window_size()`. (projectM skips rendering at size 0; Lactea asserts a non-zero size) | – |
 | preset start clean | `parameters.h:387`, `ProjectM.cpp:321` | **Pending**: `EngineConfig::start_clean` in the transitions branch | – |
 | "per-pixel mesh toggles" | none beyond the mesh size above | **N/A**: per-pixel code runs only when the preset has it, in both | – |
+| MilkDrop 3 auto hard cut mode (not in projectM) | – (MD3 `AutoHardCutMode`, `docs/md3.md`) | **Added** (only `Compat::MilkDrop3`): `EngineConfig::auto_hard_cut_mode`, `Engine::{set,}auto_hard_cut_mode`, `Engine::take_auto_cuts` + `PresetControl::update_with_auto_cuts` (a hard-cut request); C: `LacteaConfig::auto_hard_cut_mode`, `lactea_{set,get}_auto_hard_cut_mode`, the request arrives through `lactea_poll_switch_request` / the switch-requested callback with `is_hard_cut = true`; `fdrender --auto-hard-cut N` counts the cuts (`auto_cuts`) | – |
+| MilkDrop 3 display time (not in projectM) | – (MD3 `TimeBetweenPresetsRand`, `docs/md3.md`) | **Added** (only `Compat::MilkDrop3`): `PresetControl::set_md3_time_rand`; C: `LacteaSwitchSettings::preset_duration_rand` (default 10.0 s, stored but inert with the other compat modes) | – |
 
 ## 3. Callbacks and logging (`callbacks.h`, `logging.h`)
 

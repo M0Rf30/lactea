@@ -134,6 +134,28 @@ shadow is assigned to, which turns the outer uniform into a seeded private copy)
 `mouse`, `texsize`) can be shadowed: component macros (`q40`, `mouse_x`) expand to a swizzle, so `float q40` is a syntax
 error in D3DX too.
 
+**Visual check against MD3 3.37 under Wine** (`oracle/md3shot.sh`, 800x600, no audio, versus `fdrender --compat md3` with
+`fixtures/audio/silence.wav`; the oracle can only run on silence and its time and random state are not reproducible, so
+only static scenes compare pixel for pixel):
+
+* Generated composite shader: hand-written presets without `warp_N` / `comp_N` text (`PSVERSION=2`, `fDecay=1`, gamma 1,
+  no echo, a solid outer border `ob = (0.25, 0.5, 0.75)`, `ob_size=0.5`, one of `bBrighten` / `bSolarize` / `bDarken` /
+  `bInvert`) give the **same 8-bit pixel** in MD3 and in `--compat md3`: plain `(63, 127, 191)`, brighten `(127, 180, 221)`
+  (`sqrt`), solarize `(190, 255, 192)` (`* 4`), darken `(16, 63, 143)`, invert `(192, 128, 64)`. `--compat md2` gives
+  `(110, 191, 239)` for brighten and `(95, 127, 96)` for solarize, so the check does distinguish the two formulas.
+* `MilkDrop3 - Equalizer2 red.milk` (`get_fft` returns 0 on silence): the cyan glow along the bottom edge is identical in
+  both, down to the gradient. `Equalizer1`, `Equalizer2 purple`, `Equalizer4` and `Equalizer4 MidSoft` are black in both
+  (all bars at height 0); `Equalizer1b` shows the same sparse violet particles (positions differ, random).
+* With audio (`synth128.wav`; also `sweep.wav` for `Equalizer1`) `Equalizer1`, `Equalizer2 red` / `purple`, `Equalizer4` and
+  `Equalizer4 MidSoft` draw bar spectra (LED blocks, solid bars, centred bars) with a jagged, falling profile. MD3 cannot be fed
+  audio in this setup, so the bar heights themselves are only checked against the D3D9 model by the GPU tests, not
+  against MD3.
+* `lara - Flexi Romanesco Uncompressed [MOUSE].milk` (PSVERSION 4/3, `mouse.x/.y/.z`, `get_fft` in the composite): the same
+  faceted fractal with the same cyan-to-deep-blue palette and framing, morphing differently with time (and `mouse`, which is
+  `(-1, -1, 0, 0)` in `fdrender`, an unknown real cursor in the oracle); the exact shape was not compared.
+* A locked preset (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
+  runs) while MD3 draws its licensed laser scene: expected, see `md3.md`.
+
 ## Verification
 
 All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X] -- --nocapture`.

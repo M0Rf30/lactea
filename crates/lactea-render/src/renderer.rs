@@ -3659,6 +3659,8 @@ impl Renderer {
                     // `Sampler::Unbind(0)` follows, so every later textured draw falls back to the texture's own
                     // NEAREST/REPEAT parameters. `last_blur_levels` is the *native* level: a diagnostic blur chain
                     // must not trigger it (projectM restores the sampler after its own forced blur).
+                // no `gl_fill_ties` here: the nearest-sampled UV of a moved vertex flips texel choices at pixel centres
+                // (`Zylot - Star Ornament` main 79.0 -> 72.2 dB)
                     b.tex_leak(tex_blend, &tri);
                 } else {
                     b.tex(tex_blend, &tri);
@@ -3667,7 +3669,11 @@ impl Renderer {
                 let colors: Vec<[f32; 4]> = (0..g.pts.len())
                     .map(|k| if k == 0 { c1 } else { c2 })
                     .collect();
-                b.flat(blend, &geom::fan_to_list(&g.pts, &colors));
+                let mut tris = geom::fan_to_list(&g.pts, &colors);
+                if rules.gl_fill_ties {
+                    geom::gl_fill_ties(&mut tris, w, h);
+                }
+                b.flat(blend, &tris);
             }
             // projectM `CustomShape::Draw`: `border_a > 0.0001f`
             if s.border_rgba[3] > 0.0001 {

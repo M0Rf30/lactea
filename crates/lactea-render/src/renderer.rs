@@ -3373,7 +3373,9 @@ impl Renderer {
         );
     }
 
-    /// The sprites of `layer` (1..=4) onto `view`, one after the other in the order of `FrameInput::sprites`.
+    /// The sprites of `layer` (1..=4) onto `view`, one after the other in the order of `FrameInput::sprites`. With
+    /// `CompatRules::md3_sprite_burn_twice` a burning sprite is drawn a second time right after the first (MD3 burns
+    /// into the very image it draws on).
     fn draw_sprite_layer(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3381,7 +3383,13 @@ impl Renderer {
         layer: u8,
         view: &wgpu::TextureView,
     ) {
-        let draws: Vec<&SpriteDraw> = input.sprites.iter().filter(|s| s.layer == layer).collect();
+        let mut draws: Vec<&SpriteDraw> = Vec::new();
+        for s in input.sprites.iter().filter(|s| s.layer == layer) {
+            draws.push(s);
+            if s.burn && self.rules.md3_sprite_burn_twice {
+                draws.push(s);
+            }
+        }
         if !draws.is_empty() {
             self.sprite_pass(encoder, view, &draws);
         }

@@ -269,6 +269,51 @@ fn feedback_layers_are_composited_and_remembered_top_layer_is_not() {
     assert!(is_near(second, [255, 0, 0]), "burn frame 1: {second:?}");
 }
 
+/// MD3 draws a burning sprite of layers 1..4 twice into the feedback image (measured under Wine): an additive
+/// sprite is twice as strong with burn as without; MilkDrop 2 rules draw it once.
+#[test]
+fn burn_doubles_additive_sprites_in_feedback_layers_under_md3() {
+    let (device, queue) = gpu_or_skip!();
+    let centre_value = |compat: Compat, layer: u8, burn: bool| {
+        let mut r = Renderer::new(
+            &device,
+            &queue,
+            RenderConfig {
+                width: W,
+                height: H,
+                mesh: [16, 12],
+                compat,
+                ..RenderConfig::default()
+            },
+        )
+        .unwrap();
+        r.set_sprite_image(0, 1, 1, &[&[128, 128, 128, 255]], true)
+            .unwrap();
+        let mut f = quiet_input();
+        let mut d = draw(layer, 0, 2, [1.0, 1.0, 1.0, 0.2], 2.0);
+        d.burn = burn;
+        f.sprites = vec![d];
+        render(&device, &queue, &mut r, &f);
+        pixel(&stage(&r, Stage::Final), W / 2, H / 2)[0]
+    };
+    let (once, twice) = (
+        centre_value(Compat::MilkDrop3, 1, false),
+        centre_value(Compat::MilkDrop3, 1, true),
+    );
+    assert!((24..=28).contains(&once), "one additive draw: {once}");
+    assert!(
+        twice.abs_diff(2 * once) <= 2,
+        "burn draws twice: {once} vs {twice}"
+    );
+    assert_eq!(
+        centre_value(Compat::MilkDrop2, 1, true),
+        once,
+        "MD2 rules draw once"
+    );
+    // layer 0 burns into the feedback image *after* the composite: the output itself shows one draw
+    assert_eq!(centre_value(Compat::MilkDrop3, 0, true), once);
+}
+
 /// Layers 1..4 sit between the warp, the shapes, the custom waves and the main wave + borders.
 #[test]
 fn feedback_layers_interleave_with_shapes_waves_and_borders() {

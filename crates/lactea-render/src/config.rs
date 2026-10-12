@@ -199,6 +199,10 @@ pub struct CompatRules {
     /// MilkDrop 3: shader textures (`sampler_<name>`) are also searched in the `sprites` and `gifs` folders, accept
     /// `.gif` / `.jfif` files, and an animated GIF shows the frame picked by `fmod(time, total)` of its delays.
     pub md3_gif_textures: bool,
+    /// MilkDrop 3: a burning sprite in layers 1..4 is drawn **twice** into the feedback image (it burns into the
+    /// image it is already drawn on), so additive and alpha modes are twice as strong with `SpriteBurn=1` as with 0.
+    /// Measured against MD3 under Wine (docs/md3.md, sprites).
+    pub md3_sprite_burn_twice: bool,
 }
 
 impl Compat {
@@ -252,6 +256,7 @@ impl Compat {
                 noshader_comp_wrap: false,
                 md3_preset_sprites: false,
                 md3_gif_textures: false,
+                md3_sprite_burn_twice: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -300,11 +305,13 @@ impl Compat {
                 noshader_comp_wrap: true,
                 md3_preset_sprites: false,
                 md3_gif_textures: false,
+                md3_sprite_burn_twice: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
                 md3_preset_sprites: true,
                 md3_gif_textures: true,
+                md3_sprite_burn_twice: true,
                 ..Compat::MilkDrop2.rules()
             },
         }
@@ -431,5 +438,25 @@ mod tests {
         assert!(!Compat::ProjectM.rules().md2_code_join);
         assert!(Compat::MilkDrop2.rules().md2_code_join);
         assert!(Compat::MilkDrop3.rules().md2_code_join);
+    }
+
+    #[test]
+    fn sprite_rules_are_milkdrop_3_only() {
+        for (c, md3) in [
+            (Compat::ProjectM, false),
+            (Compat::MilkDrop2, false),
+            (Compat::MilkDrop3, true),
+        ] {
+            let r = c.rules();
+            assert_eq!(
+                (
+                    r.md3_preset_sprites,
+                    r.md3_gif_textures,
+                    r.md3_sprite_burn_twice
+                ),
+                (md3, md3, md3),
+                "{c:?}"
+            );
+        }
     }
 }

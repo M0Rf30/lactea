@@ -43,7 +43,9 @@ pub struct SpriteDraw {
     pub rgba: [f32; 4],
     /// Triangle-strip order.
     pub quad: [SpriteVertex; 4],
-    /// Layer 0 only: the sprite is also drawn into the feedback image after the composite has read it.
+    /// Layer 0: the sprite is also drawn into the feedback image after the composite has read it. Layers 1..4
+    /// already draw into the feedback image; there a burning sprite is drawn twice
+    /// (`CompatRules::md3_sprite_burn_twice`).
     pub burn: bool,
 }
 

@@ -164,6 +164,10 @@ pub enum EngineError {
 
 impl EngineError {
     pub(crate) fn compile(what: &str, error: lactea_eel::CompileError) -> Self {
+    /// An operation on the loaded preset (e.g. [`Engine::import_custom_wave`]) was called with
+    /// no preset loaded.
+    #[error("no preset loaded")]
+    NoPreset,
         EngineError::Compile {
             what: what.to_string(),
             error,

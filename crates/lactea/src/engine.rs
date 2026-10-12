@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+mod custom_io;
 mod md2_blend;
 use md2_blend::{BlendBase, BlendState, build_blend_frame};
 

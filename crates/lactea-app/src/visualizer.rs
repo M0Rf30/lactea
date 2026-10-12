@@ -4,6 +4,7 @@
 //! engine to it and [`ScopeVisualizer`] is a dependency-free oscilloscope used to develop and
 //! test the shell (window, audio paths, preset keys) without an engine.
 
+use crate::cli::CompatArg;
 use bytemuck::{Pod, Zeroable};
 
 /// How a loaded preset replaces the running one.
@@ -18,6 +19,11 @@ pub enum Change {
 pub trait Visualizer {
     /// Load a `.milk` preset (raw bytes, `name` = display name). An `Err` means "skip this one".
     fn load_preset(&mut self, bytes: &[u8], name: &str, change: Change) -> Result<(), String>;
+    /// Show something alive although no preset could be loaded (the engine's built-in idle preset);
+    /// visualizers that always draw have nothing to do.
+    fn load_idle(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     /// PCM that became audible since the previous call: interleaved f32 in [-1, 1].
     fn push_pcm(&mut self, interleaved: &[f32], channels: usize);
     /// Draw one frame into `view` (the swapchain view, in the format the visualizer was built for).
@@ -49,6 +55,11 @@ pub trait Visualizer {
     /// The current auto hard cut mode, or `None` when the visualizer has no such feature or its
     /// compat mode does not support it (the key then tells the user what to enable).
     fn auto_hard_cut_mode(&self) -> Option<u8> {
+        None
+    }
+    /// The compat mode the visualizer runs now (never `Auto`): after a successful `load_preset`, the mode the
+    /// loaded preset runs under. `None` for visualizers without compat modes.
+    fn current_compat(&self) -> Option<CompatArg> {
         None
     }
 }

@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod cnum;
+mod detect;
 mod md3_io;
 pub mod milk2;
 mod scan;
@@ -22,6 +23,7 @@ use scan::{Lookup, decode, sane_entries};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+pub use detect::{DetectedCompat, DetectedFamily, Evidence, detect_compat};
 pub use md3_io::{export_shape_file, export_wave_file, import_shape_file, import_wave_file};
 pub use scan::LINEFEED_CONTROL_CHAR;
 pub use sprite::PresetSprite;
@@ -945,5 +947,14 @@ mod tests {
         assert_eq!(lines("a\u{1}"), ["a"]);
         assert_eq!(lines("a\u{1}\u{1}"), ["a", ""]);
         assert_eq!(lines("a\u{1}b"), ["a", "b"]);
+    }
+
+    #[test]
+    fn locked_handles_from_extra() {
+        let p = Preset::parse(b"MD31=123\nMD32= 456 \nMD31=9\n").unwrap();
+        assert_eq!(p.md31_handle(), Some(123));
+        assert_eq!(p.md32_handle(), Some(456));
+        let q = Preset::parse(b"fDecay=1\n").unwrap();
+        assert_eq!((q.md31_handle(), q.md32_handle()), (None, None));
     }
 }

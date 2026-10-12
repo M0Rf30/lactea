@@ -1,5 +1,6 @@
 //! The engine: preset loading and the per-frame CPU pipeline (projectM `MilkdropPreset`).
 
+use crate::cache::{MediaCache, ShaderCache};
 use crate::md3_inputs::{Md3Frame, Md3Inputs, MouseState, new_analyzer, shader_ext};
 use crate::media::Media;
 use crate::rng::{ShaderStream, StreamRng, hue_offsets};
@@ -10,21 +11,21 @@ use crate::sprites::{SpriteInputs, SpriteRt};
 use crate::textures::{TextureProvider, pick_random, rand_slot};
 use crate::{
     EngineConfig, EngineError, ForcedFrame, FrameClock, PresetReport, ShaderFallback,
-    ShaderOutcome, Transition, TransitionInfo,
+    ShaderOutcome, ShaderOverride, Transition, TransitionInfo,
 };
 use lactea_abi::{PassKind, ShaderInterface, TexSource};
 use lactea_audio::{Analyzer, AudioFrame};
 use lactea_eel::GlobalMemory;
-use lactea_hlsl::{Options as HlslOptions, default_comp_shader, default_warp_shader, translate};
+use lactea_hlsl::{Options as HlslOptions, default_comp_shader, default_warp_shader};
 use lactea_preset::{
     BaseValues, Flavor, MAX_CUSTOM_SHAPES, MAX_CUSTOM_WAVES, Preset, code_to_source,
 };
 use lactea_render::warp_mesh::{self, VertexVars, WarpAnim};
 use lactea_render::wavegen::{CustomWaveSampling, NUM_WAVEFORM_SAMPLES};
 use lactea_render::{
-    CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom, RenderConfig,
-    Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams, WarpGpu,
-    WavePoint,
+    Compat, CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom,
+    RenderConfig, Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams,
+    WarpGpu, WavePoint,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -116,6 +117,13 @@ struct Slot {
     last: LastFrame,
 }
 
+/// What [`Engine::enter_compat`] replaced, to put back when the load that triggered the switch fails.
+struct CompatUndo {
+    compat: Compat,
+    analyzer: Analyzer,
+    rng_owner: GlobalMemory,
+}
+
 /// The part of projectM's `TimeKeeper` presets can observe: when the active preset started, the
 /// smoothing (soft cut) window and the `progress` value derived from them.
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +197,10 @@ pub struct Engine {
     queue: wgpu::Queue,
     analyzer: Analyzer,
     provider: Option<Box<dyn TextureProvider>>,
+    /// Textures and sprites the provider decoded, kept across preset loads (cleared with the provider).
+    media_cache: MediaCache,
+    /// Translated shaders, kept across preset loads.
+    shader_cache: ShaderCache,
     /// The preset shown (the outgoing one during a soft cut). `None` until the first load.
     active: Option<Slot>,
     /// The preset fading in during a soft cut.
@@ -264,6 +276,8 @@ impl Engine {
             device: device.clone(),
             queue: queue.clone(),
             provider: None,
+            media_cache: MediaCache::new(),
+            shader_cache: ShaderCache::new(),
             active: None,
             incoming: None,
             spare: Some(renderer),
@@ -306,6 +320,13 @@ impl Engine {
     /// The configuration the engine was created with.
     pub fn config(&self) -> &EngineConfig {
         &self.cfg
+    }
+
+    /// The compatibility mode of the presets now running: [`EngineConfig::compat`] for a fixed engine, and with
+    /// [`EngineConfig::auto_compat`] the mode the last loaded preset resolved to (the configured one before the
+    /// first load).
+    pub fn current_compat(&self) -> Compat {
+        self.cfg.compat
     }
 
     /// The renderer of the active preset (the outgoing one during a soft cut); before the first
@@ -407,6 +428,8 @@ impl Engine {
     /// Sets the source of user textures (`sampler_<name>` in preset shaders).
     pub fn set_texture_provider(&mut self, provider: Box<dyn TextureProvider>) {
         self.provider = Some(provider);
+        // the new provider may map the same names to other pixels
+        self.media_cache.clear();
     }
 
     /// Interleaved float PCM (`-1..1`), any channel count (only the first two are used).
@@ -476,6 +499,12 @@ impl Engine {
     // preset loading
     // -----------------------------------------------------------------------------------------
 
+    /// Register user HLSL for the locked preset(s) carrying `handle` as `MD31` / `MD32`
+    /// ([`EngineConfig::shader_overrides`]). Takes effect on the next load.
+    pub fn set_shader_override(&mut self, handle: u64, shader: ShaderOverride) {
+        self.cfg.shader_overrides.insert(handle, shader);
+    }
+
     /// Load a preset. `transition` says how it replaces the current one: [`Transition::Cut`]
     /// immediately, [`Transition::Soft`] by blending the two presets (both keep running) over
     /// the given number of seconds, like projectM's smooth preset change. With nothing loaded
@@ -506,6 +535,102 @@ impl Engine {
         name: &str,
         transition: Transition,
     ) -> Result<PresetReport, EngineError> {
+        let want = self
+            .cfg
+            .auto_compat
+            .then(|| crate::compat_for_preset(bytes));
+        let result = self.load_preset_resolved(bytes, name, transition, want);
+        // Auto mode: a preset that resolved to projectM and was rejected because its code does not compile may still
+        // be a MilkDrop 2 preset (the MD2 code-line glueing joins what projectM keeps apart, e.g. an identifier split
+        // over two lines). Retry once under MilkDrop 2; if that fails too, the projectM error is the one reported.
+        match result {
+            Err(rejected @ EngineError::Compile { .. }) if want == Some(Compat::ProjectM) => {
+                match self.load_preset_resolved(bytes, name, transition, Some(Compat::MilkDrop2)) {
+                    Ok(mut report) => {
+                        report
+                            .warnings
+                            .push(format!("fallback: projectM rejected: {rejected}"));
+                        Ok(report)
+                    }
+                    Err(_) => Err(rejected),
+                }
+            }
+            result => result,
+        }
+    }
+
+    /// [`Engine::load_preset`] once the compatibility mode is known (`None`: keep the current one). A different mode
+    /// replaces everything the engine derives from the mode and loads the preset with a hard cut: the running
+    /// preset's contexts, renderer rules and audio analysis belong to the old mode and cannot be blended into the
+    /// new one (`docs/md3.md`, "Automatic compatibility"). A failed load restores the old mode.
+    fn load_preset_resolved(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        transition: Transition,
+        want: Option<Compat>,
+    ) -> Result<PresetReport, EngineError> {
+        let Some(want) = want.filter(|w| *w != self.cfg.compat) else {
+            return self.load_preset_in_mode(bytes, name, transition);
+        };
+        let undo = self.enter_compat(want);
+        let result = self.load_preset_in_mode(bytes, name, Transition::Cut);
+        if result.is_err() {
+            self.leave_compat(undo);
+        }
+        result
+    }
+
+    /// Switch the engine's mode-dependent state to `compat`: the analysis mode of the audio, the EEL dialect (a fresh
+    /// `reg00..reg99` / `gmegabuf`, one `rand()` stream throughout) and the mode every renderer built from now on
+    /// follows ([`Engine::acquire_renderer`]). Returns what [`Engine::leave_compat`] needs to undo it.
+    fn enter_compat(&mut self, compat: Compat) -> CompatUndo {
+        let previous = self.cfg.compat;
+        self.cfg.compat = compat;
+        let mut analyzer = new_analyzer(&self.cfg);
+        analyzer.take_pcm_from(&self.analyzer);
+        let owner =
+            GlobalMemory::sharing_rng_with_dialect(&self.rng_owner, eel_dialect(&compat.rules()));
+        CompatUndo {
+            compat: previous,
+            analyzer: std::mem::replace(&mut self.analyzer, analyzer),
+            rng_owner: std::mem::replace(&mut self.rng_owner, owner),
+        }
+    }
+
+    /// Undo [`Engine::enter_compat`] after a failed load: the running preset keeps its mode.
+    fn leave_compat(&mut self, undo: CompatUndo) {
+        self.cfg.compat = undo.compat;
+        self.analyzer = undo.analyzer;
+        self.rng_owner = undo.rng_owner;
+        // a failed load hands its renderer back to the spare slot, built for the mode that failed
+        if let Some(r) = self.spare.as_mut().filter(|r| r.compat() != undo.compat) {
+            *r = r.sibling_with_compat(undo.compat);
+        }
+    }
+
+    /// The idle renderer every load builds into, following the engine's current mode: the spare one, or a sibling
+    /// of the active renderer (whose pipelines and noise it shares). A renderer of another mode is rebuilt.
+    fn acquire_renderer(&mut self) -> Renderer {
+        let compat = self.cfg.compat;
+        match self.spare.take() {
+            Some(r) if r.compat() == compat => r,
+            Some(r) => r.sibling_with_compat(compat),
+            None => self
+                .active
+                .as_ref()
+                .expect("engine always owns a renderer")
+                .renderer
+                .sibling_with_compat(compat),
+        }
+    }
+
+    fn load_preset_in_mode(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        transition: Transition,
+    ) -> Result<PresetReport, EngineError> {
         // MilkDrop 3: `.milk2` double presets, and the next preset asked for while one is on screen
         let transition = match self.load_preset_md3(bytes, name, transition) {
             md3_blend::Md3Dispatch::Done(r) => return r,
@@ -524,15 +649,7 @@ impl Engine {
             transition
         };
         // every load builds into an idle renderer: the previous preset keeps drawing untouched
-        let mut renderer = match self.spare.take() {
-            Some(r) => r,
-            None => self
-                .active
-                .as_ref()
-                .expect("engine always owns a renderer")
-                .renderer
-                .sibling(),
-        };
+        let mut renderer = self.acquire_renderer();
         renderer.reset_images();
         match self.build_loaded(bytes, name, &mut renderer, true) {
             Ok((loaded, report)) => {
@@ -638,6 +755,7 @@ impl Engine {
         let mut report = PresetReport {
             name: name.to_string(),
             preset_version: preset.milkdrop_preset_version,
+            compat: self.cfg.compat,
             ..Default::default()
         };
         let gm = Arc::new(GlobalMemory::sharing_rng_with(&self.rng_owner));
@@ -820,6 +938,7 @@ impl Engine {
         let sprite = match preset.sprite.as_ref().filter(|_| rules.md3_preset_sprites) {
             Some(cfg) => crate::sprites::load(
                 self.provider.as_mut(),
+                &mut self.media_cache,
                 cfg,
                 renderer,
                 &gm,
@@ -874,7 +993,7 @@ impl Engine {
     /// Translate the preset's shaders following the PSVERSION rules of projectM (MilkDrop 2 with
     /// [`crate::Compat::md2_family`]).
     fn build_shaders(
-        &self,
+        &mut self,
         p: &Preset,
         report: &mut PresetReport,
     ) -> (Option<CompiledShader>, Option<CompiledShader>) {
@@ -884,21 +1003,30 @@ impl Engine {
         let mut opts = HlslOptions::default();
         opts.floor_mod = !md2;
         opts.projectm_flavor = !md2;
-        opts.md3 = self.cfg.compat.rules().md3_shader_prelude;
-        let to_compiled = |t: lactea_hlsl::Translated, report: &mut PresetReport| {
+        let rules = self.cfg.compat.rules();
+        opts.md3 = rules.md3_shader_prelude;
+        opts.gl_varying_fold = rules.gl_varying_fold;
+        let to_compiled = |t: &lactea_hlsl::Translated, report: &mut PresetReport| {
             report.warnings.extend(t.warnings.iter().cloned());
             CompiledShader {
-                wgsl: t.wgsl,
-                interface: t.interface,
+                wgsl: t.wgsl.clone(),
+                interface: t.interface.clone(),
+                folds: t.folds.clone(),
             }
         };
 
         // ---- warp ---------------------------------------------------------------------
         let mut warp = None;
         if p.warp_ps_version > 0 {
-            let text = p.warp_shader.as_deref().map(code_to_source);
+            let text = match p
+                .md31_handle()
+                .and_then(|h| self.cfg.shader_overrides.get(&h))
+            {
+                Some(ShaderOverride { warp: Some(w), .. }) => Some(w.clone()),
+                _ => p.warp_shader.as_deref().map(code_to_source),
+            };
             match text.filter(|t| !t.trim().is_empty()) {
-                Some(src) => match translate(PassKind::Warp, &src, &opts) {
+                Some(src) => match &*self.shader_cache.translate(PassKind::Warp, &src, &opts) {
                     Ok(t) => {
                         report.warp = ShaderOutcome::User;
                         warp = Some(to_compiled(t, report));
@@ -914,7 +1042,7 @@ impl Engine {
                 },
                 None if md2 => {
                     let src = default_warp_shader(p.base.decay, p.base.tex_wrap);
-                    match translate(PassKind::Warp, &src, &opts) {
+                    match &*self.shader_cache.translate(PassKind::Warp, &src, &opts) {
                         Ok(t) => {
                             report.warp = ShaderOutcome::Default;
                             warp = Some(to_compiled(t, report));
@@ -929,7 +1057,13 @@ impl Engine {
         // ---- composite ----------------------------------------------------------------
         let mut comp = None;
         if p.comp_ps_version > 0 {
-            let text = p.comp_shader.as_deref().map(code_to_source);
+            let text = match p
+                .md32_handle()
+                .and_then(|h| self.cfg.shader_overrides.get(&h))
+            {
+                Some(ShaderOverride { comp: Some(c), .. }) => Some(c.clone()),
+                _ => p.comp_shader.as_deref().map(code_to_source),
+            };
             let default_src = if md2 {
                 default_comp_shader(
                     p.base.gamma_adj,
@@ -949,7 +1083,7 @@ impl Engine {
             let user = text.filter(|t| !t.trim().is_empty());
             let mut used_default = user.is_none();
             if let Some(src) = &user {
-                match translate(PassKind::Comp, src, &opts) {
+                match &*self.shader_cache.translate(PassKind::Comp, src, &opts) {
                     Ok(t) => {
                         report.comp = ShaderOutcome::User;
                         comp = Some(to_compiled(t, report));
@@ -969,7 +1103,10 @@ impl Engine {
                 if report.comp != ShaderOutcome::Fallback {
                     report.comp = ShaderOutcome::Default;
                 }
-                match translate(PassKind::Comp, &default_src, &opts) {
+                match &*self
+                    .shader_cache
+                    .translate(PassKind::Comp, &default_src, &opts)
+                {
                     Ok(t) => comp = Some(to_compiled(t, report)),
                     Err(e) => report
                         .warnings
@@ -1017,13 +1154,17 @@ impl Engine {
                         reason: e.to_string(),
                         fallback: "default composite shader".into(),
                     });
-                    let passthrough =
-                        translate(PassKind::Comp, PASSTHROUGH_COMP, &HlslOptions::default())
-                            .ok()
-                            .map(|t| CompiledShader {
-                                wgsl: t.wgsl,
-                                interface: t.interface,
-                            });
+                    let passthrough = lactea_hlsl::translate(
+                        PassKind::Comp,
+                        PASSTHROUGH_COMP,
+                        &HlslOptions::default(),
+                    )
+                    .ok()
+                    .map(|t| CompiledShader {
+                        wgsl: t.wgsl,
+                        interface: t.interface,
+                        folds: t.folds,
+                    });
                     if let Some(p) = passthrough {
                         comp_ok = renderer.set_comp_shader(Some(p)).is_ok();
                     }
@@ -1071,7 +1212,7 @@ impl Engine {
         };
         let pool = provider.random_pool();
         let mut slot_pick: HashMap<usize, Option<String>> = HashMap::new();
-        let mut cache: HashMap<String, Option<Media>> = HashMap::new();
+        let mut cache: HashMap<String, Option<Arc<Media>>> = HashMap::new();
         let md3_gif = self.cfg.compat.rules().md3_gif_textures;
         for (name, pm_name) in wanted {
             let provider_name = match rand_slot(&name) {
@@ -1087,12 +1228,12 @@ impl Engine {
             };
             let media = cache.entry(pn.clone()).or_insert_with(|| {
                 if md3_gif {
-                    provider.load_md3_texture(&pn)
+                    self.media_cache.md3_texture(&mut **provider, &pn)
                 } else {
-                    provider.load(&pn).map(Media::Still)
+                    self.media_cache.still(&mut **provider, &pn)
                 }
             });
-            let set = match media {
+            let set = match media.as_deref() {
                 Some(Media::Still(img))
                     if img.width > 0
                         && img.height > 0
@@ -1517,7 +1658,10 @@ fn build_frame(
     eval_per_frame(l, &cx, &env, &base, forced, last);
     let anim = warp_anim(&cx, &base);
     let toff = warp_mesh::texel_offset_uv(cfg.texel_offset, cfg.width, cfg.height);
-    let (vertex_vars, warp_uv) = eval_vertices(l, g, &anim, toff);
+    let vertex_vars = eval_vertices(l, g);
+    // projectM's GPU evaluates the warp UV formula from the vertex variables: the CPU grid is not needed
+    let warp_uv =
+        (!cfg.compat.rules().warp_uv_on_gpu).then(|| warp_vertex_uvs(g, &vertex_vars, &anim, toff));
     let mut fi = frame_head(l, &cx, &base, vertex_vars, warp_uv, anim, true, None);
     push_shapes(l, &env, &mut fi.shapes);
     push_waves(l, &cx, &env, &mut fi.waves);
@@ -1587,15 +1731,9 @@ fn warp_anim(cx: &FrameCtx, base: &BaseValues) -> WarpAnim {
     anim
 }
 
-/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values) and
-/// the warp UV of every vertex they give.
-fn eval_vertices(
-    l: &mut Loaded,
-    g: &MeshGeometry,
-    anim: &WarpAnim,
-    toff: [f32; 2],
-) -> (Vec<VertexVars>, Vec<[f32; 2]>) {
-    let vertex_vars: Vec<VertexVars> = if l.pp.prog.is_some() {
+/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values).
+fn eval_vertices(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
+    if l.pp.prog.is_some() {
         per_pixel_vars(l, g)
     } else {
         let pv = |v| l.pf.ctx.get(v);
@@ -1613,13 +1751,21 @@ fn eval_vertices(
             sy: pv(vars.sy) as f32,
         };
         vec![vv; g.vertex_count()]
-    };
-    let warp_uv: Vec<[f32; 2]> = vertex_vars
+    }
+}
+
+/// The warp UV of every vertex of the mesh for its motion variables.
+fn warp_vertex_uvs(
+    g: &MeshGeometry,
+    vertex_vars: &[VertexVars],
+    anim: &WarpAnim,
+    toff: [f32; 2],
+) -> Vec<[f32; 2]> {
+    vertex_vars
         .iter()
         .enumerate()
         .map(|(n, vv)| warp_mesh::warp_vertex_uv(g, n, vv, anim, toff))
-        .collect();
-    (vertex_vars, warp_uv)
+        .collect()
 }
 
 /// Everything of a frame except shapes, custom waves and the shader pass random state: timing, audio, `q`, warp
@@ -1635,7 +1781,7 @@ fn frame_head(
     cx: &FrameCtx,
     base: &BaseValues,
     vertex_vars: Vec<VertexVars>,
-    warp_uv: Vec<[f32; 2]>,
+    warp_uv: Option<Vec<[f32; 2]>>,
     anim: WarpAnim,
     gpu: bool,
     wrap_snap: Option<f32>,
@@ -1664,7 +1810,7 @@ fn frame_head(
     if let Some(m) = cx.md3 {
         fi.ext = shader_ext(&cfg.compat.rules(), m, pf, l.start_time, clock.time, true);
     }
-    fi.warp_uv = Some(warp_uv);
+    fi.warp_uv = warp_uv;
     // projectM evaluates the warp UV formula on the GPU (the renderer ignores this for MilkDrop 2 compat)
     if gpu {
         fi.warp_gpu = Some(WarpGpu {
@@ -1961,22 +2107,16 @@ fn finish_frame(
     l.hue_offsets = hue;
 }
 
-/// Per-pixel inputs `(x, y, rad, ang)` exactly as projectM computes them (`PerPixelMesh`):
-/// its own mesh `y_pm = row_pm/gy*2-1` (row 0 on top; `-y` of ours is *not* bit-identical in f32:
+/// Per-pixel inputs `(x, y, rad, ang)` exactly as projectM computes them (`PerPixelMesh`), taken from the mesh's
+/// precomputed projectM vertex ([`MeshGeometry::projectm_vertex`], constant per mesh): its own mesh
+/// `y_pm = row_pm/gy*2-1` (row 0 on top; `-y` of ours is *not* bit-identical in f32:
 /// e.g. 2/36*2-1 and -(34/36*2-1) differ by 1 ulp), `rad = hypotf(x*ax, y_pm*ay)`,
 /// `ang = -atan2f(y_pm*ay, x*ax)` (`atan2f(+0, -x) = +pi`, so the centre row left of the centre
 /// is `-pi`). `rad` is compared against constants by presets (`below(rad,0.5)` ...), so a 1-ulp
 /// difference flips whole cells (Memories Of The Castle: vertex rows 2 / 34, warped 48 -> 96+ dB).
 fn per_pixel_inputs(g: &MeshGeometry, x: u32, row_pm: u32) -> [f32; 4] {
-    let vx = x as f32 / g.gx() as f32 * 2.0 - 1.0;
-    let vy = row_pm as f32 / g.gy() as f32 * 2.0 - 1.0;
+    let ([vx, vy], rad, ang) = g.projectm_vertex(x, g.gy() - row_pm);
     let (ax, ay) = (g.aspect_x(), g.aspect_y());
-    let rad = (vx * ax).hypot(vy * ay);
-    let ang = if row_pm == g.gy() / 2 && x == g.gx() / 2 {
-        0.0
-    } else {
-        (vy * ay).atan2(vx * ax)
-    };
     [vx * 0.5 * ax + 0.5, vy * 0.5 * ay + 0.5, rad, -ang]
 }
 

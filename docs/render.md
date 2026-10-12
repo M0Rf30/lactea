@@ -77,7 +77,8 @@ and `GL_POINTS` (dots), width 1. On the oracle's GPU (Mesa iris) `GL_LINE_SMOOTH
   `RG16F` attachment (`layout(location = 1)`), so the interpolated `uv` has two uses in Mesa's NIR and the compiler cannot
   fold constants into its plane equation (`uv - 0.5` stays `plane(uv) - 0.5`). With a single use ANV folds it into
   `plane(uv - 0.5)`, which rounds differently: probe `sin((uv.x-0.5)*100)` showed 15 480 wrong pixels in 13 frames, 0
-  after `renderer::with_uv_output` appends the same second output (scratch `warp_sink`, never read). Remaining warp-shader
+  after `renderer::with_uv_output` appends the same second output (scratch `warp_sink`, never read). For the same reason
+  only `uv_orig`, `rad` and `ang` start the GL varying fold of `docs/hlsl.md` in a warp shader. Remaining warp-shader
   noise is on `rad`/`ang` (probe `sin(ang*20)`: 0.1-2 % of pixels), still open.
 
 ## Motion vectors (`motion.rs`)
@@ -92,7 +93,11 @@ Measured with `ov_mv*` probes against the oracle's `warpsrc` stage (`fdrender --
   **snapped to the 1/256 px grid** in the GPU's draw order (upper triangle `c d a`, lower `d a b`), **truncated** to
   half. Against the oracle's own UV map (patched dump, Aderrasi, 320x180) 0-2 of 115 200 texels differ; with the
   unsnapped mesh fractions the lines were a pixel off (mv-s55 `warpsrc` 55-66 dB -> 99 dB). The vertex UVs are the
-  GPU's own (`Renderer::gpu_warp_vertex_uv` runs `warp_vs` on the previous frame's inputs);
+  GPU's own (`Renderer::gpu_warp_vertex_uv` runs `warp_vs` on the previous frame's inputs: the readback is submitted as its
+  own small submission at the end of the frame that produced the inputs, with persistent buffers, and the next frame
+  waits for that submission only; `FrameInput::warp_uv` is not needed then, the CPU UVs the lookup falls back on if the
+  readback fails are derived from `warp_gpu`). The GPU warp mesh is drawn indexed: one vertex per mesh vertex plus an
+  index buffer in the triangle order above;
 * the vertex buffer holds `(countX+1)*2` entries that are never cleared and drawn completely after every row; unfilled
   slots (`posX = 1` is skipped, so always the last pair) stay `(0,0)`: an extra line from the bottom-left corner per
   row. The index buffer keeps the vertex count of the first draw, while the GL vertex buffer is re-allocated at every
@@ -170,8 +175,18 @@ presets with alpha-dependent shapes in free run):
   (negative inner radius) give self-overlapping triangles, each blended separately, which only the mesh reproduces.
 * the oracle rasterises in GL window space (y up): a pixel centre exactly on a *horizontal* triangle edge goes to the
   polygon above it, wgpu / D3D9 give it to the polygon below. Border edges sit on pixel centres whenever
-  `size * H / 2` is a half integer (`ob_size = 0.05` at 180 rows, `0.95` ...). `geom::gl_fill_ties` moves every vertex of
-  such an edge down by one sub-pixel step (`1/256` px) so wgpu picks the oracle's side; vertical edges need no change.
+  `size * H / 2` is a half integer (`ob_size = 0.05` at 180 rows, `0.95` ...). `geom::gl_fill_ties` moves every vertex
+  of such an edge down by one sub-pixel step (`1/256` px) so wgpu picks the oracle's side; vertical edges need no change.
+* the same rule applies to flat custom-shape fills (`renderer::build_overlay`): a 4-, 12-, 20-...-gon at `ang = 0` has
+  horizontal top and bottom edges (vertices sit at `ang + pi/4 + 2 pi k / n`), a multiple-of-8-gon has horizontal
+  spokes. Only a *boundary* edge (used by one triangle) is a tie: a spoke is shared by two triangles of the fan, its
+  pixels are drawn once whichever side owns them. A moved vertex keeps its triangle's colour plane (the colour moves
+  along the plane's `d/dy`), otherwise the 1/256-px shift flips colour roundings by one level at a few pixels. Measured
+  on step `main` (pixels differing from the oracle over 119 frames): `martin - baby one more time` (flat 12-gon x 256,
+  alpha gradient) 506 -> 55 (365 -> 2 pixels off by more than 2 levels); a plain move of every tie vertex gave 141 and
+  added one-level errors in `shifter + Geiss - molten glass wrap` (103 -> 110) and `skipper skipper kiss me hard`
+  (21 -> 22); spokes moved as well added 21 pixels to `Zylot & Idiot - Face BDRV`. Textured fills are not moved: the
+  moved vertex's UV changes the nearest texel at pixel centres (`Zylot - Star Ornament` main 79.0 -> 72.2 dB).
 * probes: `scripts/probes/bd_*.milk` (`bd_list.txt`: sizes, ties, negative / huge / overlapping, colours, alpha
   threshold, dynamic sizes, darken-centre), bit-identical (`inf` dB) in `main` and `final` at 320x180, 321x181,
   640x360, 1000x200; at 360x640 `main` is bit-identical and `final` needs the `VideoEcho` aspect quad

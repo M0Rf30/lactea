@@ -119,10 +119,12 @@ impl EngineVisualizer {
             mesh: [opts.mesh.0, opts.mesh.1],
             seed: opts.seed as u64,
             compat: match opts.compat {
-                CompatArg::Projectm => Compat::ProjectM,
+                // the mode before the first load; every load then resolves it from the preset
+                CompatArg::Auto | CompatArg::Projectm => Compat::ProjectM,
                 CompatArg::Milkdrop2 => Compat::MilkDrop2,
                 CompatArg::Milkdrop3 => Compat::MilkDrop3,
             },
+            auto_compat: opts.compat == CompatArg::Auto,
             output_format: format,
             sample_rate,
             fps: opts.fps,
@@ -204,6 +206,17 @@ impl Visualizer for EngineVisualizer {
         }
     }
 
+    fn load_idle(&mut self) -> Result<(), String> {
+        match self.engine.load_idle_preset() {
+            Ok(report) => {
+                log::info!("no preset could be loaded: showing the built-in idle preset");
+                log_report(&report);
+                Ok(())
+            }
+            Err(e) => Err(format!("idle preset: {e}")),
+        }
+    }
+
     fn push_pcm(&mut self, interleaved: &[f32], channels: usize) {
         self.engine.push_pcm_f32(interleaved, channels);
     }
@@ -245,13 +258,21 @@ impl Visualizer for EngineVisualizer {
     }
 
     fn auto_hard_cut_mode(&self) -> Option<u8> {
-        // Unsupported compat modes store the mode but never act on it.
+        // Unsupported compat modes store the mode but never act on it; under auto the mode is the
+        // resolved one (`config().compat` is not).
         self.engine
-            .config()
-            .compat
+            .current_compat()
             .rules()
             .md3_auto_hard_cut
             .then(|| self.engine.auto_hard_cut_mode())
+    }
+
+    fn current_compat(&self) -> Option<CompatArg> {
+        Some(match self.engine.current_compat() {
+            Compat::ProjectM => CompatArg::Projectm,
+            Compat::MilkDrop2 => CompatArg::Milkdrop2,
+            Compat::MilkDrop3 => CompatArg::Milkdrop3,
+        })
     }
 
     fn set_mouse(&mut self, position: Option<[f32; 2]>, left_down: bool) {

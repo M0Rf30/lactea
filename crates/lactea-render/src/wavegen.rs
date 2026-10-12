@@ -68,7 +68,14 @@ pub(crate) fn wave_rgb(mw: &MainWave) -> [f32; 3] {
     ];
     if mw.brighten {
         let amount = 1.0f32;
-        let max = c[0].max(c[1]).max(c[2]);
+        // a comparison chain, not `f32::max`: a NaN red stays the maximum (`max > 0.01` is false) as in MD2's C
+        let mut max = c[0];
+        if max < c[1] {
+            max = c[1];
+        }
+        if max < c[2] {
+            max = c[2];
+        }
         if max > 0.01 {
             for x in &mut c {
                 *x = *x / max * amount + *x * (1.0 - amount);
@@ -941,6 +948,18 @@ mod tests {
             mw.wave[1][i] = amp * (i as f32 * 0.2 + 1.0).sin();
         }
         mw
+    }
+
+    #[test]
+    fn maximize_colour_keeps_md2s_nan_behaviour() {
+        let mut mw = MainWave::default();
+        mw.brighten = true;
+        mw.rgba = [f32::NAN, 0.2, 0.4, 1.0];
+        let c = wave_rgb(&mw);
+        // a NaN red stays the maximum, so green and blue are not rescaled
+        assert!(c[0].is_nan() && c[1] == 0.2 && c[2] == 0.4);
+        mw.rgba = [0.1, 0.2, 0.4, 1.0];
+        assert_eq!(wave_rgb(&mw), [0.25, 0.5, 1.0]);
     }
 
     #[test]

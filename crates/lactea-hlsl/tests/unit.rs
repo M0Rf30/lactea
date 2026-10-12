@@ -485,3 +485,120 @@ fn hlslparser_binary_mul_is_mult() {
     assert_eq!(pm.matches("select((").count(), 1, "{pm}");
     assert!(!plain(body).contains("select(("));
 }
+
+/// Translate with the projectM flavour and Mesa's varying fold.
+fn folded(kind: PassKind, body: &str) -> Translated {
+    let src = format!("shader_body {{ {body} }}");
+    let mut opts = Options::default();
+    opts.projectm_flavor = true;
+    opts.gl_varying_fold = true;
+    let t = translate(kind, &src, &opts).unwrap_or_else(|e| panic!("{e}\n{body}"));
+    naga_validate(&t.wgsl).unwrap_or_else(|e| panic!("{e}\n{}", t.wgsl));
+    t
+}
+
+/// `interpolated input + uniform` is moved into the vertex stage by `nir_opt_varyings`; the fragment stage reads the
+/// sum as a varying (`Flexi + Martin - dive`: `z = 3 / (uv.y - (1 - h))`, final 29 -> 99 dB).
+#[test]
+fn gl_varying_fold_moves_interpolated_sums_into_the_vertex_stage() {
+    let t = folded(
+        PassKind::Comp,
+        "float2 c = uv - float2(0.5, 1 - q9); ret = 3 / c.y;",
+    );
+    assert_eq!(t.folds.len(), 1, "only c.y is used:\n{}", t.wgsl);
+    let f = &t.folds[0];
+    assert!(f.starts_with(
+        "fn fold_0(vs_uv: vec4<f32>, vs_rad_ang: vec2<f32>, vs_diffuse: vec4<f32>) -> f32"
+    ));
+    assert!(f.contains("vs_uv.y") && f.contains("mu.q["), "{f}");
+    assert!(
+        t.wgsl.contains("@location(3) fold0: vec4<f32>,") && t.wgsl.contains("g_fold0.x"),
+        "{}",
+        t.wgsl
+    );
+    // the same expression twice is one instruction (CSE)
+    let twice = folded(
+        PassKind::Comp,
+        "float a = uv.y + q9; float b = uv.y + q9; ret = a * b;",
+    );
+    assert_eq!(twice.folds.len(), 1);
+    // off by default
+    let off = tr(PassKind::Comp, "ret = (uv.y + q9).xxx;");
+    assert!(off.folds.is_empty() && !off.wgsl.contains("fold0"));
+}
+
+/// Only the instructions Mesa can move: `a * b` is `mult(a, b)` (a `select`), `-x` and everything non-linear are not.
+#[test]
+fn gl_varying_fold_follows_what_mesa_moves() {
+    let n = |body: &str| folded(PassKind::Comp, body).folds.len();
+    assert_eq!(
+        n("ret = frac(uv.y * q9 * 1000000).xxx;"),
+        0,
+        "mult is never moved"
+    );
+    assert_eq!(
+        n("ret = frac((-uv.y + q9) * 1000000).xxx;"),
+        0,
+        "fneg of an input is not moved"
+    );
+    assert_eq!(n("ret = frac((0 - uv.y + q9) * 1000000).xxx;"), 1);
+    assert_eq!(
+        n("ret = frac((uv.y / q9) * 1000000).xxx;"),
+        1,
+        "fdiv by a uniform"
+    );
+    assert_eq!(n("ret = frac((uv.y / 3.0) * 1000000).xxx;"), 0);
+    assert_eq!(n("ret = frac(lerp(uv.x, uv.y, q9) * 1000000).xxx;"), 1);
+    assert_eq!(
+        n("float t = uv.y; t *= q9; ret = frac((t + 0.2) * 1000000).xxx;"),
+        1,
+        "*= is a plain product"
+    );
+    // the sum is moved, the product around it is not
+    assert_eq!(n("ret = frac((uv.y + q9) * q9 * 1000000).xxx;"), 1);
+    // saturate / abs / max are not linear: the add below them moves, nothing else does
+    assert_eq!(n("ret = frac(saturate(uv.y + q9) * 1000000).xxx;"), 1);
+    assert_eq!(n("ret = frac(max(uv.y, 0) * 1000000).xxx;"), 0);
+    // two separate sums of one input end in an unmovable instruction: no instruction post-dominates the load
+    assert_eq!(
+        n(
+            "float a = uv.y + q9; float b = uv.y + q8; ret = (frac(a * 1000000) + frac(b * 1000000)).xxx;"
+        ),
+        0
+    );
+    // ... unless they meet in a movable one
+    assert_eq!(
+        n("float a = uv.y + q9; float b = uv.y + q8; ret = frac((a + b) * 1000000).xxx;"),
+        1
+    );
+    // a convergent expression of any form moves along
+    assert_eq!(
+        n("ret = frac((uv.y + sin(q9 * 3) * 0.1) * 1000000).xxx;"),
+        1
+    );
+}
+
+/// projectM's warp shader copies `_uv.xy` to a second render target, so a load of `uv` has a use that no movable
+/// instruction post-dominates; `uv_orig` starts a motion and brings `uv` along.
+#[test]
+fn gl_varying_fold_in_a_warp_shader_starts_at_uv_orig() {
+    let n = |body: &str| folded(PassKind::Warp, body).folds.len();
+    assert_eq!(n("ret = frac((uv.y + q9) * 1000000).xxx;"), 0);
+    assert_eq!(n("ret = frac((uv - 0.5).y * 1000000).xxx;"), 0);
+    assert_eq!(n("ret = frac((uv_orig.y + q9) * 1000000).xxx;"), 1);
+    assert_eq!(n("ret = frac((uv.y - uv_orig.y) * 1000000).xxx;"), 1);
+    assert_eq!(
+        n("ret = frac((lerp(uv, uv_orig, -1) + 0.3).y * 1000000).xxx;"),
+        1
+    );
+    assert_eq!(n("ret = frac((rad + uv.x) * 1000000).xxx;"), 1);
+    let t = folded(
+        PassKind::Warp,
+        "ret = frac((uv.y - uv_orig.y) * 1000000).xxx;",
+    );
+    assert!(
+        t.folds[0].contains("vs_uv.y") && t.folds[0].contains("vs_uv.w"),
+        "{}",
+        t.folds[0]
+    );
+}

@@ -6,6 +6,7 @@
 //! with the renderer.
 
 use crate::PresetReport;
+use crate::cache::MediaCache;
 use crate::media::Media;
 use crate::runtime::compile_part;
 use crate::textures::TextureProvider;
@@ -355,8 +356,10 @@ impl SpriteRt {
 /// is a warning in `report`; the preset loads without its sprite.
 ///
 /// Clears the renderer's sprite images first, so the call also removes the previous preset's sprite.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn load(
     provider: Option<&mut Box<dyn TextureProvider>>,
+    media_cache: &mut MediaCache,
     cfg: &PresetSprite,
     renderer: &mut Renderer,
     gm: &Arc<GlobalMemory>,
@@ -371,14 +374,14 @@ pub(crate) fn load(
             .push(format!("sprite {}: no texture provider", cfg.name));
         return None;
     };
-    let Some(media) = provider.load_sprite(&cfg.name) else {
+    let Some(media) = media_cache.sprite(&mut **provider, &cfg.name) else {
         report
             .warnings
             .push(format!("sprite {}: image not found", cfg.name));
         return None;
     };
-    let (size, delays, result) = match media {
-        Media::Still(mut img) => {
+    let (size, delays, result) = match &*media {
+        Media::Still(img) => {
             if img.width == 0
                 || img.height == 0
                 || img.rgba8.len() != img.width as usize * img.height as usize * 4
@@ -388,8 +391,10 @@ pub(crate) fn load(
                     .push(format!("sprite {}: unusable image", cfg.name));
                 return None;
             }
-            apply_color_key(&mut img.rgba8, cfg.color_key);
-            let r = renderer.set_sprite_image(0, img.width, img.height, &[&img.rgba8], true);
+            // the colour key is the preset's: the shared decode stays as the provider returned it
+            let mut rgba8 = img.rgba8.clone();
+            apply_color_key(&mut rgba8, cfg.color_key);
+            let r = renderer.set_sprite_image(0, img.width, img.height, &[&rgba8], true);
             ((img.width, img.height), Vec::new(), r)
         }
         Media::Animated(a) => {

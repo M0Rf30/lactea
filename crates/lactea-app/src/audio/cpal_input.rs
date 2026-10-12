@@ -1,5 +1,6 @@
-//! cpal capture: the default (or `--capture-device`) input device. Fallback for hosts without
-//! PipeWire and the only path on other operating systems.
+//! cpal capture: an input device, or on Windows/macOS an output device recorded as loopback
+//! ("what is playing"). Fallback for hosts without PipeWire and the only path on other
+//! operating systems.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,23 +8,39 @@ use std::time::Instant;
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, SizedSample, StreamConfig};
 
-use super::devices::{find_input, label};
+use super::devices::{
+    CaptureKind, OS_HAS_LOOPBACK, default_capture_device, default_capture_plan, find_capture, label,
+};
 use super::{
     AudioSource, CHANNELS, LIVE_RATE, RING_FRAMES, SourceShared, drain_ring, push_frames, to_stereo,
 };
+use crate::cli::AudioBackend;
 
 pub struct CpalCapture {
     consumer: rtrb::Consumer<f32>,
     shared: Arc<SourceShared>,
     rate: u32,
     desc: String,
+    kind: CaptureKind,
     // Dropping the stream stops capture. cpal streams are !Send on some hosts, so the source
     // stays on the render thread.
     _stream: cpal::Stream,
 }
 
-/// Pick the config: prefer `LIVE_RATE`, then stereo, then f32; fall back to the device default.
-fn choose_config(dev: &cpal::Device) -> Result<(StreamConfig, SampleFormat), String> {
+/// Pick the config. Input: prefer `LIVE_RATE`, then stereo, then f32; fall back to the device
+/// default. Loopback: always the output's own mix format. CoreAudio applies the requested rate
+/// to the physical device, so asking a loopback for `LIVE_RATE` would reconfigure the user's
+/// speakers, and the visualizer follows `sample_rate()` anyway.
+fn choose_config(
+    dev: &cpal::Device,
+    kind: CaptureKind,
+) -> Result<(StreamConfig, SampleFormat), String> {
+    if kind == CaptureKind::Loopback {
+        let cfg = dev
+            .default_output_config()
+            .map_err(|e| format!("no default output config: {e}"))?;
+        return Ok((cfg.into(), cfg.sample_format()));
+    }
     let default = dev
         .default_input_config()
         .map_err(|e| format!("no default input config: {e}"))?;
@@ -83,30 +100,52 @@ where
 }
 
 impl CpalCapture {
-    pub fn open(wanted: Option<&str>) -> Result<Self, String> {
+    /// Open `wanted` (`--capture-device`: an input, or on Windows/macOS an output captured as
+    /// loopback), else the default device `backend` selects, trying its fallback when the first
+    /// choice cannot be opened.
+    pub fn open(wanted: Option<&str>, backend: AudioBackend) -> Result<Self, String> {
         let host = cpal::default_host();
-        let dev = find_input(&host, wanted)?;
-        let desc = label(&dev);
-        let (config, format) = choose_config(&dev)?;
+        if let Some(w) = wanted {
+            let (dev, kind) = find_capture(&host, w)?;
+            return Self::open_device(&dev, kind);
+        }
+        let plan = default_capture_plan(OS_HAS_LOOPBACK, backend);
+        let first = default_capture_device(&host, plan.first)
+            .and_then(|dev| Self::open_device(&dev, plan.first));
+        match (first, plan.fallback) {
+            (Err(e), Some(kind)) => {
+                log::warn!(
+                    "audio: {} capture of the default device failed ({e}); using the default {kind} device",
+                    plan.first
+                );
+                default_capture_device(&host, kind).and_then(|dev| Self::open_device(&dev, kind))
+            }
+            (result, _) => result,
+        }
+    }
+
+    fn open_device(dev: &cpal::Device, kind: CaptureKind) -> Result<Self, String> {
+        let desc = label(dev);
+        let (config, format) = choose_config(dev, kind)?;
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(RING_FRAMES * CHANNELS);
         let shared = Arc::new(SourceShared::default());
         let stream = match format {
-            SampleFormat::F32 => build::<f32>(&dev, config, producer, shared.clone()),
-            SampleFormat::I16 => build::<i16>(&dev, config, producer, shared.clone()),
-            SampleFormat::U16 => build::<u16>(&dev, config, producer, shared.clone()),
-            SampleFormat::I32 => build::<i32>(&dev, config, producer, shared.clone()),
-            SampleFormat::U32 => build::<u32>(&dev, config, producer, shared.clone()),
-            SampleFormat::I8 => build::<i8>(&dev, config, producer, shared.clone()),
-            SampleFormat::U8 => build::<u8>(&dev, config, producer, shared.clone()),
-            SampleFormat::F64 => build::<f64>(&dev, config, producer, shared.clone()),
+            SampleFormat::F32 => build::<f32>(dev, config, producer, shared.clone()),
+            SampleFormat::I16 => build::<i16>(dev, config, producer, shared.clone()),
+            SampleFormat::U16 => build::<u16>(dev, config, producer, shared.clone()),
+            SampleFormat::I32 => build::<i32>(dev, config, producer, shared.clone()),
+            SampleFormat::U32 => build::<u32>(dev, config, producer, shared.clone()),
+            SampleFormat::I8 => build::<i8>(dev, config, producer, shared.clone()),
+            SampleFormat::U8 => build::<u8>(dev, config, producer, shared.clone()),
+            SampleFormat::F64 => build::<f64>(dev, config, producer, shared.clone()),
             other => return Err(format!("unsupported capture sample format {other}")),
         }
-        .map_err(|e| format!("cannot open capture stream on {desc}: {e}"))?;
+        .map_err(|e| format!("cannot open {kind} capture stream on {desc}: {e}"))?;
         stream
             .play()
-            .map_err(|e| format!("cannot start capture on {desc}: {e}"))?;
+            .map_err(|e| format!("cannot start {kind} capture on {desc}: {e}"))?;
         log::info!(
-            "cpal capture: {desc} ({} ch, {} Hz, {format})",
+            "audio: capturing {desc} ({kind}; {} ch, {} Hz, {format})",
             config.channels,
             config.sample_rate
         );
@@ -114,9 +153,14 @@ impl CpalCapture {
             consumer,
             shared,
             rate: config.sample_rate,
-            desc: format!("cpal input '{desc}'"),
+            desc: format!("cpal {kind} '{desc}'"),
+            kind,
             _stream: stream,
         })
+    }
+
+    pub fn kind(&self) -> CaptureKind {
+        self.kind
     }
 }
 

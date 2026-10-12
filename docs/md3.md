@@ -9,12 +9,15 @@ HLSL translation, the soft-cut machinery); everything else reads a rule field. T
 `Compat::ProjectM`; `Compat::MilkDrop2` is unchanged by anything described here.
 
 Select it with `--compat md3` (`fdrender`), `--compat milkdrop3` (`lactea` app), `Compat::MilkDrop3`
-(library) or `LACTEA_COMPAT_MILKDROP3` (C API, value 2).
+(library) or `LACTEA_COMPAT_MILKDROP3` (C API, value 2), or let the host pick it per preset:
+[Automatic compatibility](#automatic-compatibility) (`--compat auto`, `EngineConfig::auto_compat`,
+`LACTEA_COMPAT_AUTO`).
 
 ## Provenance
 
-MD3 is closed source: a fork of BeatDrop (the `vis_milk2` copy in `third_party/md2`) whose source was never
-published. Its behaviour was recovered by binary analysis, only to read and render MD3 preset files
+MD3 is closed source from 3.1 on: it descends from the MilkDrop 2 / BeatDrop line (the `vis_milk2` copy in
+`third_party/md2` is the reference) and only its first alpha, 3.0.A, was ever published (see "Version history").
+Its behaviour was recovered by binary analysis, only to read and render MD3 preset files
 (interoperability), and written down as behavioural specs. The work is clean-room:
 
 - the specs (what a file contains, what the program does with it, test vectors) are kept outside this
@@ -23,16 +26,17 @@ published. Its behaviour was recovered by binary analysis, only to read and rend
   here;
 - no MD3 code, binaries, presets or data are in the repository; tests use small hand-written fixtures.
 
-MD3's paid, locked shaders (the `MD31` / `MD32` keys) are not supported: lactea cannot and does not
-decrypt them. A preset that carries one still loads and runs the placeholder shader that stands in for it
-in the file, exactly like a build without the license.
+MD3's paid, locked shaders (the `MD31` / `MD32` keys) are not shipped: lactea cannot and does not decrypt them.
+A preset that carries one still loads and runs the placeholder shader that stands in for it in the file, unless
+the host registers its own HLSL for the handle (`EngineConfig::shader_overrides`; library and `fdrender` only,
+no app or C API exposure).
 
 ## Resources
 
 | Resource | Status |
 |---|---|
 | `.milk` with MD2 keys and code (what MD2 / BeatDrop read) | Supported: the MD2 importer, expressions and renderer (`Flavor::Md2`); code lines are glued without a separator (`md2_code_join`) |
-| MD3 expression engine (ns-eel2 numerics, name / literal / operator rules, RAM model) and compile-failure policy (a failing part is dropped, the preset loads) | Supported: `md3_ns_eel2`, `md3_drop_failed_code`, "Expression engine"; `mouse.x` and exponent literals do not compile in MD3 and do not here |
+| MD3 expression engine (ns-eel2: source rewriter, scanner, numerics, name rules, RAM model) and compile-failure policy (a failing part is dropped, the preset loads) | Supported: `md3_ns_eel2`, `md3_drop_failed_code`, "Expression engine"; `mouse.x` and `1e3`-style literals do not compile in MD3 and do not here |
 | `q1..q64`, `t1..t16`, `monitor2` / `monitor3`, `FFTAttack` / `FFTDecay`, shader `time` per state | Supported: "Shader inputs" |
 | Shader prelude (`get_fft`, `get_fft_hz`, `sampler_fft`, `mouse*`, `q33..q64`), mouse as shader input | Supported: `lactea-hlsl` / `lactea-render`; `Engine::set_mouse`, `fdrender --mouse`, app and C API |
 | Audio analysis of MD3 (left channel, 576-sample Hann FFT, `VolumeSensitivity`) | Supported (`AnalysisMode::Md3`); not exposed in `LacteaConfig` / app options |
@@ -42,7 +46,7 @@ in the file, exactly like a build without the license.
 | Sprites (`[SPRITE1_BEGIN]` blocks, layers 0-4, 11 blend modes, burn, GIF sprites and GIF shader textures) | Supported, see [Sprites](#sprites); no `sprites.ini`, user sprite or webcam layers |
 | Auto hard cuts (`AutoHardCutMode` 1..7) and the MD3 display time | Supported: "Auto hard cuts"; F8 / `--auto-hard-cut` / C API |
 | `.wave` / `.shape` files (single custom wave / shape import and export), MD3 `.milk` writer incl. sprite block | Supported (library / engine API; no app UI) |
-| Locked shaders (`MD31` / `MD32`) | Not supported: the placeholder shader in the file runs |
+| Locked shaders (`MD31` / `MD32`) | The placeholder shader in the file runs unless the host registers its own HLSL for the handle (library + `fdrender`; no app or C API) |
 
 MD3 pack (`~/M0Rf30/md3-re`, local smoke runs only; `fdrender --compat md3 --texture-dir <pack>/textures`, 30 frames):
 all 331 `.milk` and all 146 `.milk2` render with exit code 0, no shader fallback and no warning (before the MD3 work:
@@ -64,6 +68,132 @@ Each feature section below names the `CompatRules` fields it introduced.
 - **Hosts.** `Engine::set_mouse`, `take_auto_cuts`, `double_preset_info`, `import_custom_wave` / `_shape` are the engine
   calls a host wires; `docs/app.md`, `docs/engine.md` and `docs/parity.md` list the host side.
 
+## Automatic compatibility
+
+`EngineConfig::auto_compat` (`--compat auto` in the `lactea` app, where it is the default; `fdrender --compat auto`;
+`LACTEA_COMPAT_AUTO` = 3 in the C API) makes every `Engine::load_preset` choose the compatibility mode from the
+preset's bytes, so that a folder mixing projectM, MilkDrop 2 / BeatDrop and MilkDrop 3 presets plays without
+`--compat`. The detection only ever picks **projectM** (the reference, and the answer whenever nothing says otherwise)
+or **MilkDrop 3**: a MilkDrop 2 / BeatDrop file has the same keys, code and shaders as a projectM file and nothing in
+it tells them apart. `Compat::MilkDrop2` is reached only by the **compile fallback**: when a preset that resolved to
+projectM fails to load with an expression compile error (`EngineError::Compile`), the engine retries it once under
+MilkDrop 2 (a hard cut, like any mode change). MilkDrop 2's code-line glueing (`StripLinefeedCharsAndComments`) joins
+what projectM keeps apart, so a preset whose identifier is split over two `per_frame_N` lines (`is_` / `beat`) loads
+there; 3 presets of the MD3 pack and e.g. `martin - liquid gold` of the projectM corpus need it. A success carries the
+evidence in `PresetReport::warnings` (`fallback: projectM rejected: <error>`, `PresetReport::compat` =
+`MilkDrop2`); if MilkDrop 2 rejects the preset too, the projectM error is the one returned and the running preset and
+mode stay. Ask for MilkDrop 2 for every preset explicitly (`--compat milkdrop2`). A fixed mode (`--compat
+projectm|milkdrop2|milkdrop3`, `auto_compat: false`) behaves exactly as before, with no fallback: the frames of
+`fdrender` in the three fixed modes are byte-identical with and without this feature.
+
+### Detection (`lactea_preset::detect_compat`)
+
+`detect_compat(bytes) -> DetectedCompat { family: DetectedFamily::{ProjectM, MilkDrop3}, evidence: Vec<Evidence> }` is
+pure on the bytes (no I/O, no engine state). The family is MilkDrop 3 iff at least one heuristic below fires; the
+evidence list names each hit (`Evidence` implements `Display`; `fdrender --compat auto` and the app log it).
+`lactea::compat_for_preset(bytes) -> Compat` is the engine's mapping. Comments (`//`, `\\` in expressions, `/* */`)
+and number literals are skipped, identifiers are matched whole (`q330`, `q65`, `mouse_pos2`, `mousex` are not hits),
+and a shader that declares the name itself (`float2 mouse`, its own `get_fft`, a `#define`) uses its own, not the
+prelude's.
+
+| Heuristic (`Evidence`) | Fires on | MD3 pack hits | projectM corpus hits |
+|---|---|---|---|
+| `Milk2Container` | the four `.milk2` markers (`milk2::is_double_preset`); the `.milk2` name is not needed and not enough | 146 of 146 `.milk2` | 0 |
+| `LockedShaderKey` | a line starting `MD31=` / `MD32=` (MD3's locked shaders) | 36 / 26 `.milk` | 0 |
+| `SpriteBlock` | a `[SPRITE1_BEGIN]` line, or a non-empty `SpriteName=` | 73 `.milk` | 0 |
+| `PresetVersion(300)` | `MILKDROP_PRESET_VERSION=300` (what MD3 writes for a preset with a sprite) | 73 `.milk` | 0 |
+| `ShapeSides` | an enabled custom shape with `sides` > 100 (MD2 / projectM clamp at 100, MD3 allows 500) | 0 | 0 |
+| `ShaderName` | in `warp_` / `comp_` text: `get_fft`, `get_fft_hz`, `sampler_fft` (also `sampler_fw_fft` ..), `mouse`, `mouse_x/_y/_z/_w`, `mouse_pos`, `_c14`, `_qi`..`_qp`, `q33`..`q64` | `.milk`: `get_fft` 9 (8 warp, 1 comp), `mouse` 1 | 0 |
+| `ExpressionVariable` | `q33`..`q64` in any code part; `t9`..`t16` in custom wave / shape code | `.milk`: `q64` 1, `t10` 2 | 0 |
+
+The pack's 477 files (331 `.milk`, 146 `.milk2`) resolve to MilkDrop 3: 271 (146 `.milk2` + 125 `.milk`); to
+projectM: 206 `.milk` that use no MD3-only feature (ordinary MD2 presets). The 4194 projectM corpus presets
+(`/usr/share/projectM/presets`) all resolve to projectM. Of the 125 `.milk`, 15 have `MD31` as their only evidence, 7
+`MD32`, 8 `get_fft` in the warp shader, 2 `t10`; the sprite and `version=300` hits always come together.
+
+**Not evidence**, because MD2 / BeatDrop files have it too (and so would be sent to MD3 wrongly, or tell nothing):
+- `nWaveMode` 9..17 and `wavecode_N_*` / `shapecode_N_*` with N > 3: BeatDrop raised the modes and the custom
+  slots to 16 (projectM runs 4 slots, MD2-family compat 16). Pack presets that use them but nothing MD3-only
+  (16 with `nWaveMode` >= 9, 3 with wave slots > 3, 1 with a shape slot > 3) resolve to projectM. Force
+  `--compat milkdrop2` / `milkdrop3` for those.
+- `MILKDROP_PRESET_VERSION` 200 / 201, any `PSVERSION*`, the `FFTAttack` / `FFTDecay` keys, `mousex` / `mousey`
+  expression variables (BeatDrop's), `get_fft_peak*` / `get_wave*` shader helpers (BeatDrop's; MD3 has none), `_c15` /
+  `_c16`.
+- `.milk2` by extension alone: a file named `.milk2` without the markers is a plain preset (as `Engine` has always
+  loaded it).
+
+**Known limits.** (a) `get_fft`, `_c14` and `mouse` also exist in BeatDrop with other semantics; lactea has no
+BeatDrop prelude, so such a preset only translates under the MD3 prelude and is sent there. (b) `q33` / `t9` used as a
+plain user variable in a projectM preset would be taken for MD3 (none of the 4194 corpus presets does). (c) An MD3
+preset that uses nothing MD3-only is indistinguishable from a projectM one and renders as projectM; pass `--compat
+milkdrop3` to run it as MD3.
+
+### What the engine does
+
+`load_preset` calls `compat_for_preset` first (`Engine::load_preset_resolved`). If the result equals the current
+mode, nothing changes: the load, soft cuts and `.milk2` playback are the mode's own. If it differs, the engine
+switches (`enter_compat`) and loads with a **hard cut**; a failed load puts everything back (`leave_compat`).
+What a switch replaces:
+
+| State | Rebuilt as |
+|---|---|
+| `EngineConfig::compat` / `Engine::current_compat()` | the new mode (`PresetReport::compat` says which mode a load ran under) |
+| renderer | the next renderer is `Renderer::sibling_with_compat`: same size / mesh / stroke setting, the shared pipelines and noise (neither depends on the mode), new images and the new mode's `CompatRules` |
+| audio analysis | a new `Analyzer` of the mode (`Md3` or `ProjectM`, `VolumeSensitivity` from the config); the PCM ring is carried over (`Analyzer::take_pcm_from`), the long-term averages restart |
+| expression dialect | a new `GlobalMemory` of the mode's dialect on the same `rand()` stream (`GlobalMemory::sharing_rng_with_dialect`): `reg00..reg99` / `gmegabuf` start empty |
+| shader translation, importer flavour, EEL join rules, per-frame / per-vertex / wave / shape contexts, sprite, `q33..q64` | built by the load itself from the new rules (nothing is cached across loads) |
+| kept | MD3 input state (mouse, shader FFT smoothing), `.milk2` header carry-over, seeded streams, the clock, `EngineConfig` MD3 settings (they only act in MD3) |
+
+Transitions:
+
+| From -> to | What happens |
+|---|---|
+| projectM -> projectM | unchanged: projectM's image-space soft cut between two independently rendered presets |
+| MD3 -> MD3 (a `.milk`, a `.milk2`, either order) | unchanged: MD2-style blend with MD3's patterns, `.milk2` playback and deferral |
+| MD2 -> MD2 (a fixed engine) | unchanged: MD2's blend |
+| any change of mode | a hard cut, whatever transition was asked; the new preset still starts from the previous image unless `start_clean` |
+
+A mixed pair cannot use projectM's image-space blend: it needs both presets to keep rendering, but the running
+preset's contexts (dialect, `q33..q64`, `t9..t16`), its audio analysis, the renderer rules and the per-frame frame
+builder all follow the one engine-wide mode, and the audio analyser and the EEL memory are single objects. Making
+them per slot would touch every frame path for a transition that happens at most once per mode change. MD2 -> MD3
+would be the one pair a MD2-style blend could cover, but the old state's contexts have no `q33..q64` / `t9..t16`
+to blend, and detection never produces MD2, so it falls under the same rule (hard cut).
+
+**Determinism.** The mode is a function of the preset bytes and the current mode; every random stream is seeded
+from `EngineConfig::seed` and survives the switch (one `rand()` stream, one set of transition / blend streams), so the
+same inputs give the same frames (`tests/auto_compat.rs`: two engines fed the same mixed playlist produce identical
+frames; after a switch a flat preset renders like a fixed MD3 engine's).
+
+### Hosts
+
+`lactea` (app): `--compat auto` is the default, `.milk2` files are listed, the window title and the log show the mode
+of the current preset (`docs/app.md`); the MD3 display time and F8 follow the resolved mode. `fdrender --compat auto`
+logs `compat auto -> md3 (evidence: ...)`, writes `compat`, `compat_auto` and `compat_evidence` to `fdrender.json`
+and applies `--mouse` / `--volume-sensitivity` / `--auto-hard-cut` when the preset resolved to MD3 (`fdrender`'s
+default stays `projectm`: it is the fidelity tool). C API: `LACTEA_COMPAT_AUTO`, `lactea_get_compat` for the mode in
+use.
+
+### Verification
+
+- `crates/lactea-preset/src/detect.rs` unit tests: one per heuristic, and the false-positive guards (comments,
+  `q330` / `q65` / `q033` / `q32`, `t17`, members, number literals, declared names, `#define`, incomplete `.milk2`
+  markers, other versions).
+- `crates/lactea/tests/auto_compat.rs` (GPU): a playlist projectM -> MD3 `q40` preset -> MD3 sprite preset -> `.milk2` ->
+  projectM -> projectM through one engine (resolved mode, the hard cut on a mode change, the soft cuts that stay,
+  the double preset ending, no validation error), a failed load that keeps the mode, an engine configured as MD2
+  resolving its first preset, a fixed engine never switching, determinism.
+- Fixed-mode equivalence: `fdrender` frames 0..29 (160x90) of 4 presets (2 corpus, 2 pack) x `projectm` / `md2` /
+  `md3`: 12 SHA-256 digests of the PNG streams equal before and after.
+- Smoke, `fdrender --compat auto --frames 30` (160x90):
+  - MD3 pack, 477 files: all 271 files with MD3 evidence (146 `.milk2`, 125 `.milk`) resolve to MD3 and render with exit
+    code 0 (the resolved mode matches `detect_compat` for every file); 203 resolve to projectM and render (one with a
+    shader fallback, exit 3); 3 `.milk` resolve to projectM and fail to load (exit 2, `martin - liquid gold` and two
+    more: their per-frame code relies on MD2's glueing of split lines, `md2_code_join`, so they also fail with a fixed
+    `--compat projectm` and load with `md2` / `md3`: they carry no MD3 evidence, so auto keeps the reference).
+  - 400 corpus presets (seeded random sample of the 4194): 395 resolve to projectM and render; 5 fail to load, the same
+    ones projectM itself rejects (`docs/corpus.md`, "Robustness"). Detection alone over all 4194: 0 MD3.
+
 ## Expression engine (ns-eel2)
 
 `CompatRules::md3_ns_eel2` (MilkDrop 3 only) runs every preset expression on `lactea_eel::Dialect::NsEel2`;
@@ -76,8 +206,36 @@ that `lactea-eel-oracle` compares against.
 The dialect rides in the `GlobalMemory` the contexts of one engine share (`GlobalMemory::with_dialect`;
 `GlobalMemory::sharing_rng_with` inherits it). `Engine::new` creates its `rng_owner` with
 `runtime::eel_dialect(&rules)`, every preset's memory derives from it, and every `Context` built on that memory
-(per-frame, per-vertex, waves, shapes, and any context a later slice builds from the same memory) follows. A new
+(per-frame, per-vertex, waves, shapes, and any context built later from the same memory) follows. A new
 kind of context must be created from the engine's memory, not from `GlobalMemory::new()`.
+
+### Front end: the source rewriter and the scanner
+
+ns-eel2 does not parse most of its operators in the Bison grammar. `lactea_eel::ns_pre` ports its `preprocessCode`
+(`nseel-compiler.c`, the open 3.0.A source, same pass in the 3.37 binary): it strips comments, expands `$PI` `$E`
+`$PHI` `$X..` `$'c'` **as text**, turns a `;` inside parentheses into the sequencing `%` (or a blank when the next code
+character cannot start an operand: `(5; -6)` is `(5 -6)`, that is -1), and rewrites every `= += -= *= /= %= |= &= ^= ==
+!= < > <= >= && || % ^ [ ] ! ?` into a call (`_set(a,b)`, `_if(c,a,b)`, `_mem(i)`, `pow(a,b)` ...) by scanning left and
+right of the operator for its operands. Under `Dialect::NsEel2`, `Context::compile` runs that rewrite, scans the result
+with the DFA of `nseel-lextab.c` and parses it with the small grammar of `nseel-caltab.c` (`| & + - * /` and the
+sequencing `%` over unary minus, calls and parentheses; one expression per `;` segment, the first failing segment drops
+the whole text). Operator precedence is therefore a consequence of the scans, not of a precedence table:
+
+| Operator(s) | Operands |
+|---|---|
+| `^` `%` (modulo) | the one adjacent name / literal / parenthesised group on each side: one left-associative level above `*` (`2^3^2 = 64`, `7%2^2 = 1`); a unary `-` in front covers the chain (`-2^2 = -4`, `-7%3 = -1`) |
+| unary `-` `+`, `* /`, `+ -`, `&`, `\|` | the grammar: unary tightest, then `* /`, `+ -`, `&`, `\|` (lowest), all left-associative; they sit **inside** the operand text of every operator below |
+| `==` `!=` `<` `>` `<=` `>=` | one level; the left operand is everything back to `( , ; ? : %`, the right operand everything forward to `&& \|\| ? : , ; )`, so a chain groups to the right (`2==2==1` is `2==(2==1)`) and `2==3\|1` is `2==(3\|1)`, `2&1==0` is `(2&1)==0` (both measured) |
+| `&&` `\|\|` | one left-associative level (`1\|\|0&&0` is `(1\|\|0)&&0`, measured); operands are the text up to the next `&&` / `\|\|` / `? : , ; )`, so the comparisons sit inside |
+| `?:` | the condition is everything to the left up to `( , ; ? : %`; the branches nest to the right; a missing `:` branch is 0 (`c ? x`); assignments are allowed in a branch (`c ? a=1 : a=2`, measured) |
+| `=` `+=` ... `^=` | the right side is the rest of the expression up to `, ; )`; right-associative |
+| `!` | the one adjacent operand |
+| `a[i]` | `megabuf(a+i)`; `gmem[i]` is `gmegabuf(i)`; a bare `gmem` is an ordinary variable |
+
+The scanner accepts `[A-Za-z_][A-Za-z0-9_]*` names, `[0-9]+` integers (read with `atoi`: clamped at 2147483647), and
+decimals `[0-9]*\.[0-9]*([eE][0-9]*)?` (read with `atof`; a lone `.` is 0, the exponent takes no sign and exists only
+after the point). Blank and tab are skipped; any other character is a syntax error. The projectm-eval dialect keeps
+its own scanner and Bison-style precedence climbing (`Dialect::ProjectMEval`, unchanged).
 
 ### What NsEel2 implements (MD3 3.37, spec E Annex A)
 
@@ -98,24 +256,25 @@ kind of context must be created from the engine's memory, not from `GlobalMemory
 | `reg00..reg99` | shared by every context and every preset, never cleared |
 | `memcpy`, `memset` | truncating indices (no `+ 0.0001`) |
 | function set | the 53 table entries (`_if … memset`) and the nine aliases; `_add _sub _mul _div _neg` (callable in projectm-eval) are not callable; `noteq` / `beleq` / `aboeq` are not aliases |
-| `$PI`, `$E`, `$PHI`, `$Xhex`, `$'c'` | `3.141592653589793`, `2.71828183`, `1.61803399`, 32-bit saturating hex, ASCII code; bare `pi`, `e`, `phi` are ordinary variables (0) |
+| `$PI`, `$E`, `$PHI`, `$Xhex`, `$'c'` | text substitution in the rewriter: `3.141592653589793`, `2.71828183`, `1.61803399`, `strtoul` of the hex (32-bit, saturating) printed as decimal and then scanned as an integer (so above 2147483647 it clamps, measured), the ASCII code; `$E5` is the digits `2.718281835`; bare `pi`, `e`, `phi` are ordinary variables (0) |
 | names | case-insensitive, 128 significant bytes; a bare `gmem` is a variable (special only before `[`) |
 | `rand(n)` | MT19937 word `* (1/0xFFFFFFFF) * max(1, floor(n))`, a real in `[0, n]` |
 
 ### Measured corrections of the spec
 
 These spec statements were inferred or derived, not measured. They were checked on the real program (MD3 3.37 under
-Wine, `md3shot.sh`) with probe presets that write expression results into the border colours (`fixtures/md3/eel/`;
-the measured bytes are in `crates/lactea/tests/md3_eel_oracle.rs`). Lactea reproduces the border pixels of all 16
-probes exactly (13 are kept as fixtures).
+Wine, `md3shot.sh`) with probe presets that write expression results into the border colours (20 files in
+`fixtures/md3/eel/`: 14 are pinned by their measured bytes in `crates/lactea/tests/md3_eel_oracle.rs`, the
+six `ns_*` probes in `crates/lactea-eel/tests/ns_eel2.rs`). Lactea reproduces the border pixels of all of them
+exactly.
 
 | Spec statement | Measured on MD3 | Implemented |
 |---|---|---|
-| x87 conversions round to nearest even, or truncate (OQ1) | nearest even: `3.7\|0 = 4`, `10%3.5 = 2`, `loop(3.5)` runs 4 times, `megabuf(1.6)` is cell 2, `megabuf(-1)` is invalid, `gmegabuf(-1)` is cell 1048575 | nearest even |
+| x87 conversions round to nearest even, or truncate (OQ1) | nearest even: `3.7\|0 = 4`, `10%3.5 = 2`, `loop(3.5)` runs 4 times, `megabuf(1.6)` is cell 2, `megabuf(-1)` is invalid, `gmegabuf(-1)` is cell 1048575; **ties go to even** (`fixtures/md3/eel/rounding_ties.milk`): `2.5\|0 = 2`, `3.5\|0 = 4`, `loop(2.5)` runs 2 times, `0.5\|0 = 0`, `10%2.5 = 0` (divisor 2), `loop(0.5)` runs 0 times (round-half-away would give 3 / 4 / 3 / 1 / 1 / 1). OQ1 is closed; the rest of the x87 differences (`fsin` / `fcos`) cannot be observed | nearest even |
 | identifiers may contain `.`, so `mouse.x` parses (OQ8) | **`mouse.x` and `a.b` do not compile** (the whole code part is dropped); `my_var` does | `.` ends an identifier in both dialects. A host can still register the name `mouse.x` (looked up verbatim), but preset code cannot read it |
-| number literals are C `atof` | **no exponent notation**: `1e-5`, `1e300` do not compile (`.5`, `5.` do) | no exponent suffix under NsEel2 |
-| `-7%3 = 1` (vector A §7.1) | `-7%3 = -1`: the sign applies after `%`; `a=-7; a%3 = 1`, `7%-3 = 1` | `%` and `^` are one left-associative level above `*`; a unary `-` covers a whole `%` / `^` chain (`-2^2 = -4`, `-2^2^2 = -16`, `2^3^2 = 64`, `7%2^2 = 1`, `2^7%4 = 0`) but binds tighter than `&` / `\|` (`-5&3 = 3`); `+ - * /`, `&`, `\|`, `!` as in projectm-eval |
-| (not in the spec's grammar notes) `c ? x` without `:` | accepted, `c ? x : 0` | accepted under NsEel2 |
+| number literals are C `atof` | **no exponent notation for integers** (`1e-5`, `1e300` do not compile: `1` then the name `e-5`); `.5`, `5.` compile; but a decimal accepts `[eE][0-9]*` after its point and no sign: `1.5e1` is 15 and `1.0e-5` is `1.0e` minus 5 = -4; a lone `.` is the number 0 (`3+.` is 3); an integer literal and `$XFFFFFFFF` clamp to 2147483647 (`4294967295/1e9` draws 2.147) | the scanner DFA of `nseel-lextab.c`, reproduced (`ns_decimal_len`); `atoi` clamps |
+| `-7%3 = 1` (vector A §7.1) | `-7%3 = -1`: the sign applies after `%`; `a=-7; a%3 = 1`, `7%-3 = 1` | the rewriter scans (see "Front end"): `%` and `^` one left-associative level above `*`; unary `-` covers a whole `%` / `^` chain (`-2^2 = -4`) but binds tighter than `&` / `\|` (`-5&3 = 3`) |
+| (not in the spec's grammar notes) `c ? x` without `:` | accepted, `c ? x : 0`; `1 ? t=4 : t=5` compiles and assigns | the rewriter (`ns_pre`) |
 
 Confirmed as in the spec: assignment filtering and raw compound operators (`a=1; a/=0; b=a` gives `a = Inf`,
 `b = 0`), `%` by zero, `int(-2.5) = -3`, `invsqrt(4) != 0.5`, bare `pi` / `e` are 0, the 1,048,576 caps of `loop`
@@ -134,10 +293,8 @@ per-frame / per-vertex / wave / shape contexts, both halves of a `.milk2` and th
   nesting is limited by `Context::set_max_depth` as before.
 - NaN in comparisons follows the formulas of the spec (`==` true for NaN, `!=` false, `<=` / `>=` false); the x87
   status-word details were not measured.
-- ns-eel2 builds `$E` / `$PI` by text substitution, so `$E5` would be the digits `2.718281835`; here it is `$E`
-  followed by `5` (a syntax error).
-- Operator levels were measured for `%`, `^`, unary `-`, `&`, `|`, `!`, `+ - * /` only; assignment to a non-variable
-  is not rejected.
+- Assignment to a non-variable is not rejected (`_set` on a temporary, as in the C compiler). Compile error positions
+  (`CompileError::line` / `column`) refer to the rewritten text, not to the source (MD3 never shows its own).
 
 ### `rand` and the run seed
 
@@ -157,24 +314,24 @@ error and goes on; MilkDrop 2 was left as it was.
 
 ### Verification
 
-- `crates/lactea-eel/tests/ns_eel2.rs`: the Annex A §7 tables (over 100 rows) and the measured corrections; the
-  existing `semantics.rs` tests and `lactea-eel-oracle` run on the default dialect, unchanged.
-- `crates/lactea/tests/md3_eel_oracle.rs`: 13 probe presets rendered through the engine under `Compat::MilkDrop3`,
+- `crates/lactea-eel/tests/ns_eel2.rs`: the Annex A §7 tables (over 100 rows), the measured corrections, the rewriter's
+  operator levels, and `probe_fixtures_match_the_md3_screenshots`, which evaluates the per-frame code of the probe
+  presets under `fixtures/md3/eel/` (13 earlier + 6 `ns_*.milk`: `1 ? t=4 : t=5`, `1.5e1`, `1.0e-5`, `3+.`, integer / `$X`
+  clamp, `2==3|1`, `1||0&&0`, `2&1==0`, `(5; -6)`) and compares the border channels with the bytes MD3 3.37 drew.
+  The existing `semantics.rs` tests and `lactea-eel-oracle` run on the default dialect, unchanged.
+- `crates/lactea/tests/md3_eel_oracle.rs`: 14 probe presets rendered through the engine under `Compat::MilkDrop3`,
   compared with the bytes MD3 3.37 produced under Wine.
 - `crates/lactea/tests/md3_eel.rs` and the `runtime.rs` tests: dialect selection, dropped parts, ns-eel2-only syntax.
-- Pack smoke, `fdrender --compat md3 --frames 30` over the 477 files of the MD3 pack: exit codes before (foundation)
-  364 × 0, 110 × 3, 3 × 2; after 365 × 0, 112 × 3. No file got worse: `.milk2` files that failed with 2 now load
-  (one runs clean, two stop at the next failure, which is a shader translation fallback). The 9 `.milk` files with
-  exit 3 are shader fallbacks (`get_fft`, `uv2`), unrelated to this slice. `.milk2` playback belongs to another slice.
+- Pack smoke, `fdrender --compat md3 --texture-dir <pack>/textures`, 10 frames, over the 477 files of the MD3 pack:
+  all exit 0.
 - Default / MilkDrop 2 unchanged: `fdrender --stages final` frame 30 PNG hashes of five corpus presets in `projectm`
   and `md2` are identical before and after.
 - Visual: `Martin - 2077 candies` (gmegabuf particle system, `%`-heavy) and `Flexi + Amandio c - piercing 01` were
   rendered by `fdrender --compat md3` (silence, frame 700) and shot from MD3 under Wine (silence, 12 s) and looked at
   side by side. Both show the same scene: coloured particle dots over dark for `candies`, orange blobs on dark
   violet cells for `piercing`. Particle placement and the petal pattern differ because `time`, `rand` and the audio
-  level cannot be controlled (MD3 reports `bass = 1.0` in silence, which belongs to the audio slice), and `candies`
-  has a hazy blurred backdrop in Lactea that MD3 does not draw (a shader / blur difference outside this slice,
-  not investigated). No EEL difference can be read off those two frames; the exact evidence is the probe table.
+  level cannot be controlled (MD3 reports `bass = 1.0` in silence), and `candies`
+  has a hazy blurred backdrop in Lactea that MD3 does not draw (a shader / blur difference, not investigated). No EEL difference can be read off those two frames; the exact evidence is the probe table.
 
 ## Shader inputs: audio, `get_fft`, mouse, `q1..q64`
 
@@ -255,6 +412,12 @@ Not implemented (by design): `_mxd3q*` accumulators (locked shaders only), webca
   controllable and the fractal is time dependent, so only look, colour and structure were compared, not pixels. The
   magnitude of the bars against a real MD3 with real audio has not been compared (the oracle has no audio).
 
+**Blocked (no audio in the oracle, not faked)**: the `get_fft(pos)` / `get_fft_hz(f)` bin-to-position mapping against the
+real prelude (spec E67 open question 1; needs a known sine at a known frequency and a preset drawing `get_fft` bars) and
+the absolute scale of the spectrum (`eq[k] * |FFT|`) stay as derived from the spec: the shader FFT texture holds 512
+bins, `get_fft(pos)` is a clamped bilinear fetch at `pos`. Wine runs on silence, where every bin is 0 and
+`get_fft` is flat, so no mapping can be read off a screenshot.
+
 ## Main waveform and render deltas
 
 Rules: `md3_wave_modes`, `max_shape_sides` (100 / 100 / **500**), `md3_warp_skip_tiny`, `md3_border_gate`
@@ -288,8 +451,8 @@ old preset's value in the second pass of a blend: the old mode is *not* wrapped)
 `wave_a` alpha (no volume scaling, no clamp): invisible lines, centre dots with `wave_usedots`. The tail is the MD2 one
 (blend of the old and new mode when the mode changed, cosine mix, colour, `y = -y`, `SmoothWave`, four thick / dot passes
 from a texture width of 512). `wave_mystery` wraps into `[-1, 1)` for modes 0, 1 and 4 only. Modes 8 and 13 read
-`MainWave::spectrum`, i.e. whatever the audio analysis mode provides; the MD3 spectrum scale (`eq[k] * |FFT|`) belongs
-to the audio slice, the geometry here is exact for any input.
+`MainWave::spectrum`, i.e. whatever the audio analysis mode provides; the MD3 spectrum scale (`eq[k] * |FFT|`) is the audio analysis' business,
+the geometry here is exact for any input.
 
 **Other deltas.**
 - Shape `sides`: `clamp(int(sides), 3, 500)` (`sides + 2` fan vertices; MD2 / projectM 3..100).
@@ -313,11 +476,22 @@ pixel for pixel, 500-side shape area, border gate on / off / MD2. Smoke run on t
 frame 30 (the rest zero it in per-frame code and use custom waves), and 20 of those render differently from
 `--compat md2` (which draws nothing for these modes): mode 9 (8 of 9 presets), 11 (6 of 6), 10 (1), 13 (1), 15 (4 of
 5; the two presets that do not differ were not investigated). projectM and MD2 renders of 5 corpus presets (and a
-soft cut) are bit-identical to the foundation branch.
+soft cut) are bit-identical to the build before the MD3 work.
 
-**Open questions** (spec Annex B section 10, not resolved here): spectrum scaling of modes 8 / 13 and the mode-13
-spike on loud bass, mode 9 with dots / thick on real D3D, the exact alpha of an unmapped mode, mode 14 / 16 direction
-against the real program. They need Wine screenshots (`~/M0Rf30/md3-re/oracle/md3shot.sh`).
+**Open questions** (spec Annex B section 10), checked on MD3 3.37 under Wine (`md3shot.sh`, silence, 800x600; probes
+in `fixtures/md3/wave/`, pinned by `crates/lactea/tests/md3_fidelity_oracle.rs`; shots not committed):
+
+| question | status | evidence |
+|---|---|---|
+| mode 9 with dots / thick on real D3D | **resolved, matches** | `wave_x = 0.75` moves the line off the centre. Line, MD3 / lactea: rows 148 and 149 over the full width, peak 192 / 191 (the rest of the screen is black). With dots: the same three rows 148..150 plus a cluster of points at the screen centre (MD3 a 3x3 splat at x 400..402, y 300..302, lactea 2x2 at 399..400, 299..300 - rasteriser, not geometry). With `wave_thick`: no cluster (the zero strip is a degenerate line). Mode 6 with dots (control): no cluster. The second strip really is left at the origin |
+| alpha of a mode whose `% 17` remainder is outside 0..16 | **resolved, matches** | mode -1 with dots draws the centre cluster even with `bModWaveAlphaByVolume` and a window (2..3) that hides every valid mode (mode 6 with the same settings draws nothing), so no volume scaling; `wave_a = 1.0045` (alpha byte 256) draws nothing in an invalid mode (the byte wraps to 0) but draws the full line in mode 6 (clamped), so no clamp. Lactea draws the same in all five probes |
+| mode 14 direction / orientation | **resolved, matches** | silence, `fR = 0`: the flower is a fixed curve rotating with time. MD3 shots at 8 / 10 / 12 s against a lactea frame series: best frames at 7.68 / 9.98 / 11.55 s (shot times minus window-appear latency, 0.3 s jitter), curve and rotation sense identical by eye (asymmetric petals, the long diagonal petal at the upper right); the mirrored and 180-degree variants score 2-3 times worse (pixel error 148 / 143 / 122 against 239..389) |
+| mode 16 direction / spin sign | **resolved, matches** | the triangle repeats every 10.47 s (3-fold, 0.2 rad/s); best lactea times for the MD3 shots at 8 / 10 / 12 s are 7.65 / 9.56 (+10.47) / 11.73: they advance with the clock, i.e. the spin is the one lactea has (`-0.2 t`, BeatDrop `+0.2 t`); the reversed sense would make them decrease. Mirror images of a triangle are rotations of it, so only the spin sign is decidable here |
+| spectrum scale of modes 8 / 13, mode-13 spike on loud bass | **blocked: the oracle has no audio** | Wine runs on silence; a non-zero `fSpecLeft` is needed. Geometry is exact for any input (Annex B vectors); the `eq[k] * \|FFT\|` scale and the spike are as written in "Shader inputs" and unverified. Not faked |
+
+MD3's point rasteriser under Wine draws a 1x1 point as a 3x3 splat (64 / 128 / 255) and a width-1 line on a pixel
+boundary as two half-intensity rows, where lactea's `native` stroke draws full pixels; positions agree within one
+pixel, so no stroke rule was changed (the oracle's rasteriser is Wine / llvmpipe, not Direct3D 9 hardware).
 
 ## Double presets (`.milk2`) and blend patterns
 
@@ -432,9 +606,7 @@ passed to `lactea_load_preset` is detected by content.
   against the 60 fps clock; the soft-out ramp (start rewrite, 30 frames from `P = 0.5`, ignored second request, the
   saved request as an ordinary soft cut); a request during leg A; `BlendMilk2` off; cuts; carry-over of missing
   keys; borders; seeded / forced / configured patterns; resize.
-- The MD3 pack (146 `.milk2`) under `fdrender --compat md3`: all load and render 30 frames (exit 0 for 142; the 4 exit-3
-  runs are shader fallbacks for `get_fft` inside the halves, a feature of the shader-inputs slice). Before this
-  change the same files loaded as plain `.milk` (the first block of keys wins, header and halves interleaved): 42 x
+- The MD3 pack (146 `.milk2`) under `fdrender --compat md3`: all load and render (exit 0 for all 146 with 10 frames). Before `.milk2` playback the same files loaded as plain `.milk` (the first block of keys wins, header and halves interleaved): 42 x
   exit 0, 3 x exit 2, 101 x exit 3.
 - `fdrender --stages final` of four corpus presets under `projectm` and `md2`, plain and with a soft cut (320
   frames): identical hashes before and after.
@@ -462,9 +634,23 @@ passed to `lactea_load_preset` is detected by content.
   (stars, sprite): the same green / teal kaleidoscope with the mandala sprite and orange speckle edges; `Manda4` (plasma,
   sprite): the grey mandala sprite over the glassy PRESET1 in both; `golden mirror` (plasma): the same family (dark
   blue sky, coloured checker floor, magenta rings), details differ with time.
+- **The ten patterns absent from the shipped pack, against the oracle** (spec B open question 1, **resolved**:
+  `checkerboard`, `bubbles`, `stars2`, `clock`, `nuclear`, `cisor`, `wave`, `lineshorizontal`, `cross`, `cross2`).
+  Flat-colour pairs (PRESET1 red, PRESET2 blue, `blending_progress = 0.5`, randoms 0.30 / 0.55 / 0.65 / 0.35 / 0.45,
+  direction 1; `cross2` also at 0.85, where 0.5 is entirely PRESET1 in both) loaded through `--via-ui` at 800x450,
+  against lactea at mesh 64x48 (MD3's `MeshSize` default, spec A: `gridX = 64`, `gridY = 48`). Mean absolute difference
+  of the red channel over the frame: `bubbles` 0.9 %, `clock` 0.6 %, `nuclear` 0.7 %, `cisor` 1.3 %, `cross` 1.0 %,
+  `lineshorizontal` 1.6 %, `wave` 1.7 %, `checkerboard` 2.1 %, `stars2` 3.3 %, `cross2` 0 % (0.85: 0.3 %); about 1 % or
+  fewer of the pixels differ by more than 25 % (stars2 0.9 %, wave 1.0 %, checkerboard 1.1 %, the rest none): the same
+  blobs, bands, rings and zigzags in the same places. The residual is the rasteriser's interpolation of the per-vertex
+  mask, and shrinks with the mesh: at 48x36 (the mesh the earlier `side` / `cercle` checks used) `stars2` was 5.4 % and
+  `nuclear` 1.3 %, i.e. MD3's own mesh is 64x48. No pattern formula needed a change. `md3_fidelity_oracle.rs` pins a 6x4
+  grid of cell means per pattern (tolerance 12 points; the largest difference measured was 10). A first
+  `checkerboard` run showed only the start-up banner (the `--via-ui` load did not take); the re-run is the one
+  compared.
 - Hand-made flat-colour pairs, lactea only (800x450): `cross2` P = 0.85 a cross of blended / PRESET2 bands with the four
   corner rectangles pure PRESET1 (the vertices that never blend), `checkerboard` P = 0.5 four isolated blobs of
-  PRESET1: as the formulas predict, no oracle counterpart.
+  PRESET1: as the formulas predict; both now also confirmed by the oracle (previous bullet).
 
 ## Sprites
 
@@ -500,8 +686,14 @@ preset sprites, output unchanged).
   of PRESET1 is cleared before the half is built, and so is a block inside PRESET2 without the flag.
 - **GIF.** `lactea::decode_gif`: GIF89a composition (transparent start canvas, per-frame disposal `Background` =
   clear the frame rectangle to *transparent*, `Previous` = restore, `Keep`), delay `1/100 s`, `0` means 0.1 s. This
-  is a documented choice for the open question about GDI+'s frame composition (the pack's `dmt.gif` uses "do not
-  dispose", where every decoder agrees). Frame choice: `t = fmod(time since the sprite started, total)`, the first frame
+  is the composition MD3 shows (spec D open question 2, **resolved**): `fixtures/md3/sprites/fid_disp.gif` (red
+  full-canvas keep, green square dispose-to-background, blue square dispose-to-previous, a yellow checker with
+  transparent cells keep; 1 s each; grey background) shot under Wine at 1 s intervals shows exactly the GIF89a
+  composition at all four steps (the hole of the green square is the background, the blue square is gone after its
+  frame, transparent cells show what is below, no cell turns black); every probe pixel equals lactea's (pixel
+  difference over the frame at most 0.3 in 255, wrong steps 15..34), and the 1 s delays advance the frame once a
+  second. GDI+ therefore composes full-canvas frames the way `decode_gif` does. Frame choice: `t = fmod(time since the
+  sprite started, total)`, the first frame
   whose cumulative delay is strictly greater than `t` (`gif_frame_index`, unit-tested with the `[10, 20, 5]` vector).
 - **Blend modes.** 11 pipelines, one fragment entry point per mode (stage-0 colour / alpha) and the table's
   blend factors (`crates/lactea-render/src/sprite.rs`); vertex colours quantised like `D3DCOLOR`. Tested on the GPU,
@@ -513,8 +705,10 @@ preset sprites, output unchanged).
   composited vs not).
 - **Burn in layers 1..4 is drawn twice (`md3_sprite_burn_twice`).** The specification's open question 1 is real:
   a layer-1 additive grey sprite (alpha 0.05, decay 0.9) settles at 56/255 with `SpriteBurn=0` and 116/255 with
-  `SpriteBurn=1` under MD3 (Wine oracle, 800x600); lactea reproduces 55 and 115. Verified for layer 1 only; layers 2..4
-  share the code path in the specification and are assumed to behave the same.
+  `SpriteBurn=1` under MD3 (Wine oracle, 800x600); lactea reproduces 55 and 115. **Resolved for layers 2, 3 and 4 as
+  well** (`fixtures/md3/sprites/burn_L{1..4}_b{0,1}.milk`: additive, alpha 0.04, decay 0.9, a flat grey 128 image
+  scaled over the screen): MD3 and lactea settle at 45/255 without burn and 94/255 with burn in every layer 1..4,
+  pixel for pixel (`md3_fidelity_oracle.rs`, 200 frames).
 - **Animated GIFs as shader textures** (`md3_gif_textures`): `TextureProvider::load_md3_texture` may return
   `Media::Animated`; the renderer (`set_user_animation`) shows frame `gif_frame_index(delays, time)` with `time` =
   the frame's absolute time (not the shader's wrapped `time`). Search order for a shader texture in the hosts:
@@ -534,10 +728,9 @@ the key for later loads) is not replicated.
 - Unit / GPU tests: key parsing and round trip, geometry vectors G1..G9, blend table, GIF timing and disposal, colour
   key, layer order, burn, engine-level sprite / GIF-sprite / GIF-texture / lifetime / compat gating tests.
 - MD3 pack smoke (`fdrender --compat md3 --texture-dir <pack>/textures`, 30 frames at 640x360): 97 pack presets contain
-  `SpriteName=` (the task said 98); 96 load their sprite image and 94 of those render differently from the same preset
+  `SpriteName=`; 96 load their sprite image and 94 of those render differently from the same preset
   under `--compat md2` (identical rules otherwise), i.e. the sprite is visible. The 2 that are identical
-  (`Classic.Wave.078g2` / `081g`, blend 5 = multiplicative over a black scene) cannot show anything by construction. The
-  one that does not load was a `.milk2` (`R192 Cubes.milk2`) before the double-preset parser was merged: with it all 24
+  (`Classic.Wave.078g2` / `081g`, blend 5 = multiplicative over a black scene) cannot show anything by construction. All 24
   `.milk2` that carry `sprite=1` load and draw their sprite.
 - Oracle (Wine, MD3 3.37) vs lactea, looked at side by side (`out/` shots of this work, not committed): a quad-colour test
   sprite drawn at `x=y=.75` appears at the lower right, upright, with the red quadrant top-left, and with
@@ -641,13 +834,23 @@ variable still divides by the nominal `preset_duration` (the same limitation as 
 
 ### Deviations and open questions
 
-* **README vs binary.** MD3's README promises mode 6 loading `Bass/WHITE.milk` for `bass > 4.9` and mode 7 with a
-  1.5 s delay. The 3.37 binary has neither (mode 6 = plain `bass > 1.5` without delay, mode 7 = 0.5 s); this
-  follows the binary. The README behaviour is not offered. Not checked under Wine: the oracle cannot feed a
-  loud-bass stream (silent loopback), so the mismatch stays "binary analysis only".
-* **Locks.** MD3's block does not test preset locks (inferred). Here a locked `PresetControl` / app browser
-  never emits a request, so a locked preset ignores auto cuts (mode 7 still injects: it does not change the
-  preset).
+* **README vs binary** (partly measured, the rest **blocked: the oracle has no audio**). MD3's README promises mode 6
+  loading `Bass/WHITE.milk` for `bass > 4.9` and mode 7 with a 1.5 s delay. The 3.37 binary has neither (mode 6 = plain
+  `bass > 1.5` without delay, mode 7 = 0.5 s); this follows the binary and the README behaviour is not offered.
+  Measured on MD3 3.37 under Wine with `MD3_SET="AutoHardCutMode=N;bHardCutsDisabled=0"`, probes in
+  `fixtures/md3/autocut/` whose per-frame code writes a fixed level (pinned by `md3_fidelity_oracle.rs`): mode 6 loads
+  another preset for `bass = 1.6` and does not for `1.4`; mode 1 for `bass = 2`; mode 2 for `treb = 3.0` and not for
+  `2.8` (threshold 2.9); `treb = 5` / `bass_att = 2` never fire mode 6, `bass = 2` never fires mode 2, and a preset that
+  writes nothing never cuts. So the threshold of mode 6 is 1.5, not 4.9 (resolved), and the modes read `bass` / `treb`
+  as the per-frame code leaves them (lactea reads the previous frame's), not the raw audio level or `*_att`. Still
+  unobservable: the `Bass/WHITE.milk` branch (the file is not in the install, and a level above 4.9 was not tried), and
+  the delays (a cut loads a preset that reports silence again, so a single probe cannot show a repeat interval; the
+  0.5 s of mode 7 is an injected shader effect on a banner-covered start-up). Those stay "binary analysis only".
+* **Locks** (measured). The oracle runs with `PresetLockOnAtStartup=1` (no timed switching, verified) and the cut
+  fired anyway: MD3's block does not test the preset lock. Deliberate deviation kept: a locked `PresetControl` / app
+  browser never emits a request, so a locked preset ignores auto cuts (mode 7 still injects: it does not change the
+  preset), because the lock is the user's "stay on this preset". Scroll-lock at run time was not tried (`E-core` OQ 2
+  is answered for the startup lock only).
 * **Levels of a fresh preset.** MD3 reads the new state's registered variables, which hold the audio levels of
   the load; here a freshly loaded preset has run no per-frame code, so its first frame sees 0 / 0 and cannot
   cut. Mode 6 therefore cuts at most every second frame while the same loud bass lasts.
@@ -732,7 +935,129 @@ concern and not implemented here: a host should call `import_custom_wave(8, byte
 - The recompile does not touch a running MD2 blend (`Compat::MilkDrop2` soft cut): the blend keeps its
   old-state copy.
 - MD3 writes `FFTAttack` / `FFTDecay` from process globals; here they are the preset's own values.
-- `MD31` / `MD32` handles are passed through verbatim only to keep the file loadable by MD3; lactea ignores
-  them when rendering.
+- `MD31` / `MD32` handles are passed through verbatim to keep the file loadable by MD3; lactea only uses them to
+  look up a user-supplied shader override (see "Locked shaders (MD31 / MD32)").
 - Under `Compat::ProjectM` only 4 custom slots run (`CompatRules::custom_slots`), so an import into slot >= 4
   edits the preset but draws nothing; hosts that send dropped files to slot 8 need a MilkDrop-family compat.
+
+## Locked shaders (MD31 / MD32)
+
+MD3's paid shader packs ship presets whose warp / composite shader is *locked*: the `.milk` carries `MD31=<u64>`
+(warp) and/or `MD32=<u64>` (comp) in its header, and the `warp_` / `comp_` text is only a stub
+(`// This shader works only with MD3 :)`, then `ret = tex2D(sampler_main, uv).xyz; ret *= <decay>;`). Rendered as
+written, such a preset just fades the previous frame.
+
+### Where the real shaders live
+
+MD3 resolves the handle against its own encrypted shader cache; Lactea does not read, decrypt or ship it. Users can
+supply their own HLSL via the override API below.
+
+### Substituting a shader you own
+
+Lactea renders the stub unless the host supplies HLSL for the handle:
+
+- `lactea::ShaderOverride { warp: Option<String>, comp: Option<String> }`: plain `\n`-separated HLSL in the same
+  form as preset shader text (`shader_body` ... `{ ... }`), not the `\x01` line form.
+- `EngineConfig::shader_overrides: HashMap<u64, ShaderOverride>` (default empty), keyed by handle. A preset's warp
+  uses the entry for its `MD31` (`Preset::md31_handle`) and its comp the entry for its `MD32` (`Preset::md32_handle`);
+  an entry with the matching side `None` leaves that shader as the preset wrote it.
+- `Engine::set_shader_override(handle, ShaderOverride)` adds or replaces an entry; it affects the next
+  `load_preset`. The override is reported as `ShaderOutcome::User`.
+- `fdrender --shader-override-warp HANDLE=FILE` / `--shader-override-comp HANDLE=FILE` (repeatable) read the HLSL from
+  `FILE`.
+
+Only HLSL the user already owns can be supplied this way. The handle is read independent of the stub marker, so an
+override applies whenever the key is present and the pass's `PSVERSION_*` is above 0.
+
+Test: `crates/lactea/tests/locked_shader_override.rs` (stub colour, then override colour; skipped without a GPU).
+
+### `.milk2`
+
+MD3 never reads `MD31` / `MD32` inside a `.milk2` half: the halves are loaded as plain presets, so a locked shader
+in a double preset stays its stub. Lactea's override lookup is per preset text, so a half whose own header carries
+`MD31` / `MD32` and a registered handle would be substituted; that is a Lactea extension, MD3 itself does not do it.
+
+## Version history (3.x revisions)
+
+Sources: the README "History" of the open MilkDrop3 repository (`~/M0Rf30/md3-re/md3/README.md`), the version notes of
+the behavioural specs, and the open-source drop `~/M0Rf30/md3-re/md3/code` (below). Lactea implements the **3.37
+binary**, which is the superset of every earlier 3.x revision, so one mode (`Compat::MilkDrop3`) covers them all: a
+feature added in 3.x is present, a bug fixed in 3.x is fixed. A `CompatRules` field to emulate an *older* behaviour would
+only be needed where a revision changed a result that older presets already produced and the old behaviour can still be
+specified; that is the case for none of them (last column).
+
+### What the open source is
+
+`md3/code` is **MilkDrop 3.0.A** (the March 2023 alpha, BSD-3, (c) Maxim Volskiy): the window title is
+`MilkDrop 3.0.A - Press F1 for help` (`vis_milk2/Milkdrop2PcmVisualizer.cpp`), the project builds `MilkDrop 3`
+(`plugin.vcxproj`), and its feature set is stock MilkDrop 2: `q1..q32` / `t1..t8`, 4 custom waves and 4 shapes
+(`md_defines.h`), preset version 201, no `.milk2` code, no sprite block, no FFT shader input, no mouse variable. It uses the real
+ns-eel2 (`ns-eel2/`, which Lactea's `Dialect::NsEel2` is checked against: "Expression engine"). Compared with
+BeatDrop (`third_party/md2`, which is identical to the BeatDrop snapshot for the ten files it holds):
+
+- `fft.cpp`, `fft.h` and `support.cpp` are identical; 3.0.A defines no `CPlugin` / `CState` / `CPluginShell` / texmgr
+  function that BeatDrop lacks. Lines present only in 3.0.A / only in BeatDrop (whitespace ignored): `plugin.cpp`
+  3561 / 7345, `milkdropfs.cpp` 93 / 1502, `state.cpp` 10 / 120, `state.h` 1 / 13, `texmgr.cpp` 5 / 160,
+  `pluginshell.cpp` 40 / 971.
+- 3.0.A includes the real `../ns-eel2/ns-eel.h` where BeatDrop includes `../ns-eel2-shim/ns-eel.h` (projectm-eval);
+  BeatDrop therefore has **no ns-eel2 source** and the two engines cannot be diffed: the only ns-eel2 on disk is
+  3.0.A's.
+- 3.0.A keeps `NUM_WAVES 8`, `MAX_CUSTOM_WAVES 4`, `MAX_CUSTOM_SHAPES 4` (BeatDrop 18 / 16 / 16), `NUM_Q_VAR 32`,
+  `NUM_T_VAR 8`, and lacks BeatDrop's additions: mouse / ctrl / date variables, `FFTAttack` / `FFTDecay`, lyrics,
+  Spout, media textures, song-title getter, AMD detection, portable DLL loader, CMake build.
+- What 3.0.A itself changed over stock MD2 is only the rebranding and the VS project (no `MilkDrop3`-specific code path
+  appears in `plugin.cpp`); no stock MD2 source is on disk to diff against.
+
+Everything in the table below from 3.1 on is closed source, recovered from the 3.37 binary.
+
+### Open source (3.0.A) against the 3.37 binary: the expression engine
+
+Spec E (binary) found the engine to be stock ns-eel2 with these build differences; each was checked against the 3.0.A
+source (`ns-eel2/*.c`, `ns-eel.h`, `ns-eel-int.h`, `asm-nseel-x86-msvc.c`):
+
+| Item | 3.0.A source | 3.37 binary | Lactea |
+|---|---|---|---|
+| Function table, 9 aliases, preprocessor table (22 rows), `$` forms, `regNN`, MT19937 seed `0x4141f00d`, `rand`, loop cap 1,048,576, `RAM 128 x 65536`, `gmegabuf 1<<20`, assignment filter, `&` `\|` 64-bit on x64 glue | present (the x64 glue is `TARGET_X64` in `asm-nseel-x86-msvc.c`) | same | same |
+| float to int conversion | x86 build forces `_controlfp(_RC_CHOP)` (truncate) | no `fldcw`: round to nearest even (measured) | nearest even |
+| variable name length | `NSEEL_MAX_VARIABLE_NAMELEN` 16 (`ns-eel.h`; 8 if undefined in `nseel-eval.c`), 64 variables per block | 128 bytes, 750 per block | 128 |
+| `memcpy` / `memset` indices | `EEL_F2int(x + 0.0001)` | truncating, no `+ 0.0001` | truncating |
+| number scanner | DFA of `nseel-lextab.c`: `atoi` ints, `[0-9]*\.[0-9]*([eE][0-9]*)?` decimals | same (measured: `1.5e1`, `1.0e-5`, `3+.`, clamp) | ported (`lexer.rs`); before this check lactea read `atof` of every literal and refused `1.5e1` |
+| operator levels | text rewriter (`preprocessCode`) | same (measured) | ported (`ns_pre.rs`); before this check lactea used projectm-eval's precedence climbing with `%` / `^` / unary minus patched, so `2==3\|1`, `1\|\|0&&0`, `2&1==0`, `(5; -6)`, `c ? a=1 : a=2` were wrong |
+
+### Per-version delta table
+
+"Render" = changes pixels, a result computed from a preset, or what a preset file means; host-only items (menus, files,
+overlays, installers) are marked `host`. "Field" = would Lactea need a `CompatRules` field to reproduce the *older*
+behaviour.
+
+| Version (date) | README delta | Render | In Lactea (3.37 superset) | Field |
+|---|---|---|---|---|
+| 3.0 (03/2023) alpha, 3.0.A open source | MD2 base (the open 3.0.A drop); the README introduction presents `.milk2` double presets, which the 3.0.A source does not contain | yes: ns-eel2 (the 3.37 binary keeps it), `.milk2` container | `md3_ns_eel2`, `md3_double_preset` | no: the baseline |
+| 3.1 (19/03/2023) | "stable" | unknown (no detail) | n/a | no |
+| 3.12 (09/04/2023) | faster preset list; **`plasma3` transition**; texture-loading fixes | yes: one blend pattern | in the 30 patterns (`md3_blend_patterns`; `plasma3` seeds min / max with `0.5*h(0,0)`, spec B) | no: patterns are all or nothing |
+| 3.2 (20/07/2023) | double preset correct on resize / fullscreen; live `p` / `P` pattern and progress; `o` re-roll of the random values; `u` flip; `U` direction lock (cercle: -1 inside, 1 outside); `b` / `B` block / blend time | partly: `blending_direction` and the `random_1..5` header keys mean something from here | `blending_direction` (cercle / triangle / corner / patches), `random_k`; the keys are host UI | no |
+| 3.21 (03/10/2023) | **7 new transitions** (`square`, `stars2`, `clock`, `nuclear`, `arrow`, `cross`, `cross2`; the last two leave parts unblended); blend % ranges tuned per pattern; `.milk2` saved smaller (only enabled waves / shapes, renumbered); `p` increments the progress; **`//MilkDrop3 Color Mode:` comp-shader line** and `c` key; new options file | yes: patterns, progress ranges, `random_k` multiples of 1/7380 (older files carry the older generator), renumbered `.wave` / shape slots | 30 patterns + ranges (spec B §3.5), `Preset::to_milk_md3` renumbers; colour-mode line is host text edit | no: older `.milk2` load as written (tolerance), patterns cannot be asked for by version |
+| 3.22 (11/10/2023) | Windows 11, font size, launch external program | host | n/a | no |
+| 3.23 (21/10/2023) | DPI scaling | host | n/a | no |
+| 3.24 (24/12/2023) | shader effect injection (F11); sprite controls; drag and drop (milk, milk2, wave, shape, images); delete mode; **shader recompile retry `ps_2 > 3 > 4`**; sprites mode / messages mode | partly: the retry decides which `PSVERSION` a shader runs as; injection is the hard-cut mode 7 mechanism | one HLSL dialect (spec C §3.5, always on); mode 7 injection (`auto_cut.rs`); drag and drop of `.wave` / `.shape` via `import_custom_*` | no |
+| 3.25 (03/03/2024) | 96 kHz audio; **image saved inside `.milk` / `.milk2`** (preset version 300); **5 sprite layers**; cumulative sprite effects; `sprites` and `textures` folders merged; ini files renamed (`settings.ini`, `sprites.ini`, `messages.ini`); `:` pattern order | yes: sprite block, `SpriteLayer` 0..4 | Sprites (section above) | no |
+| 3.26 (28/06/2024) | **6 sprite blend modes** (multiply, subtract, invert, cut-off, darken, vivid); `j` / `J`; `g` unlock sprite; MilkPanel; transition selection tab (`[transitions]`) | yes: `SpriteBlend` 0..10 | blend table of 11 modes; `md3_transition_patterns` | no |
+| 3.27 (25/12/2024) | playlists; MilkPanel preset editing; start screen | host | `Playlist` in the app; no MilkPanel | no |
+| 3.28 (04/04/2025) | GPU auto selection; new HLSL presets; subdirectory playlists; **"Resolved an issue that prevented the use of q33-q64"** | yes: `q33..q64` work in all loops (spec E: all copies use 64) | `md3_extended_vars` (64 q, 16 t) | no: older builds simply broke `q33+`; nothing to emulate |
+| 3.31 (20/09/2025) | hi-res audio devices; AMD / ATI PS4 compatibility; shader cache (precompiled, "smart"); **"new custom VM with enhanced stability"**; **hard-cut mode #7**; VJ mode; all Q values on `N` `N`; MilkPanel shader editor | yes: the VM is the ns-eel2 x64 glue with an SEH guard and the "failed part is dropped" policy; mode 7 | `md3_ns_eel2`, `md3_drop_failed_code`; `AutoHardCutMode` 7; analysis `AnalysisMode::Md3` (hi-res box decimation) | no: the earlier VM is not in the binary |
+| 3.33 (03/03/2026) | installer asks for heavy shaders; **`get_fft(pos)` / `get_fft_hz(freq)`**; audio device choice; folder / playlist drag and drop; **`.milk2` blends** (`BlendMilk2`); **transitions `corner`, `patches`, `stars2`, `arrow` recoded** (no snap at the end; old `.milk2` using them "may look slightly different"; the README offers a retro option "if needed"); **mouse** (`mouse.x/y/z/w` for shaders: `mouse` is a `float4`, not an EEL variable); MilkPanel Q injection; audio sensitivity; **FFT attack / decay**; some shaders not open (locked `MD31` / `MD32`) | yes: all of it | shader FFT (`md3_shader_fft`, `FFTAttack` / `FFTDecay`), `Engine::set_mouse`, `VolumeSensitivity`, `.milk2` playback and `BlendMilk2`, recoded patterns (spec B: 3.33 forms: `corner` clamps `t`, `stars2` is `a=B+3`); locked shaders run their placeholder | no: the pre-3.33 formulas are not in the 3.37 binary and the README's retro option does not exist there, so they cannot be reproduced |
+| 3.35 (11/09/2026) | **64-bit application** (~18 % CPU); **GIF** images as textures and sprites; show artist / title; new shaders; **webcam, two layers (Deep and Top)**; "rewritten bulletproof preset compilation"; sprites stay loaded (100, circular), preload 100 at start; code signing | yes: GIF, webcam layers, sprite cache; the 64-bit build is why the glue is x64 | GIF textures and sprites (`sprites.rs`); sprite cache of 100; compile policy as 3.31; **not** webcam layers (position only in spec D §9), no title overlay | no |
+| 3.36 (17/09/2026) | fully portable (no DirectX install); fix for non-Latin track titles; "show artist + title" setting | host | n/a | no |
+| 3.37 (26/09/2026) | Audio menu fixed; auto reconnect; desktop mode (Ctrl+Shift+W); audio capture can be disabled (no simple waveform is drawn then); Recycle Bin delete; faster playlist loading; MilkPanel LED restart | host (the waveform-off case is a host choice: a host without audio simply feeds silence) | the target of this document | no |
+
+Conclusions:
+
+- Rendering-relevant revisions are 3.12 / 3.21 (transitions), 3.25 / 3.26 (sprites), 3.28 (`q33..q64`), 3.31 / 3.35
+  (VM and compile policy, GIF), 3.33 (FFT, mouse, `.milk2` blend, recoded transitions). All of them are in the 3.37 binary
+  and therefore already behind `Compat::MilkDrop3`; none needs a further rule field.
+- The one revision that changed an existing result is 3.33's recode of `corner`, `patches`, `stars2` and `arrow`; the old
+  forms exist nowhere on disk, so a `.milk2` made before 3.33 renders with the 3.33 forms, as it does in MD3 3.37.
+- Open observation (not changed): `Compat::MilkDrop2` runs `Dialect::ProjectMEval`, which is BeatDrop's choice; real
+  MilkDrop 2 ran ns-eel2 (3.0.A's source is that engine, with 16-byte names). Selecting `Dialect::NsEel2` for it would be
+  a one-field change (`md3_ns_eel2` is the dialect switch) but it also changes the name length and the RAM size, so it is
+  left to a decision about what `MilkDrop2` is meant to reproduce.

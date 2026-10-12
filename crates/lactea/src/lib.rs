@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod auto_cut;
+mod cache;
 mod callbacks;
 mod control;
 mod engine;
@@ -64,6 +65,28 @@ pub use playlist::{
 pub use teacher::ForcedFrame;
 pub use textures::{Image, TextureProvider};
 
+use std::collections::HashMap;
+
+/// User-supplied HLSL for a locked MilkDrop 3 preset (see [`EngineConfig::shader_overrides`]).
+#[derive(Clone, Debug, Default)]
+pub struct ShaderOverride {
+    /// Replacement for the warp shader of the preset whose `MD31` handle matches.
+    pub warp: Option<String>,
+    /// Replacement for the composite shader of the preset whose `MD32` handle matches.
+    pub comp: Option<String>,
+}
+
+/// The compatibility mode [`EngineConfig::auto_compat`] picks for a preset file: [`Compat::MilkDrop3`] when
+/// [`lactea_preset::detect_compat`] finds evidence of a MilkDrop 3 feature, otherwise [`Compat::ProjectM`]
+/// (MilkDrop 2 files are indistinguishable from projectM ones, so this never returns it; [`Engine::load_preset`]
+/// reaches it only by retrying a preset projectM rejects with a compile error). Pure on the bytes; the
+/// evidence itself is [`lactea_preset::detect_compat`].
+pub fn compat_for_preset(bytes: &[u8]) -> Compat {
+    match lactea_preset::detect_compat(bytes).family {
+        lactea_preset::DetectedFamily::MilkDrop3 => Compat::MilkDrop3,
+        _ => Compat::ProjectM,
+    }
+}
 /// Engine construction parameters.
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -76,8 +99,16 @@ pub struct EngineConfig {
     /// Seeds every random stream (shader `rand_*` / `rot_*`, hue phases, `rand()` of the
     /// expressions, random textures, noise textures). Same seed, same inputs: same frames.
     pub seed: u64,
-    /// projectM (default), MilkDrop 2 or MilkDrop 3 behaviour where they differ.
+    /// projectM (default), MilkDrop 2 or MilkDrop 3 behaviour where they differ. With [`EngineConfig::auto_compat`]
+    /// this is only the mode before the first preset is loaded; [`Engine::current_compat`] is the mode in use.
     pub compat: Compat,
+    /// Choose the compatibility mode per preset: every [`Engine::load_preset`] looks at the preset's bytes
+    /// ([`lactea_preset::detect_compat`]: MilkDrop 3 when the file has evidence of a MilkDrop 3 feature, otherwise
+    /// projectM) and switches the engine to that mode when it differs from the current one; a preset projectM
+    /// rejects with an expression compile error is retried once under MilkDrop 2. A switch is always a hard cut.
+    /// Default `false`: [`EngineConfig::compat`] is fixed. See `docs/md3.md`,
+    /// "Automatic compatibility".
+    pub auto_compat: bool,
     /// Added to warp UVs in texels (0 on modern APIs; MilkDrop 2 on D3D9 used 0.5).
     pub texel_offset: [f32; 2],
     /// Format of the target view; `*Srgb` targets are compensated so bytes equal a linear render.
@@ -114,6 +145,10 @@ pub struct EngineConfig {
     /// The patterns random soft cuts of [`Compat::MilkDrop3`] may pick (MD3's `[transitions]` settings; empty = only
     /// `zoom`). Default: the 13 patterns MD3 enables without a settings file.
     pub md3_transition_patterns: Vec<Md3Pattern>,
+    /// Locked-shader overrides keyed by the preset's `MD31` / `MD32` handle (`docs/md3.md`, "Locked shaders").
+    /// A matching entry replaces the preset's shader text (the locked stub). Override text is plain
+    /// `\n`-separated HLSL, not the `\x01` form of preset text. Default: empty.
+    pub shader_overrides: HashMap<u64, ShaderOverride>,
 }
 
 impl Default for EngineConfig {
@@ -124,6 +159,7 @@ impl Default for EngineConfig {
             mesh: [48, 36],
             seed: 1,
             compat: Compat::ProjectM,
+            auto_compat: false,
             texel_offset: [0.0, 0.0],
             output_format: wgpu::TextureFormat::Rgba8Unorm,
             sample_rate: 44_100,
@@ -135,6 +171,7 @@ impl Default for EngineConfig {
             volume_sensitivity: 1.0,
             blend_milk2: true,
             blend_time_user: 1.7,
+            shader_overrides: HashMap::new(),
             md3_transition_patterns: engine::default_enabled_patterns(),
         }
     }
@@ -254,6 +291,9 @@ pub struct PresetReport {
     pub name: String,
     /// `MILKDROP_PRESET_VERSION` of the parsed preset.
     pub preset_version: i32,
+    /// The compatibility mode the preset was loaded under: [`EngineConfig::compat`], or with
+    /// [`EngineConfig::auto_compat`] the one detected for this preset.
+    pub compat: Compat,
     /// How the warp shader slot ended up.
     pub warp: ShaderOutcome,
     /// How the composite shader slot ended up.

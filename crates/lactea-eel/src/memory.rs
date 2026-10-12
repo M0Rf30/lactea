@@ -3,7 +3,7 @@
 use crate::ns::Dialect;
 use crate::rng::{Mt, PROJECTM_DEFAULT_SEED};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 pub(crate) const BLOCKS: usize = 128;
 pub(crate) const BLOCK_LEN: usize = 65536;
@@ -14,15 +14,16 @@ pub const MEM_ITEMS: usize = BLOCKS * BLOCK_LEN;
 /// State shared by every [`Context`](crate::Context) of one engine: `gmegabuf`, the
 /// `reg00..reg99` globals and the `rand()` generator, plus the [`Dialect`] they all run.
 ///
-/// Registers and gmegabuf are relaxed atomics (no `unsafe`; a plain load/store on mainstream
-/// targets).  The exception is `rand()`: the generator is one `Mutex<Mt>` shared by all
-/// memories created with [`sharing_rng_with`](Self::sharing_rng_with), so each call takes a
-/// lock (uncontended in single-threaded use).  The type is `Send + Sync`.
+/// Registers, gmegabuf and the `rand()` generator are relaxed atomics (no `unsafe`; a plain
+/// load/store on mainstream targets, no lock).  The generator is one stream shared by all
+/// memories created with [`sharing_rng_with`](Self::sharing_rng_with); the contexts that share
+/// it run one at a time (drawing from several threads at once is memory-safe but the values are
+/// unspecified).  The type is `Send + Sync`.
 pub struct GlobalMemory {
     dialect: Dialect,
     regs: Arc<[AtomicU64; 100]>,
     blocks: Arc<Vec<OnceLock<Box<[AtomicU64]>>>>,
-    rng: Arc<Mutex<Mt>>,
+    rng: Arc<Mt>,
 }
 
 impl Default for GlobalMemory {
@@ -53,7 +54,7 @@ impl GlobalMemory {
             dialect,
             regs: new_regs(),
             blocks: new_blocks(),
-            rng: Arc::new(Mutex::new(Mt::new(PROJECTM_DEFAULT_SEED))),
+            rng: Arc::new(Mt::new(PROJECTM_DEFAULT_SEED)),
         }
     }
 
@@ -78,6 +79,18 @@ impl GlobalMemory {
             dialect: other.dialect,
             regs,
             blocks,
+            rng: Arc::clone(&other.rng),
+        }
+    }
+
+    /// Memory of `dialect` that draws `rand()` from the **same** stream as `other` (like
+    /// [`sharing_rng_with`](Self::sharing_rng_with)) but starts with its own, empty `reg00..reg99` and gmegabuf: a
+    /// host that switches the dialect mid-run keeps one random sequence and loses the state of the other dialect.
+    pub fn sharing_rng_with_dialect(other: &GlobalMemory, dialect: Dialect) -> Self {
+        GlobalMemory {
+            dialect,
+            regs: new_regs(),
+            blocks: new_blocks(),
             rng: Arc::clone(&other.rng),
         }
     }
@@ -130,18 +143,12 @@ impl GlobalMemory {
 
     /// Reseeds the shared `rand()` stream (see [`Context::set_rng_seed`](crate::Context::set_rng_seed)).
     pub fn set_rng_seed(&self, seed: u64) {
-        self.rng
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .reseed(fold_seed(seed));
+        self.rng.reseed(fold_seed(seed));
     }
 
     #[inline]
     pub(crate) fn rand_u32(&self) -> u32 {
-        self.rng
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .next_u32()
+        self.rng.next_u32()
     }
 
     /// Block `b`, allocated (512 KiB) on first access.  Precondition: `b < BLOCKS`; callers

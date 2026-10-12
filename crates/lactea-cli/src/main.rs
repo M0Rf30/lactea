@@ -90,30 +90,42 @@ struct Args {
     /// use the noise textures of an oracle dump directory (free run)
     #[arg(long)]
     inject_noise: Option<PathBuf>,
-    /// projectm (default) | md2 | md3
-    #[arg(long, default_value = "projectm")]
-    compat: String,
+    /// projectm (default) | md2 | md3 (aliases milkdrop2, milkdrop3) | auto. `auto` picks projectm or md3 per
+    /// preset from its content (md2 only as the fallback for a preset projectm rejects with a compile error; a
+    /// mode change on `--preset2` is a hard cut) and reports the choice in fdrender.json (`compat_auto`,
+    /// `compat_evidence`); the default stays projectm.
+    #[arg(long, default_value = "projectm", value_parser = parse_compat)]
+    compat: CompatChoice,
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
-    #[arg(long)]
-    stroke: Option<String>,
-    /// MilkDrop 3 (`--compat md3`): a fixed mouse for every frame, `X,Y[,down]` with X, Y the cursor as fractions of
-    /// the image (0..1, origin top left); `down` presses the left button. Default: the cursor is outside the window.
-    #[arg(long, value_name = "X,Y[,down]")]
-    mouse: Option<String>,
-    /// MilkDrop 3 `VolumeSensitivity` (`--compat md3` only): linear gain on the 8-bit quantised audio input.
+    #[arg(long, value_parser = parse_stroke)]
+    stroke: Option<lactea_render::StrokeRaster>,
+    /// MilkDrop 3 (`--compat md3`, or `auto` when the preset resolves to md3): a fixed mouse for every frame,
+    /// `X,Y[,down]` with X, Y the cursor as fractions of the image (0..1, origin top left); `down` presses the
+    /// left button. Default: the cursor is outside the window.
+    #[arg(long, value_name = "X,Y[,down]", value_parser = parse_mouse)]
+    mouse: Option<MouseState>,
+    /// MilkDrop 3 `VolumeSensitivity` (`--compat md3`, or `auto` with an md3 preset): linear gain on the 8-bit quantised audio input.
     #[arg(long, default_value_t = 1.0)]
     volume_sensitivity: f32,
+    /// MilkDrop 3 locked shader (`MD31` handle): replace the preset's warp stub with the HLSL in FILE. Repeatable.
+    /// The HLSL must be one you own; see docs/md3.md, "Locked shaders".
+    #[arg(long, value_name = "HANDLE=FILE")]
+    shader_override_warp: Vec<String>,
+    /// MilkDrop 3 locked shader (`MD32` handle): replace the preset's composite stub with the HLSL in FILE. Repeatable.
+    #[arg(long, value_name = "HANDLE=FILE")]
+    shader_override_comp: Vec<String>,
     /// second preset: replaced at --switch-frame by a soft cut of --soft-cut seconds
     #[arg(long)]
     preset2: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
-    switch_frame: u32,
-    /// soft cut duration in seconds (projectM's default is 3)
-    #[arg(long, default_value_t = 3.0)]
-    soft_cut: f64,
-    /// 1 = the second preset starts from black, 0 = from the first preset's image (projectM default)
-    #[arg(long, default_value_t = 0)]
-    start_clean: u8,
+    /// frame at which --preset2 replaces the first preset (default 0; needs --preset2)
+    #[arg(long)]
+    switch_frame: Option<u32>,
+    /// soft cut duration in seconds (default 3 like projectM; needs --preset2)
+    #[arg(long)]
+    soft_cut: Option<f64>,
+    /// 1 = the second preset starts from black, 0 = from the first preset's image (projectM default; needs --preset2)
+    #[arg(long)]
+    start_clean: Option<u8>,
     /// force the transition shader (0 circle, 1 plasma, 2 simple blend, 3 sweep, 4 warp, 5 zoom blur)
     #[arg(long)]
     transition_shader: Option<u32>,
@@ -124,7 +136,7 @@ struct Args {
     /// pass (isolates the transition shader; per-preset stages stay ours)
     #[arg(long)]
     blend_teacher: Option<PathBuf>,
-    /// MilkDrop 3 AutoHardCutMode 0..=7 (0 = off; acts only with --compat md3). fdrender has no preset
+    /// MilkDrop 3 AutoHardCutMode 0..=7 (0 = off; acts only with --compat md3, or auto with an md3 preset). fdrender has no preset
     /// switching, so the instant preset changes of modes 1..=6 are only counted ("auto_cuts" in
     /// fdrender.json); mode 7 injects its effects into the composite shader, so the frames show them
     #[arg(long, default_value_t = 0)]
@@ -132,25 +144,56 @@ struct Args {
 }
 
 /// `--mouse X,Y[,down]`.
-fn parse_mouse(s: &str) -> Result<MouseState> {
+fn parse_mouse(s: &str) -> Result<MouseState, String> {
     let mut it = s.split(',');
-    let mut coord = |what: &str| -> Result<f32> {
+    let mut coord = |what: &str| -> Result<f32, String> {
         it.next()
-            .ok_or_else(|| anyhow!("--mouse: expected X,Y[,down], got {s:?}"))?
+            .ok_or_else(|| format!("expected X,Y[,down], got {s:?}"))?
             .trim()
             .parse::<f32>()
-            .map_err(|e| anyhow!("--mouse: {what}: {e}"))
+            .map_err(|e| format!("{what}: {e}"))
     };
     let (x, y) = (coord("X")?, coord("Y")?);
     let left_down = match it.next().map(str::trim) {
         None => false,
         Some("down") => true,
-        Some(o) => bail!("--mouse: the third field is `down`, got {o:?}"),
+        Some(o) => return Err(format!("the third field is `down`, got {o:?}")),
     };
     Ok(MouseState {
         position: Some([x, y]),
         left_down,
     })
+}
+
+/// `--compat` value: a fixed mode, or `auto` (resolved per preset by the engine).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompatChoice {
+    Auto,
+    Fixed(Compat),
+}
+
+/// `--compat`: `auto`, `projectm`, `md2`/`milkdrop2`, `md3`/`milkdrop3`.
+fn parse_compat(s: &str) -> Result<CompatChoice, String> {
+    match s {
+        "auto" => Ok(CompatChoice::Auto),
+        "projectm" => Ok(CompatChoice::Fixed(Compat::ProjectM)),
+        "md2" | "milkdrop2" => Ok(CompatChoice::Fixed(Compat::MilkDrop2)),
+        "md3" | "milkdrop3" => Ok(CompatChoice::Fixed(Compat::MilkDrop3)),
+        o => Err(format!(
+            "expected projectm|md2|md3|auto (or milkdrop2|milkdrop3), got {o:?}"
+        )),
+    }
+}
+
+/// `--stroke`: `native`, `emulated` or `quads`.
+fn parse_stroke(s: &str) -> Result<lactea_render::StrokeRaster, String> {
+    use lactea_render::StrokeRaster as S;
+    match s {
+        "native" => Ok(S::Native),
+        "emulated" => Ok(S::Emulated),
+        "quads" => Ok(S::Quads),
+        o => Err(format!("expected native|emulated|quads, got {o:?}")),
+    }
 }
 
 fn parse_pair<T: std::str::FromStr>(s: &str, sep: char, what: &str) -> Result<(T, T)> {
@@ -261,9 +304,45 @@ fn write_extra(out: &Path, name: &str, n: u32, w: u32, h: u32, rgba: Vec<u8>) ->
     .save_png(dir.join(format!("{n:05}.png")))?;
     Ok(())
 }
+/// `--size WxH`; the `x` is case-insensitive like the app's `--size`.
+fn parse_size(s: &str) -> Result<(u32, u32)> {
+    parse_pair(&s.replace('X', "x"), 'x', "--size")
+}
+
+/// Cross-flag checks that must fail before `run` creates the output directory.
+fn validate(args: &Args) -> Result<()> {
+    if let Some(d) = &args.texture_dir
+        && !d.is_dir()
+    {
+        bail!("--texture-dir: {} is not a directory", d.display());
+    }
+    if args.preset2.is_some() {
+        let at = args.switch_frame.unwrap_or(0);
+        if at >= args.frames {
+            bail!(
+                "--switch-frame {at} is not below --frames {}: the second preset would never load",
+                args.frames
+            );
+        }
+    } else {
+        let orphan = [
+            ("--switch-frame", args.switch_frame.is_some()),
+            ("--soft-cut", args.soft_cut.is_some()),
+            ("--start-clean", args.start_clean.is_some()),
+            ("--transition-shader", args.transition_shader.is_some()),
+            ("--transition-static", args.transition_static.is_some()),
+        ]
+        .into_iter()
+        .find(|(_, given)| *given);
+        if let Some((flag, _)) = orphan {
+            bail!("{flag} needs --preset2");
+        }
+    }
+    Ok(())
+}
 
 fn run(args: &Args) -> Result<i32> {
-    let (width, height): (u32, u32) = parse_pair(&args.size, 'x', "--size")?;
+    let (width, height) = parse_size(&args.size)?;
     let (mx, my): (u32, u32) = parse_pair(&args.mesh, 'x', "--mesh")?;
     if width == 0 || height == 0 {
         anyhow::bail!("--size: width and height must be >= 1 (got {width}x{height})");
@@ -275,11 +354,10 @@ fn run(args: &Args) -> Result<i32> {
     let stages = parse_stages(&args.stages)?;
     // non-ABI extra stage of the oracle: previous main + this frame's motion vectors
     let want_warpsrc = args.stages.split(',').any(|t| t.trim() == "warpsrc");
-    let compat = match args.compat.as_str() {
-        "projectm" => Compat::ProjectM,
-        "md2" => Compat::MilkDrop2,
-        "md3" => Compat::MilkDrop3,
-        o => bail!("--compat: expected projectm|md2|md3, got {o:?}"),
+    let auto_compat = args.compat == CompatChoice::Auto;
+    let base_compat = match args.compat {
+        CompatChoice::Auto => Compat::ProjectM,
+        CompatChoice::Fixed(c) => c,
     };
     if args.auto_hard_cut > lactea::auto_cut::AUTO_HARD_CUT_MODES {
         bail!(
@@ -370,6 +448,35 @@ fn run(args: &Args) -> Result<i32> {
         },
     )?;
 
+    let mut shader_overrides = std::collections::HashMap::<u64, lactea::ShaderOverride>::new();
+    for (spec, is_warp) in args
+        .shader_override_warp
+        .iter()
+        .map(|s| (s, true))
+        .chain(args.shader_override_comp.iter().map(|s| (s, false)))
+    {
+        let flag = if is_warp {
+            "--shader-override-warp"
+        } else {
+            "--shader-override-comp"
+        };
+        let Some((handle, file)) = spec.split_once('=') else {
+            bail!("{flag}: expected HANDLE=FILE, got {spec:?}");
+        };
+        let handle: u64 = handle
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("{flag}: bad handle {handle:?}: {e}"))?;
+        let text = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("{flag}: reading {file}: {e}"))?;
+        let entry = shader_overrides.entry(handle).or_default();
+        if is_warp {
+            entry.warp = Some(text);
+        } else {
+            entry.comp = Some(text);
+        }
+    }
+
     let gpu = gpu::init()?;
     eprintln!("fdrender: adapter {}", gpu.adapter_name);
     let mut engine = Engine::new(
@@ -380,19 +487,21 @@ fn run(args: &Args) -> Result<i32> {
             height,
             mesh: [mx, my],
             seed: args.seed,
-            compat,
+            compat: base_compat,
+            auto_compat,
             texel_offset: [tox, toy],
             output_format: wgpu::TextureFormat::Rgba8Unorm,
             sample_rate: audio.rate,
             fps: args.fps,
             preset_duration: 1e9,
-            start_clean: args.start_clean != 0,
+            start_clean: args.start_clean.unwrap_or(0) != 0,
             auto_hard_cut_mode: args.auto_hard_cut,
             volume_sensitivity: args.volume_sensitivity,
+            shader_overrides,
             ..EngineConfig::default()
         },
     );
-    if args.auto_hard_cut > 0 && !engine.auto_hard_cut_active() {
+    if !auto_compat && args.auto_hard_cut > 0 && !engine.auto_hard_cut_active() {
         eprintln!("fdrender: --auto-hard-cut needs --compat md3, ignored");
     }
     let tex_dir = args.texture_dir.clone().unwrap_or_else(default_texture_dir);
@@ -414,16 +523,17 @@ fn run(args: &Args) -> Result<i32> {
         .max()
         .unwrap_or(0);
     engine.renderer_mut().set_min_blur_levels(blur_needed);
-    if let Some(s) = &args.stroke {
-        engine.renderer_mut().set_stroke_raster(match s.as_str() {
-            "native" => lactea_render::StrokeRaster::Native,
-            "emulated" => lactea_render::StrokeRaster::Emulated,
-            "quads" => lactea_render::StrokeRaster::Quads,
-            o => bail!("--stroke: expected native|emulated|quads, got {o:?}"),
-        });
+    if let Some(s) = args.stroke {
+        engine.renderer_mut().set_stroke_raster(s);
     }
-    if let Some(m) = &args.mouse {
-        engine.set_mouse(parse_mouse(m)?);
+    if !auto_compat && args.volume_sensitivity != 1.0 && base_compat != Compat::MilkDrop3 {
+        eprintln!("fdrender: --volume-sensitivity needs --compat md3, ignored");
+    }
+    if let Some(m) = args.mouse {
+        if !auto_compat && base_compat != Compat::MilkDrop3 {
+            eprintln!("fdrender: --mouse needs --compat md3, ignored");
+        }
+        engine.set_mouse(m);
     }
 
     if let Some(r) = &reference {
@@ -481,6 +591,29 @@ fn run(args: &Args) -> Result<i32> {
             f.pass, f.reason, f.fallback
         );
     }
+    let evidence = if auto_compat {
+        let (name, ev) = detect_note(&preset_bytes, &report);
+        eprintln!("fdrender: compat auto -> {name} (evidence: {ev})");
+        if report.compat != Compat::MilkDrop3 {
+            if args.mouse.is_some() {
+                eprintln!("fdrender: --mouse needs an md3 preset under --compat auto, ignored");
+            }
+            if args.volume_sensitivity != 1.0 {
+                eprintln!(
+                    "fdrender: --volume-sensitivity needs an md3 preset under --compat auto, ignored"
+                );
+            }
+            if args.auto_hard_cut > 0 {
+                eprintln!(
+                    "fdrender: --auto-hard-cut needs an md3 preset under --compat auto, ignored"
+                );
+            }
+        }
+        detected_evidence(&preset_bytes, &report)
+    } else {
+        Vec::new()
+    };
+    let mut evidence2: Option<Vec<String>> = None;
     for t in &report.unresolved_textures {
         eprintln!("fdrender: unresolved texture {t}");
     }
@@ -510,16 +643,18 @@ fn run(args: &Args) -> Result<i32> {
         }
 
         // preset switch (refrender: top of the iteration, before PCM / frame time)
-        if let (Some(p2), Some(p2_path), true) =
-            (&preset2_bytes, &args.preset2, n == args.switch_frame)
-        {
+        if let (Some(p2), Some(p2_path), true) = (
+            &preset2_bytes,
+            &args.preset2,
+            n == args.switch_frame.unwrap_or(0),
+        ) {
             engine.force_next_transition(forced_shader, forced_static);
             let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let load2 = engine.load_preset(
                 p2,
                 &p2_path.display().to_string(),
                 Transition::Soft {
-                    seconds: args.soft_cut,
+                    seconds: args.soft_cut.unwrap_or(3.0),
                 },
             );
             if let Some(e) = pollster::block_on(scope.pop()) {
@@ -535,6 +670,11 @@ fn run(args: &Args) -> Result<i32> {
                             "fdrender: SHADER FALLBACK preset2 ({:?}): {} -> {}",
                             f.pass, f.reason, f.fallback
                         );
+                    }
+                    if auto_compat {
+                        let (name, ev) = detect_note(p2, &r);
+                        eprintln!("fdrender: compat auto -> {name} (preset2; {ev})");
+                        evidence2 = Some(detected_evidence(p2, &r));
                     }
                     report2 = Some(r);
                 }
@@ -758,6 +898,15 @@ fn run(args: &Args) -> Result<i32> {
     if engine.auto_hard_cut_active() {
         info["auto_cuts"] = serde_json::json!(auto_cuts);
     }
+    info["compat"] = serde_json::json!(compat_name(report.compat));
+    if auto_compat {
+        info["compat_auto"] = serde_json::json!(true);
+        info["compat_evidence"] = serde_json::json!(evidence);
+        if let (Some(r), Some(ev)) = (&report2, &evidence2) {
+            info["preset2"]["compat"] = serde_json::json!(compat_name(r.compat));
+            info["preset2"]["compat_evidence"] = serde_json::json!(ev);
+        }
+    }
     write_info(&args.out, info)?;
     if !validation_errors.is_empty() {
         return Ok(4);
@@ -767,6 +916,43 @@ fn run(args: &Args) -> Result<i32> {
     } else {
         3
     })
+}
+
+fn compat_name(c: Compat) -> &'static str {
+    match c {
+        Compat::ProjectM => "projectm",
+        Compat::MilkDrop2 => "md2",
+        Compat::MilkDrop3 => "md3",
+    }
+}
+
+/// What `lactea_preset::detect_compat` found in `bytes`, one string per piece of evidence, then the engine's
+/// `fallback: ...` note when the load fell back to MilkDrop 2.
+fn detected_evidence(bytes: &[u8], report: &lactea::PresetReport) -> Vec<String> {
+    let mut ev: Vec<String> = lactea_preset::detect_compat(bytes)
+        .evidence
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    ev.extend(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("fallback: "))
+            .cloned(),
+    );
+    ev
+}
+
+/// Name of the resolved mode and the evidence for the `--compat auto` log line.
+fn detect_note(bytes: &[u8], report: &lactea::PresetReport) -> (&'static str, String) {
+    let ev = detected_evidence(bytes, report);
+    let ev = if ev.is_empty() {
+        "none".to_string()
+    } else {
+        ev.join(", ")
+    };
+    (compat_name(report.compat), ev)
 }
 
 fn write_info(dir: &Path, v: serde_json::Value) -> Result<()> {
@@ -779,12 +965,122 @@ fn write_info(dir: &Path, v: serde_json::Value) -> Result<()> {
 }
 
 fn main() {
-    let args = Args::parse();
-    match run(&args) {
+    let args = match Args::try_parse() {
+        Ok(a) => a,
+        Err(e) => {
+            // Exit 2 is reserved for preset-load failure; usage errors are 1, `--help`/`--version` 0.
+            let code = if e.use_stderr() { 1 } else { 0 };
+            let _ = e.print();
+            std::process::exit(code);
+        }
+    };
+    match validate(&args).and_then(|()| run(&args)) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("fdrender: {e:#}");
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
+        let mut v = vec![
+            "fdrender", "--preset", "p.milk", "--audio", "a.wav", "--out", "o",
+        ];
+        v.extend_from_slice(extra);
+        Args::try_parse_from(v)
+    }
+
+    #[test]
+    fn bad_enum_flags_fail_in_clap() {
+        assert!(parse(&["--compat", "nope"]).is_err());
+        assert!(parse(&["--stroke", "nope"]).is_err());
+        assert!(parse(&["--mouse", "2,2,up"]).is_err());
+        assert!(parse(&["--mouse", "0.5,0.5,down"]).is_ok());
+    }
+
+    #[test]
+    fn clap_usage_error_uses_stderr_help_does_not() {
+        assert!(parse(&["--bogus"]).unwrap_err().use_stderr());
+        let help = Args::try_parse_from(["fdrender", "--help"]).unwrap_err();
+        assert!(!help.use_stderr());
+    }
+
+    #[test]
+    fn compat_aliases() {
+        for (s, c) in [
+            ("projectm", Compat::ProjectM),
+            ("md2", Compat::MilkDrop2),
+            ("milkdrop2", Compat::MilkDrop2),
+            ("md3", Compat::MilkDrop3),
+            ("milkdrop3", Compat::MilkDrop3),
+        ] {
+            assert_eq!(
+                parse(&["--compat", s]).unwrap().compat,
+                CompatChoice::Fixed(c)
+            );
+        }
+    }
+
+    #[test]
+    fn compat_auto() {
+        assert_eq!(
+            parse(&["--compat", "auto"]).unwrap().compat,
+            CompatChoice::Auto
+        );
+    }
+
+    #[test]
+    fn size_accepts_uppercase_x() {
+        assert_eq!(parse_size("640X360").unwrap(), (640, 360));
+        assert_eq!(parse_size("640x360").unwrap(), (640, 360));
+        assert!(parse_size("640").is_err());
+    }
+
+    #[test]
+    fn missing_texture_dir_is_an_error() {
+        let a = parse(&["--texture-dir", "/nonexistent/lactea-tex"]).unwrap();
+        assert!(validate(&a).is_err());
+    }
+
+    #[test]
+    fn switch_frame_must_be_inside_the_run() {
+        let a = parse(&[
+            "--preset2",
+            "q.milk",
+            "--switch-frame",
+            "10",
+            "--frames",
+            "2",
+        ])
+        .unwrap();
+        assert!(validate(&a).is_err());
+        let a = parse(&[
+            "--preset2",
+            "q.milk",
+            "--switch-frame",
+            "1",
+            "--frames",
+            "2",
+        ])
+        .unwrap();
+        assert!(validate(&a).is_ok());
+    }
+
+    #[test]
+    fn transition_flags_need_preset2() {
+        for flag in [
+            &["--switch-frame", "1"][..],
+            &["--soft-cut", "1"],
+            &["--start-clean", "1"],
+            &["--transition-shader", "1"],
+            &["--transition-static", "1,2,3,4"],
+        ] {
+            assert!(validate(&parse(flag).unwrap()).is_err(), "{flag:?}");
         }
     }
 }

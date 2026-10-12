@@ -51,6 +51,7 @@ every column below headed "MilkDrop 2" applies to it too, and its own difference
 | Shader translation failure during a blend | n/a | counts as "no shader" for the pass table and snap point (MD2 would draw its fallback shader) |
 | No-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
 | `shapecode_N_image` (`custom_shape_image`) | read (projectM addition) | not a key; the line stays in `Preset::extra` |
+| Linear ops on interpolated shader inputs (`gl_varying_fold`) | Mesa moves `input ± uniform/const` (and a few other linear ops) of the warp / comp fragment shader into the vertex stage and interpolates the result; the translator emits those values (`CompiledShader::folds`) and the renderer delivers them as extra varyings `fold{j}` (mesh and GPU-warp vertex stages) | added per pixel from the interpolated input (about 1 ulp apart) |
 
 Shared quirk kept without a switch (present in both): `GetSafeBlurMinMax` typo (`max = avg - 0.05`).
 Deliberately not copied: MD2's one-frame lag of comp-shader blur usage (`m_nHighestBlurTexUsedThisFrame`).

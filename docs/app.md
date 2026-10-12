@@ -12,6 +12,7 @@ trait Visualizer {
     fn take_auto_cuts(&mut self) -> u32 { 0 }                       // default-implemented (MD3 auto hard cuts)
     fn set_auto_hard_cut_mode(&mut self, mode: u8) {}               // default-implemented
     fn auto_hard_cut_mode(&self) -> Option<u8> { None }             // None = no such feature / compat does not support it
+    fn current_compat(&self) -> Option<CompatArg> { None }          // resolved compat of the last load (never Auto); None = no compat modes
 }
 ```
 
@@ -23,6 +24,20 @@ cargo build -p lactea-app                      # PipeWire + engine (default feat
 cargo build -p lactea-app --no-default-features   # cpal capture only, scope only
 lactea --dir /usr/share/projectM/presets        # engine, PipeWire monitor capture
 ```
+
+### Compat selection (`--compat`)
+
+`--compat auto` (the default) lets the engine resolve the mode per preset from the preset bytes
+(`lactea_preset::detect_compat`): MilkDrop 3 when the file uses an MD3-only feature (`.milk2`, `MD31=`/`MD32=` keys,
+sprites, `get_fft`/`mouse`/`q33..q64`, ...), projectM otherwise; MilkDrop 2 is only a fallback: a preset projectM
+rejects because its code does not compile (the MD2 line glueing, `docs/md3.md`) is retried once under MilkDrop 2. When
+the resolved mode changes between two presets the engine rebuilds its
+mode-dependent state and does a **hard cut** whatever `--transition-duration` says. `.milk2` files are listed in
+`auto` as well as `milkdrop3`. `projectm`, `milkdrop2` and `milkdrop3` fix the mode for every preset (as before).
+The host follows the resolved mode after every successful load (`Visualizer::current_compat`): MD3 display-time
+randomisation, the F8 key, the window title and the log. `CompatArg::md3()` is true only for the fixed `milkdrop3`.
+
+### Build
 
 Build needs `libpipewire-0.3` headers + clang (bindgen) for the `pipewire` feature and ALSA headers
 for cpal. Version choices: winit 0.30.13 (0.31 is still beta), wgpu 30, cpal 0.18, pipewire 0.10,
@@ -40,17 +55,22 @@ depends on a pinned git fork of symphonia, which crates.io does not accept.
 | F, F11, double-click | fullscreen (cursor hidden while fullscreen) |
 | Esc, Q | quit |
 | D | write every pipeline stage of the last frame as PNG into `$LACTEA_DEBUG_DIR` (default `<temp dir>/lactea-debug`) |
-| F8 | cycle the MD3 auto hard cut mode off, 1 ... 7, off (`--compat milkdrop3` only; logs `auto hard cut needs --compat milkdrop3` otherwise) |
+| F8 | cycle the MD3 auto hard cut mode off, 1 ... 7, off (MilkDrop 3 mode only: `--compat milkdrop3`, or `auto` on a MilkDrop 3 preset; logs `auto hard cut needs a MilkDrop 3 preset ...` otherwise) |
 
 Auto-advance every `--duration S` (default 30, 0 = never) unless locked; `--shuffle` picks the next
-preset at random. Every preset change after the first (auto-advance, N / P / R / arrows) is a **soft cut**:
+preset at random. The random stream (shuffle, R) is seeded from the clock, so the order differs on every launch;
+the log prints `preset order seed N`, and `--seed N` reproduces it (`--seed` also seeds the engine; `--deterministic`
+without `--seed` uses 1). Every preset change after the first (auto-advance, N / P / R / arrows) is a **soft cut**:
 the engine blends the old and the new preset over `--transition-duration S` seconds (default 3, projectM's
 `m_softCutDuration`; 0 = hard cuts) while both keep running; the first preset appears at once. A preset that fails to
 load (parse/compile error, GPU validation error, engine
-panic) is logged and skipped in the direction of travel. The window title shows
-`preset [i/n] | LOCKED | hardcut<N> | audio status | fps` (`LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on).
+panic) is logged and skipped in the direction of travel. When a whole round fails (nothing is showing yet) the app
+logs it once, shows the engine's built-in idle preset and does not retry until you navigate (N / P / R / arrows);
+with no presets found at all (no default directory, an empty directory) it also shows the idle preset.
+An explicit `--preset FILE` or `--dir DIR` that does not exist exits 1 before a window opens. The window title shows
+`preset [compat] [i/n] | LOCKED | hardcut<N> | audio status | fps` (`[compat]`, e.g. `[MilkDrop 3]`, only under `--compat auto`; `LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on). Every load also logs `preset <name>: compat <mode>` at info level.
 
-### MD3 auto hard cuts (`--compat milkdrop3`)
+### MD3 auto hard cuts (MilkDrop 3 mode)
 
 MD3's `AutoHardCutMode` (`--auto-hard-cut N`, F8 at runtime; `hardcut1` ... `hardcut7`, `off`; behaviour in
 `docs/md3.md` §Auto hard cuts) is ignored under projectM and MilkDrop 2. Modes 1..6 ask for an instant preset
@@ -60,9 +80,10 @@ change on beat/loudness triggers: after each rendered frame the shell asks the v
 effect into the composite shader. Auto cuts are independent of projectM's `hard_cut_*` settings.
 Deviation: MD3 ignores its preset lock, here a locked browser (L) also ignores auto cuts, and a single preset is not reloaded by one.
 
-With `--compat milkdrop3` the auto-advance time of a preset is MD3's `--transition-duration` + `--duration` + a
+In MilkDrop 3 mode (`--compat milkdrop3`, or a MilkDrop 3 preset under `--compat auto`) the auto-advance time of a preset is MD3's `--transition-duration` + `--duration` + a
 random `0 ... --duration-rand` seconds (`TimeBetweenPresetsRand`, default 10, negative = 0) drawn per preset from
-the `--seed`ed stream (`--duration 0` still never advances); the other compat modes use `--duration` alone.
+the `--seed`ed stream (`--duration 0` still never advances); the other modes use `--duration` alone. Under `auto` the
+host switches this on or off after each successful load, following the preset's resolved compat.
 
 ## Command line
 
@@ -73,21 +94,22 @@ the `--seed`ed stream (`--duration 0` still never advances); the other compat mo
                        /opt/homebrew/share/projectM/presets (none on Windows: pass --dir)
 --duration S           auto-advance period (30; 0 = never)      --shuffle
 --transition-duration S  soft cut length (3; 0 = hard cuts)
---auto-hard-cut N      MD3 AutoHardCutMode 0..7 (0 = off; 1..6 hard cuts, 7 composite effects; --compat milkdrop3 only; F8 cycles)
---duration-rand S      MD3 TimeBetweenPresetsRand (10; --compat milkdrop3 only)
+--auto-hard-cut N      MD3 AutoHardCutMode 0..7 (0 = off; 1..6 hard cuts, 7 composite effects; MilkDrop 3 mode only; F8 cycles)
+--duration-rand S      MD3 TimeBetweenPresetsRand (10; MilkDrop 3 mode only)
 --fps N                frame cap (default: vsync only; --deterministic: 60)
 --no-vsync             Mailbox/Immediate instead of Fifo
 --size WxH [--pixels]  initial window size, logical (HiDPI) units unless --pixels
 --fullscreen
---visualizer engine|scope   --seed N   --compat projectm|milkdrop2|milkdrop3   --mesh WxH
+--visualizer engine|scope   --seed N   --compat auto|projectm|milkdrop2|milkdrop3   --mesh WxH (both even)
 --texture-dir DIR      (repeatable; searched before the defaults)
---capture-device NAME  cpal input (name, substring or id like alsa:default); implies cpal
---audio-backend auto|pipewire|cpal     --pipewire-target NODE
---list-devices         cpal inputs/outputs + PipeWire sinks, then exit
---audio-file F [--loop] [--output-device NAME]   --audio-delay-ms MS
---audio-wav F --deterministic                    (needs both)
+--capture-device NAME  cpal input, or (Windows/macOS) output captured as loopback (name, substring or id)
+--audio-backend auto|pipewire|cpal|cpal-loopback     --pipewire-target NODE
+--list-devices         cpal inputs/outputs + PipeWire sinks (* = default, [loopback] = capturable output), then exit
+--audio-file F [--loop] [--output-device NAME]   [--audio-delay-ms MS] (needs --audio-file)
+--audio-wav F --deterministic                    (needs both; an unreadable WAV, like an unreadable --audio-file, exits 1)
 --no-audio
---exit-after S   --frames N   --screenshot F.png [--screenshot-frame N]   (testing/captures)
+--exit-after S   --frames N   --screenshot F.png [--screenshot-frame N]   (testing/captures; --screenshot-frame must be < --frames,
+                       and a run that ends before the screenshot is written exits 1)
 ```
 
 Logging: `RUST_LOG` (default `info`). `RUST_LOG=lactea=debug` adds per-second fps and audio
@@ -133,15 +155,46 @@ pipewire: capture stream node 81 <- 'lactea-test-sink' (fd_test_sink, node 84); 
 ```
 
 If the daemon goes away the thread reconnects every second. If PipeWire is unreachable at start the
-app falls back to cpal (`--audio-backend pipewire` makes it an error instead).
-`--pipewire-target NODE` sets `target.object` (WirePlumber falls back to the default sink for an
-unknown node).
+app falls back to cpal (`--audio-backend pipewire` or `--pipewire-target` make it an error instead).
+`--pipewire-target NODE` sets `target.object`; NODE is an exact `node.name` or `object.serial`. An
+unknown node is an error (`audio: FAILED (no PipeWire node ...)`), because WirePlumber would
+silently link the default sink instead. The log line names the node actually targeted.
 
 ### cpal (fallback, other OSes) — `src/audio/cpal_input.rs`
 
-Default input device, or `--capture-device NAME|ID` (exact id/name, then case-insensitive
-substring). 44.1 kHz stereo f32 is preferred when the device offers it, otherwise the default
-config is used and the visualizer gets that rate.
+Two kinds of capture device, chosen in `audio/devices.rs` (`default_capture_plan`):
+
+| kind | device | meaning |
+|---|---|---|
+| `input` | an input device | microphone, line in; on Linux also a Pulse/PipeWire monitor *source* |
+| `loopback` | an **output** device opened as an input | what that device plays |
+
+Loopback is what cpal 0.18 does when an output device is opened with `build_input_stream`: WASAPI
+sets `AUDCLNT_STREAMFLAGS_LOOPBACK` itself, CoreAudio builds a process tap plus aggregate device
+(macOS 14.6 or later; the first run asks for the audio-capture permission, and without it the
+stream delivers silence). ALSA and PulseAudio cannot open an output device for capture, so on Linux
+the cpal path stays input-only (PipeWire covers "what you hear" there). Selection:
+
+* `--audio-backend auto` (default) without PipeWire: **Windows/macOS** record the default output
+  device (`loopback`) and fall back to the default input device if that cannot be opened (a warning
+  says so); Linux records the default input device.
+* `--audio-backend cpal`: input devices only (the default input device), as before.
+* `--audio-backend cpal-loopback`: loopback of the default output, no fallback; an error on Linux.
+* `--capture-device NAME|ID` (exact id first, then case-insensitive substring of id/name/description)
+  searches the input devices, then on Windows/macOS the output devices. It cannot be combined with
+  `--audio-backend pipewire`.
+
+A duplex output device (headset, audio interface) cannot be captured as loopback on CoreAudio: cpal
+would record its input side. It is not offered as `[loopback]` and the default capture reports why.
+
+The log says which one is open: `audio: capturing Speakers [wasapi:...] (loopback; 2 ch, 48000 Hz,
+f32)`, and the title tag is `cpal-loopback` or `cpal`. An input capture prefers 44.1 kHz stereo f32
+when the device offers it, otherwise the default config is used and the visualizer gets that rate.
+A loopback always uses the output's own format: CoreAudio applies a requested rate to the physical
+device, which would reconfigure the user's speakers.
+
+Windows and macOS behaviour is not exercised by the Linux test suite: the selection logic
+(`default_capture_plan`, `loopback_unavailable`, name matching) is unit-tested, the device I/O is not.
 
 ### `--audio-file` — `src/audio/player.rs`
 

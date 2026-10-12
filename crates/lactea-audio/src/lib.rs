@@ -197,6 +197,15 @@ impl Analyzer {
         self.mode
     }
 
+    /// Adopt the PCM ring of `prev`, so an analyzer that replaces it between two frames (another
+    /// [`AnalysisMode`]) sees the samples already pushed. Only the ring moves: averages, alignment and the frame
+    /// counter start afresh, and samples already stored keep the scale of the mode that pushed them (they are
+    /// replaced within one window of fresh input).
+    pub fn take_pcm_from(&mut self, prev: &Analyzer) {
+        self.ring = prev.ring;
+        self.start = prev.start;
+    }
+
     /// Frames analysed so far (the `frame` counter used by the long-average switch at 50).
     pub fn frame_index(&self) -> u32 {
         self.frame_no

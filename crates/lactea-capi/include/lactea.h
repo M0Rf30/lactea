@@ -11,7 +11,9 @@
 #include <stddef.h>
 
 // Largest accepted render width or height, in pixels. Larger requests would exceed what GPUs
-// can allocate and are rejected with `LACTEA_STATUS_INVALID_ARGUMENT`.
+// can allocate and are rejected with `LACTEA_STATUS_INVALID_ARGUMENT`. The device the engine
+// runs on can be stricter (wgpu's default `max_texture_dimension_2d` is 8192): `lactea_create`
+// and `lactea_resize` check the size against it and the error message names the limit.
 #define LACTEA_MAX_DIMENSION 16384
 
 // Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ (`docs/divergences.md`,
@@ -27,6 +29,13 @@ enum LacteaCompat
   LACTEA_COMPAT_MILKDROP2 = 1,
   // Follow MilkDrop 3.
   LACTEA_COMPAT_MILKDROP3 = 2,
+  // Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
+  // (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
+  // names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
+  // code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
+  // changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
+  // mode in use. Before the first load the mode is projectM.
+  LACTEA_COMPAT_AUTO = 3,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -98,14 +107,19 @@ typedef struct {
 // (`lactea_set_auto_hard_cut_mode`) calls it too, with `is_hard_cut = true`; `preset_locked`
 // silences every request. The request is *also*
 // kept for `lactea_poll_switch_request`. The callback runs synchronously on the calling thread,
-// inside `lactea_render*`, after the frame is submitted: it must not call any lactea function
-// with the same engine (no re-entrancy); set a flag or queue the request and act on it afterwards.
+// inside `lactea_render*`, after the frame is submitted and the call's work is done. It may call
+// any lactea function on the same engine, for example `lactea_load_preset_ex` to load the next
+// preset; events raised by those nested calls are delivered after this callback returns, never
+// recursively. `lactea_destroy` on the engine is allowed too: the engine is then freed when the
+// outer lactea call returns, and the callback must not use the handle afterwards.
 typedef void (*LacteaSwitchRequestedFn)(bool is_hard_cut, void *user_data);
 
 // Called when a preset load fails (`lactea_load_preset`, `lactea_load_preset_ex`,
 // `lactea_load_idle_preset`); the previous preset keeps running. `preset_name` and `message` are
 // NUL-terminated and valid only during the call. Like the switch-requested callback it runs
-// synchronously inside the lactea call and must not call back into the engine.
+// synchronously inside the lactea call, after the call's status and `lactea_last_error` are set,
+// and may call back into the same engine (see `LacteaSwitchRequestedFn`). `lactea_last_error`
+// reads the same message again after the callback returns.
 typedef void (*LacteaSwitchFailedFn)(const char *preset_name, const char *message, void *user_data);
 
 // projectM's preset-switching settings in one struct (`projectm_set_*` / `projectm_get_*` of beat
@@ -211,7 +225,9 @@ void lactea_config_default(LacteaConfig *out);
 // `config` must be NULL or point to a valid `LacteaConfig`.
 LacteaEngine *lactea_create(const LacteaConfig *config);
 
-// Destroy an engine. NULL is a no-op.
+// Destroy an engine. NULL is a no-op. Inside one of the engine's own callbacks the engine is
+// freed when the lactea call that fired the callback returns; the callback must not use the
+// handle after this call.
 //
 // # Safety
 // `engine` must come from `lactea_create` and not be used afterwards.
@@ -278,7 +294,8 @@ LacteaStatus lactea_push_pcm_f32(LacteaEngine *engine,
                                  size_t frames,
                                  uint32_t channels);
 
-// Change the render size (clears the feedback image; the loaded preset keeps running).
+// Change the render size (clears the feedback image; the loaded preset keeps running). A size the
+// device cannot allocate (see `LACTEA_MAX_DIMENSION`) is `InvalidArgument`.
 //
 // # Safety
 // `engine` valid.
@@ -372,6 +389,7 @@ uint32_t lactea_get_fps(const LacteaEngine *engine);
 // `inside == false` says the cursor is outside the window (`x` and `y` are then ignored). Call it whenever the
 // state changes; the engine reads the latest values once per rendered frame and derives the one-frame "released"
 // edge of the shader's `mouse.w` itself, so a press and release between two rendered frames is not seen.
+// A non-finite `x` or `y` while `inside` is `InvalidArgument`.
 //
 // # Safety
 // `engine` valid.
@@ -382,7 +400,7 @@ LacteaStatus lactea_set_mouse(LacteaEngine *engine,
                               bool left_down);
 
 // MilkDrop 3 `VolumeSensitivity`: linear gain (default 1) on the 8-bit quantised audio input. Only
-// `LACTEA_COMPAT_MILKDROP3` uses it.
+// `LACTEA_COMPAT_MILKDROP3` uses it. A non-finite value is `InvalidArgument`.
 //
 // # Safety
 // `engine` valid.
@@ -430,6 +448,14 @@ LacteaStatus lactea_set_auto_hard_cut_mode(LacteaEngine *engine, uint8_t mode);
 // `engine` valid; `out` writable.
 LacteaStatus lactea_get_auto_hard_cut_mode(const LacteaEngine *engine, uint8_t *out);
 
+// The compat mode the engine is running now, never `LACTEA_COMPAT_AUTO`: with
+// `LACTEA_COMPAT_AUTO` it is the mode the last successfully loaded preset resolved to (the creation
+// mode, `LACTEA_COMPAT_PROJECTM`, before the first load); with a fixed mode it is that mode.
+//
+// # Safety
+// `engine` valid; `out` writable.
+LacteaStatus lactea_get_compat(const LacteaEngine *engine, LacteaCompat *out);
+
 // Read the preset-switching settings (see `LacteaSwitchSettings`).
 //
 // # Safety
@@ -438,6 +464,7 @@ LacteaStatus lactea_get_switch_settings(const LacteaEngine *engine, LacteaSwitch
 
 // Apply preset-switching settings (see `LacteaSwitchSettings`). Typical use: read, change a field,
 // write back. A write that does not change `preset_locked` leaves the pending request state alone.
+// A NaN or infinite field is `InvalidArgument` and nothing is applied.
 //
 // # Safety
 // `engine` valid; `settings` readable.
@@ -445,7 +472,8 @@ LacteaStatus lactea_set_switch_settings(LacteaEngine *engine, const LacteaSwitch
 
 // Did the last rendered frames ask for a preset change (`projectm_preset_switch_requested_event`)?
 // Returns `true` once per request and stores `*is_hard_cut` (beat-driven cut vs display time up;
-// NULL is allowed). The host then loads the next preset itself. Requests only happen while a preset
+// NULL is allowed). A NULL `engine` returns `false` and sets `lactea_last_error`. The host then
+// loads the next preset itself. Requests only happen while a preset
 // loaded through this API is running, the preset is not locked, and (projectM beat hard cuts) hard
 // cuts are enabled. With `LACTEA_COMPAT_MILKDROP3` and a non-zero auto hard cut mode
 // (`LacteaConfig::auto_hard_cut_mode`, `lactea_set_auto_hard_cut_mode`) a beat-driven auto hard

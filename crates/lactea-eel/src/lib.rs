@@ -17,8 +17,8 @@
 //! # Dialects
 //!
 //! [`Dialect::ProjectMEval`] (the default) is the behaviour described above.
-//! [`Dialect::NsEel2`] is Cockos ns-eel2 as MilkDrop 3 ships it (numeric rules, name rules, RAM
-//! model, function set; see `docs/md3.md`).  The dialect is chosen when the shared
+//! [`Dialect::NsEel2`] is Cockos ns-eel2 as MilkDrop 3 ships it (its source rewriter and scanner, numeric
+//! rules, name rules, RAM model, function set; see `docs/md3.md`).  The dialect is chosen when the shared
 //! [`GlobalMemory`] is created ([`GlobalMemory::with_dialect`]); every [`Context`] on it follows.
 //!
 //! ```
@@ -41,6 +41,7 @@ mod fast;
 mod lexer;
 mod memory;
 mod ns;
+mod ns_pre;
 mod parser;
 mod rng;
 mod tree;

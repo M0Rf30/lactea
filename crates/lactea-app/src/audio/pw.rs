@@ -47,6 +47,8 @@ pub struct PipewireCapture {
     quit: pw::channel::Sender<Quit>,
     thread: Option<JoinHandle<()>>,
     rate: u32,
+    /// Resolved `--pipewire-target`; `None` while following the default sink.
+    target: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -439,8 +441,25 @@ fn thread_main(
 
 impl PipewireCapture {
     /// Start capturing the default sink's monitor at `rate` Hz (stereo). `target` optionally
-    /// names a specific node (`node.name` or object serial) instead of following the default.
+    /// names a specific node (`node.name` or object serial) instead of following the default;
+    /// a target that matches no node is an error, because the session manager would silently
+    /// link the default sink instead.
     pub fn start(rate: u32, target: Option<String>) -> Result<Self, String> {
+        let target_label = match &target {
+            Some(t) => {
+                let snap = snapshot()?;
+                let n = find_target(&snap.nodes, t).ok_or_else(|| {
+                    format!(
+                        "no PipeWire node has node.name or object.serial '{t}' (see --list-devices)"
+                    )
+                })?;
+                Some(format!(
+                    "'{}' ({}, node {})",
+                    n.info.desc, n.info.name, n.id
+                ))
+            }
+            None => None,
+        };
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(RING_FRAMES * CHANNELS);
         let shared = Arc::new(SourceShared::default());
         let info = Arc::new(PwInfo::default());
@@ -471,7 +490,14 @@ impl PipewireCapture {
             quit: quit_tx,
             thread: Some(thread),
             rate,
+            target: target_label,
         })
+    }
+
+    /// The explicitly requested node, resolved ("description (name, node id)"); `None` while
+    /// following the default sink.
+    pub fn target(&self) -> Option<&str> {
+        self.target.as_deref()
     }
 }
 
@@ -481,7 +507,12 @@ impl AudioSource for PipewireCapture {
         let state = self.info.state.lock().clone();
         if node.is_empty() {
             format!(
-                "PipeWire default-sink monitor ({})",
+                "PipeWire {} ({})",
+                self.target
+                    .as_deref()
+                    .map_or("default-sink monitor".to_string(), |t| format!(
+                        "target {t}"
+                    )),
                 if state.is_empty() {
                     "connecting"
                 } else {
@@ -515,8 +546,22 @@ impl Drop for PipewireCapture {
     }
 }
 
-/// One line per audio sink for `--list-devices`, `*` marking the default.
-pub fn list_sinks() -> Result<Vec<String>, String> {
+/// A node of the PipeWire graph as seen by a one-shot registry snapshot.
+struct SnapNode {
+    id: u32,
+    /// `object.serial`, the stable selector `target.object` accepts besides `node.name`.
+    serial: Option<String>,
+    info: NodeInfo,
+}
+
+struct Snapshot {
+    nodes: Vec<SnapNode>,
+    /// `node.name` of the `default.audio.sink` metadata entry.
+    default_sink: Option<String>,
+}
+
+/// Connect, collect every node and the `default` metadata, disconnect.
+fn snapshot() -> Result<Snapshot, String> {
     pw::init();
     let mainloop = pw::main_loop::MainLoopRc::new(None).map_err(|e| e.to_string())?;
     let context = pw::context::ContextRc::new(&mainloop, None).map_err(|e| e.to_string())?;
@@ -524,7 +569,7 @@ pub fn list_sinks() -> Result<Vec<String>, String> {
         .connect_rc(None)
         .map_err(|e| format!("cannot connect to PipeWire: {e}"))?;
     let registry = core.get_registry_rc().map_err(|e| e.to_string())?;
-    let nodes: Rc<RefCell<Vec<(u32, NodeInfo)>>> = Rc::default();
+    let nodes: Rc<RefCell<Vec<SnapNode>>> = Rc::default();
     let default_sink: Rc<RefCell<Option<String>>> = Rc::default();
     let metas: Rc<RefCell<Vec<(Metadata, MetadataListener)>>> = Rc::default();
     let weak = registry.downgrade();
@@ -536,19 +581,17 @@ pub fn list_sinks() -> Result<Vec<String>, String> {
                 let Some(props) = g.props else { return };
                 match g.type_ {
                     ObjectType::Node => {
-                        let class = props.get("media.class").unwrap_or("");
-                        if class == "Audio/Sink" {
-                            let name = props.get("node.name").unwrap_or("").to_string();
-                            let desc = props.get("node.description").unwrap_or(&name).to_string();
-                            nodes.borrow_mut().push((
-                                g.id,
-                                NodeInfo {
-                                    name,
-                                    desc,
-                                    class: class.to_string(),
-                                },
-                            ));
-                        }
+                        let name = props.get("node.name").unwrap_or("").to_string();
+                        let desc = props.get("node.description").unwrap_or(&name).to_string();
+                        nodes.borrow_mut().push(SnapNode {
+                            id: g.id,
+                            serial: props.get("object.serial").map(str::to_string),
+                            info: NodeInfo {
+                                name,
+                                desc,
+                                class: props.get("media.class").unwrap_or("").to_string(),
+                            },
+                        });
                     }
                     ObjectType::Metadata if props.get("metadata.name") == Some("default") => {
                         if let Some(reg) = weak.upgrade()
@@ -574,39 +617,66 @@ pub fn list_sinks() -> Result<Vec<String>, String> {
             }
         })
         .register();
-    // Two round trips: registry burst, then the metadata properties of what we bound.
-    let pending = Rc::new(Cell::new(2u32));
+    // Two round trips. The first `done` means the registry burst (and with it our `bind` of
+    // the metadata object) reached the server. Only a sync issued *after* that one is answered
+    // behind the metadata's property events, so it is sent from the first `done` handler
+    // rather than back to back with the first sync.
+    let first_done = Rc::new(Cell::new(false));
+    let core_weak = core.downgrade();
     let _core_l = core
         .add_listener_local()
         .done({
-            let (ml, pending) = (mainloop.clone(), pending.clone());
+            let (ml, first_done) = (mainloop.clone(), first_done.clone());
             move |_, _| {
-                pending.set(pending.get().saturating_sub(1));
-                if pending.get() == 0 {
+                if first_done.replace(true) {
                     ml.quit();
+                } else if let Some(core) = core_weak.upgrade() {
+                    let _ = core.sync(1);
                 }
             }
         })
         .register();
     let _ = core.sync(0);
-    let _ = core.sync(1);
     // Safety net: never hang.
     let ml = mainloop.clone();
     let timer = mainloop.loop_().add_timer(move |_| ml.quit());
     timer.update_timer(Some(Duration::from_secs(3)), None);
     mainloop.run();
-    let default = default_sink.borrow().clone();
-    let mut out: Vec<String> = nodes
-        .borrow()
+    let default_sink = default_sink.borrow().clone();
+    let nodes = nodes.take();
+    Ok(Snapshot {
+        nodes,
+        default_sink,
+    })
+}
+
+/// The node `--pipewire-target` names: `node.name` or `object.serial`, exactly.
+fn find_target<'a>(nodes: &'a [SnapNode], target: &str) -> Option<&'a SnapNode> {
+    nodes
         .iter()
-        .map(|(id, n)| {
-            let star = if default.as_deref() == Some(n.name.as_str()) {
-                "*"
-            } else {
-                " "
-            };
-            format!(" {star} {} ({}, node {id}) [{}]", n.desc, n.name, n.class)
-        })
+        .find(|n| n.info.name == target || n.serial.as_deref() == Some(target))
+}
+
+fn sink_line(n: &SnapNode, default_sink: Option<&str>) -> String {
+    let star = if default_sink == Some(n.info.name.as_str()) {
+        "*"
+    } else {
+        " "
+    };
+    format!(
+        " {star} {} ({}, node {}) [{}]",
+        n.info.desc, n.info.name, n.id, n.info.class
+    )
+}
+
+/// One line per audio sink for `--list-devices`, `*` marking the default.
+pub fn list_sinks() -> Result<Vec<String>, String> {
+    let snap = snapshot()?;
+    let mut out: Vec<String> = snap
+        .nodes
+        .iter()
+        .filter(|n| n.info.class == "Audio/Sink")
+        .map(|n| sink_line(n, snap.default_sink.as_deref()))
         .collect();
     out.sort();
     Ok(out)
@@ -616,6 +686,18 @@ pub fn list_sinks() -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
+    fn node(id: u32, name: &str, serial: Option<&str>, class: &str) -> SnapNode {
+        SnapNode {
+            id,
+            serial: serial.map(str::to_string),
+            info: NodeInfo {
+                name: name.into(),
+                desc: format!("{name} desc"),
+                class: class.into(),
+            },
+        }
+    }
+
     #[test]
     fn extracts_default_sink_name() {
         assert_eq!(
@@ -624,5 +706,29 @@ mod tests {
         );
         assert_eq!(json_name(r#"{ "name" : "x" }"#).as_deref(), Some("x"));
         assert_eq!(json_name("{}"), None);
+    }
+
+    #[test]
+    fn target_matches_node_name_or_serial_only() {
+        let nodes = [
+            node(40, "alsa_output.a", Some("101"), "Audio/Sink"),
+            node(41, "alsa_output.b", Some("102"), "Audio/Sink"),
+        ];
+        assert_eq!(find_target(&nodes, "alsa_output.b").map(|n| n.id), Some(41));
+        assert_eq!(find_target(&nodes, "101").map(|n| n.id), Some(40));
+        // The registry id is not a documented selector; a substring is not a name.
+        assert!(find_target(&nodes, "40").is_none());
+        assert!(find_target(&nodes, "alsa_output").is_none());
+        assert!(find_target(&nodes, "").is_none());
+    }
+
+    #[test]
+    fn sink_line_marks_only_the_default() {
+        let a = node(40, "alsa_output.a", None, "Audio/Sink");
+        let b = node(41, "alsa_output.b", None, "Audio/Sink");
+        let default = Some("alsa_output.b");
+        assert!(sink_line(&a, default).starts_with("   "));
+        assert!(sink_line(&b, default).starts_with(" * "));
+        assert!(sink_line(&b, None).starts_with("   "));
     }
 }

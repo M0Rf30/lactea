@@ -305,6 +305,37 @@ fn color_key_hides_matching_texels_only_for_static_images() {
     assert!(near(rig.centre_at(&mut e, 0.0, 0), [255, 0, 0]));
 }
 
+/// A sprite and a shader texture are decoded once per provider: a reload (here with another colour key, which must
+/// not leak into the shared decode) does not ask again, and `set_texture_provider` starts from scratch.
+#[test]
+fn reloading_a_sprite_preset_does_not_decode_it_again() {
+    let rig = rig_or_skip!();
+    let (p, asked) = provider(Some(red()), Some(red()));
+    let mut e = rig.engine(Compat::MilkDrop3, p);
+    let load = |e: &mut Engine, key: &str| {
+        e.load_preset(
+            preset(&format!("SpriteColorKey={key}\nSpriteBurn=0\n"), "").as_bytes(),
+            "k",
+            Transition::Cut,
+        )
+        .unwrap()
+    };
+    load(&mut e, "0xFF0000");
+    assert!(near(rig.centre_at(&mut e, 0.0, 0), [0, 0, 0]), "keyed out");
+    let report = load(&mut e, "0x000000");
+    assert_eq!(report.sprite.as_deref(), Some("sprites\\red.png"));
+    assert!(
+        near(rig.centre_at(&mut e, 0.0, 0), [255, 0, 0]),
+        "the first load's key did not change the shared decode"
+    );
+    assert_eq!(*asked.borrow(), vec!["sprite sprites\\red.png"]);
+
+    let (p2, asked2) = provider(Some(red()), None);
+    e.set_texture_provider(Box::new(p2));
+    load(&mut e, "0x000000");
+    assert_eq!(*asked2.borrow(), vec!["sprite sprites\\red.png"]);
+}
+
 /// GIF sprite: the frame follows `fmod(time since the sprite started, total)` with delays 0.1 / 0.2 / 0.05.
 #[test]
 fn gif_sprite_frames_follow_the_delays_and_loop() {

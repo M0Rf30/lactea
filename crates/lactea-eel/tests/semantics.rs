@@ -221,6 +221,29 @@ fn rand_stream_can_be_shared_between_global_memories() {
     assert_eq!(b.reg(3), 0.0, "registers are per preset");
 }
 
+/// Contexts on several threads may draw from one stream at the same time: the values are then unspecified, but
+/// every draw stays a valid `rand()` result (no out-of-range state, no panic).
+#[test]
+fn rand_stream_survives_concurrent_draws() {
+    let owner = GlobalMemory::new();
+    owner.set_rng_seed(1);
+    std::thread::scope(|s| {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let mem = Arc::new(GlobalMemory::sharing_rng_with(&owner));
+                s.spawn(move || {
+                    let mut c = Context::new(mem);
+                    let p = c.compile("x = rand(100)").unwrap();
+                    (0..5000).all(|_| (0.0..=100.0).contains(&c.run(&p)))
+                })
+            })
+            .collect();
+        for w in workers {
+            assert!(w.join().unwrap());
+        }
+    });
+}
+
 #[test]
 fn programs_are_bound_to_their_context() {
     let g = Arc::new(GlobalMemory::new());

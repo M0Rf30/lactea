@@ -750,6 +750,32 @@ impl super::Engine {
         }
     }
 
+    /// The mesh size changed from `old`: the blend in progress keeps its pattern on the new grid (a double preset
+    /// regenerates it from its header values, any other blend resamples the old mesh to the nearest vertex), so no
+    /// later frame or resize sees a pattern of the wrong length.
+    pub(super) fn md2_follow_mesh(&mut self, old: [u32; 2]) {
+        let new = self.cfg.mesh;
+        let Some(m) = self.md2.as_mut() else {
+            return;
+        };
+        if old == new {
+            return;
+        }
+        let (ow, oh) = (old[0] as usize + 1, old[1] as usize + 1);
+        let (nw, nh) = (new[0] as usize + 1, new[1] as usize + 1);
+        let src = std::mem::take(&mut m.pattern);
+        m.pattern = if src.len() == ow * oh {
+            let at = |i: usize, n: usize, o: usize| (i * (o - 1) + (n - 1) / 2) / (n - 1);
+            (0..nh)
+                .flat_map(|y| (0..nw).map(move |x| (x, y)))
+                .map(|(x, y)| src[at(y, nh, oh) * ow + at(x, nw, ow)])
+                .collect()
+        } else {
+            vec![[1.0, 0.0]; nw * nh]
+        };
+        self.md3_refresh_pattern();
+    }
+
     /// `LoadPreset` for `Compat::MilkDrop3` and `.milk2`: recognises double presets, enters them (hard load or soft
     /// transition in) and defers the next preset while one is on screen (the soft-out of `progressMode` 5). Other
     /// requests continue as ordinary loads.
@@ -818,6 +844,7 @@ impl super::Engine {
         let report = PresetReport {
             name: name.to_owned(),
             preset_version: parsed.milkdrop_preset_version,
+            compat: self.cfg.compat,
             ..Default::default()
         };
         let now = self.clock.now as f32;
@@ -894,15 +921,7 @@ impl super::Engine {
         name: &str,
         launch: BlendLaunch,
     ) -> Result<PresetReport, EngineError> {
-        let mut renderer = match self.spare.take() {
-            Some(r) => r,
-            None => self
-                .active
-                .as_ref()
-                .expect("engine always owns a renderer")
-                .renderer
-                .sibling(),
-        };
+        let mut renderer = self.acquire_renderer();
         renderer.reset_images();
         let (mut old, rep1) = match self.build_loaded(&milk2.preset1, name, &mut renderer, false) {
             Ok(v) => v,

@@ -114,6 +114,12 @@ pub struct Options {
     /// names. [`translate_wrapped`] needs the same flag for text from [`md3_wrapped_hlsl`]. Default `false`: the
     /// output is then identical to a translator without MD3 support.
     pub md3: bool,
+    /// Emulate Mesa's backward inter-shader code motion (`nir_opt_varyings`), which projectM's GL path goes through:
+    /// a sum, difference or quotient of an interpolated input (`uv`, `rad`, `hue_shader`, ...) and a convergent value
+    /// (constants, uniforms, `time`) is computed per vertex and interpolated, while wgpu interpolates the input and
+    /// adds in the fragment stage, which differs by about one ulp. With this flag [`Translated::folds`] lists the
+    /// per-vertex values and the fragment shader reads them as extra varyings. Default `false`.
+    pub gl_varying_fold: bool,
 }
 
 impl Default for Options {
@@ -123,6 +129,7 @@ impl Default for Options {
             floor_mod: false,
             projectm_flavor: false,
             md3: false,
+            gl_varying_fold: false,
         }
     }
 }
@@ -139,6 +146,13 @@ pub struct Translated {
     pub texsize_params: Vec<String>,
     /// Non-fatal notes (e.g. implicit conversions that MD2 would warn about).
     pub warnings: Vec<String>,
+    /// Per-vertex values the fragment shader reads as extra varyings (see [`Options::gl_varying_fold`]). Entry `k` is a
+    /// WGSL function
+    /// `fn fold_k(vs_uv: vec4<f32>, vs_rad_ang: vec2<f32>, vs_diffuse: vec4<f32>) -> f32` for the vertex stage (the
+    /// module declares the `lactea-abi` uniform bindings; `vs_*` are the vertex's own `uv`, `rad_ang` and `diffuse`
+    /// varyings); `fs_main` reads it as component `k % 4` of `in.fold{k / 4}`, the `vec4<f32>` member of `VsOut` at
+    /// `@location(3 + k / 4)`. Empty unless [`Options::gl_varying_fold`] is set and the shader has such a value.
+    pub folds: Vec<String>,
 }
 
 /// Translate one MD2 warp/composite shader (`src` = the preset's `warp_N=` / `comp_N=` lines
@@ -177,8 +191,12 @@ pub fn translate_wrapped(
     if !tr.fns.contains_key("PS") {
         return Err(TranslateError::Wrap("no PS function".into()));
     }
+    if opts.gl_varying_fold {
+        tr.plan_folds(kind);
+    }
     let ps = tr.translate_fn("PS", 0)?;
     let e = tr.finish(&ps, kind);
+    let folds = std::mem::take(&mut tr.folds);
 
     // texture interface: samplers in declaration order (== D3D sampler register order)
     let mut samplers = e.samplers;
@@ -219,7 +237,21 @@ pub fn translate_wrapped(
     if opts.derivative_uniformity_off {
         wgsl.push_str("diagnostic(off, derivative_uniformity);\n");
     }
-    wgsl.push_str(lactea_abi::WGSL_COMMON);
+    if folds.is_empty() {
+        wgsl.push_str(lactea_abi::WGSL_COMMON);
+    } else {
+        // the fragment stage's `VsOut` carries the folds as `vec4` members after `rad_ang`
+        const TAIL: &str = "    @location(2) rad_ang: vec2<f32>,\n};";
+        let mut tail = String::from("    @location(2) rad_ang: vec2<f32>,\n");
+        for j in 0..folds.len().div_ceil(4) {
+            tail.push_str(&format!("    @location({}) fold{j}: vec4<f32>,\n", 3 + j));
+        }
+        tail.push_str("};");
+        if !lactea_abi::WGSL_COMMON.contains(TAIL) {
+            return Err(TranslateError::Wrap("unexpected WGSL_COMMON layout".into()));
+        }
+        wgsl.push_str(&lactea_abi::WGSL_COMMON.replacen(TAIL, &tail, 1));
+    }
     wgsl.push_str(&bindings);
     if iface.textures.iter().any(|t| t.source == TexSource::Fft) {
         wgsl.push_str(&emit::fft::helper_wgsl());
@@ -234,5 +266,6 @@ pub fn translate_wrapped(
         interface: iface,
         texsize_params,
         warnings: e.warnings,
+        folds,
     })
 }

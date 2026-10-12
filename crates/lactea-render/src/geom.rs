@@ -185,7 +185,19 @@ pub fn push_line(
 /// A line strip as `LineList` vertex pairs (`GL_LINE_STRIP` semantics: every segment is rasterised on its own;
 /// vertex colours interpolate along each segment). `color_of(i)` is the colour of point `i`.
 pub fn strip_segments(pts: &[[f32; 2]], color_of: impl Fn(usize) -> [f32; 4]) -> Vec<WfVertex> {
-    let mut out = Vec::with_capacity(pts.len().saturating_sub(1) * 2);
+    let mut out = Vec::new();
+    strip_segments_into(&mut out, pts, color_of);
+    out
+}
+
+/// [`strip_segments`] into a reusable buffer (cleared first).
+pub fn strip_segments_into(
+    out: &mut Vec<WfVertex>,
+    pts: &[[f32; 2]],
+    color_of: impl Fn(usize) -> [f32; 4],
+) {
+    out.clear();
+    out.reserve(pts.len().saturating_sub(1) * 2);
     for i in 0..pts.len().saturating_sub(1) {
         out.push(WfVertex {
             pos: pts[i],
@@ -196,7 +208,6 @@ pub fn strip_segments(pts: &[[f32; 2]], color_of: impl Fn(usize) -> [f32; 4]) ->
             color: color_of(i + 1),
         });
     }
-    out
 }
 
 /// `D3DPT_POINTLIST` with `D3DRS_POINTSIZE = size`: an axis-aligned `size`x`size` pixel square
@@ -225,7 +236,7 @@ pub fn push_point(
 
 /// Triangle fan `v[0], v[1..]` -> triangle list. `colors` per vertex.
 pub fn fan_to_list(pts: &[[f32; 2]], colors: &[[f32; 4]]) -> Vec<WfVertex> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(3 * pts.len().saturating_sub(2));
     for i in 1..pts.len() - 1 {
         for k in [0, i, i + 1] {
             out.push(WfVertex {
@@ -235,6 +246,19 @@ pub fn fan_to_list(pts: &[[f32; 2]], colors: &[[f32; 4]]) -> Vec<WfVertex> {
         }
     }
     out
+}
+
+/// [`fan_to_list`] appended to `out` for a fan whose centre has colour `centre` and every other vertex `rim`.
+pub fn push_fan(out: &mut Vec<WfVertex>, pts: &[[f32; 2]], centre: [f32; 4], rim: [f32; 4]) {
+    out.reserve(3 * pts.len().saturating_sub(2));
+    for i in 1..pts.len() - 1 {
+        for k in [0, i, i + 1] {
+            out.push(WfVertex {
+                pos: pts[k],
+                color: if k == 0 { centre } else { rim },
+            });
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------------------
@@ -391,23 +415,35 @@ pub fn warp_gpu_vertex(
     }
 }
 
-/// Triangle list of the warp mesh for the GPU vertex stage (same cells / triangulation as
-/// [`build_warp_vertices`]); `vars` is indexed like `warp_uv` (lactea mesh index). Positions, `rad` and
-/// `ang` are projectM's own floats ([`MeshGeometry::projectm_vertex`]).
+/// The vertices of the warp mesh for the GPU vertex stage, one per mesh vertex in lactea mesh index order
+/// ([`MeshGeometry::index`]; also the point order of the UV readback); `vars` is indexed the same way. Positions,
+/// `rad` and `ang` are projectM's own floats ([`MeshGeometry::projectm_vertex`]). [`warp_gpu_indices`] gives the
+/// triangles over them.
 pub fn build_warp_gpu_vertices(
     g: &MeshGeometry,
     vars: &[crate::warp_mesh::VertexVars],
-    diag_flip: bool,
 ) -> Vec<WarpVertex> {
+    let mut out = Vec::with_capacity(g.vertex_count());
+    for y in 0..=g.gy {
+        for x in 0..=g.gx {
+            out.push(warp_gpu_vertex(g, vars, x, y));
+        }
+    }
+    out
+}
+
+/// Triangle list of the warp mesh over [`build_warp_gpu_vertices`] (same cells / triangulation as
+/// [`build_warp_vertices`]).
+pub fn warp_gpu_indices(g: &MeshGeometry, diag_flip: bool) -> Vec<u32> {
     let (gx, gy) = (g.gx, g.gy);
     let mut out = Vec::with_capacity((gx * gy * 6) as usize);
-    let mk = |x: u32, y: u32| warp_gpu_vertex(g, vars, x, y);
+    let ix = |x: u32, y: u32| g.index(x, y) as u32;
     for cy in 0..gy {
         for cx in 0..gx {
-            let a = mk(cx, cy);
-            let b = mk(cx + 1, cy);
-            let c = mk(cx, cy + 1);
-            let d = mk(cx + 1, cy + 1);
+            let a = ix(cx, cy);
+            let b = ix(cx + 1, cy);
+            let c = ix(cx, cy + 1);
+            let d = ix(cx + 1, cy + 1);
             if diag_flip {
                 // projectM's index buffer: `(v, v+1, v+gx+1)`, `(v+1, v+gx+1, v+gx+2)` with `v` the top-left vertex
                 // of its row-0-on-top mesh, i.e. `c d a` / `d a b` here. The order is the GPU's attribute-setup order.
@@ -784,10 +820,11 @@ pub fn motion_vector_lines(
 // -----------------------------------------------------------------------------------------
 
 /// Geometry of one custom-shape instance (`DrawCustomShapes`).
+#[derive(Default)]
 pub struct ShapeGeom {
     /// Fan: centre + `sides` corners + closing corner (`sides + 2` points), clip space.
     pub pts: Vec<[f32; 2]>,
-    /// Texture coordinates for the textured variant (same indexing).
+    /// Texture coordinates for the textured variant (same indexing); empty unless asked for.
     pub uv: Vec<[f32; 2]>,
     #[allow(dead_code)]
     pub sides: usize,
@@ -809,33 +846,61 @@ pub fn shape_geometry_tex(s: &ShapeInstance, aspect_y: f32, tex_aspect_y: f32) -
 
 /// [`shape_geometry_tex`] with the compat mode's side limit (`CompatRules::max_shape_sides`: 100, 500 under
 /// MilkDrop 3, whose vertex buffers hold the `sides + 2` fan vertices).
+#[cfg(test)]
 pub fn shape_geometry_tex_max(
     s: &ShapeInstance,
     aspect_y: f32,
     tex_aspect_y: f32,
     max_sides: i32,
 ) -> ShapeGeom {
+    let mut g = ShapeGeom::default();
+    shape_geometry_into(&mut g, s, aspect_y, tex_aspect_y, max_sides, true);
+    g
+}
+
+/// The geometry of a shape instance into `g`, reusing its buffers. The texture coordinates (`g.uv`) are only
+/// computed with `with_uv`: an untextured shape never reads them.
+pub fn shape_geometry_into(
+    g: &mut ShapeGeom,
+    s: &ShapeInstance,
+    aspect_y: f32,
+    tex_aspect_y: f32,
+    max_sides: i32,
+    with_uv: bool,
+) {
     let sides = s.sides.clamp(3, max_sides.max(3)) as usize;
     let pi = 3.1415927f32;
     // clip (fixed-function y is the negation): `static_cast<float>(x * 2.0 - 1.0)` with the VM's double `x`
     let c0 = [(s.x * 2.0 - 1.0) as f32, (s.y * 2.0 - 1.0) as f32];
-    let mut pts = vec![c0];
-    let mut uv = vec![[0.5f32, 0.5f32]];
+    g.pts.clear();
+    g.uv.clear();
+    g.pts.reserve(sides + 2);
+    g.pts.push(c0);
+    if with_uv {
+        g.uv.reserve(sides + 2);
+        g.uv.push([0.5f32, 0.5f32]);
+    }
     for j in 1..sides + 1 {
         let t = (j - 1) as f32 / sides as f32;
         let a = t * pi * 2.0 + s.ang + pi * 0.25;
-        pts.push([c0[0] + s.rad * a.cos() * aspect_y, c0[1] - s.rad * a.sin()]);
-        let ta = t * pi * 2.0 + s.tex_ang + pi * 0.25;
-        // projectM: `1.0f - (0.5f - 0.5f * sinf(angle) / zoom)` (vertical flip); the same real number as
-        // `0.5 + 0.5 * sin / zoom` but the f32 rounding of the two differs by an ulp, which flips nearest-filtered ties
-        uv.push([
-            0.5 + 0.5 * ta.cos() / s.tex_zoom * tex_aspect_y,
-            1.0 - (0.5 - 0.5 * ta.sin() / s.tex_zoom),
-        ]);
+        g.pts
+            .push([c0[0] + s.rad * a.cos() * aspect_y, c0[1] - s.rad * a.sin()]);
+        if with_uv {
+            let ta = t * pi * 2.0 + s.tex_ang + pi * 0.25;
+            // projectM: `1.0f - (0.5f - 0.5f * sinf(angle) / zoom)` (vertical flip); the same real number as
+            // `0.5 + 0.5 * sin / zoom` but the f32 rounding of the two differs by an ulp, which flips
+            // nearest-filtered ties
+            g.uv.push([
+                0.5 + 0.5 * ta.cos() / s.tex_zoom * tex_aspect_y,
+                1.0 - (0.5 - 0.5 * ta.sin() / s.tex_zoom),
+            ]);
+        }
     }
-    pts.push(pts[1]);
-    uv.push(uv[1]);
-    ShapeGeom { pts, uv, sides }
+    g.pts.push(g.pts[1]);
+    if with_uv {
+        g.uv.push(g.uv[1]);
+    }
+    g.sides = sides;
 }
 
 /// Darken-center triangle fan (clip space), colours: centre alpha 3/32, rim 0.
@@ -929,36 +994,104 @@ const SUB_PIXEL: f32 = 256.0;
 ///
 /// wgpu / D3D9 (y down, top-left rule) give such a pixel to the polygon *below* the edge; projectM gives it to the
 /// polygon *above* (bottom edge inclusive, top edge exclusive, in image space). Both are the same as shifting the
-/// edge down by a hair, so every vertex of a horizontal edge whose snapped row is `k + 1/2` moves down by one
-/// sub-pixel step (`1/256` px, the smallest move that survives the GPU's own snapping). All vertices at the same
+/// edge down by a hair, so every vertex of a horizontal *boundary* edge whose snapped row is `k + 1/2` moves down by
+/// one sub-pixel step (`1/256` px, the smallest move that survives the GPU's own snapping). All vertices at the same
 /// snapped position move together, so polygons built from several triangles stay watertight. Vertical edges and
 /// every other position are untouched (the left-edge rule is the same in both).
+///
+/// An edge that two triangles of the list share (the spokes of a fan) is inside the polygon: its pixels are drawn
+/// once whichever side owns them, so it never triggers a move. The colour of a moved vertex is moved along the
+/// triangle's own colour plane, so the interpolated colour at every pixel centre stays what it was: only the
+/// coverage changes (projectM's fills are exact there, a plain move would flip colour roundings by one level).
 pub fn gl_fill_ties(tris: &mut [WfVertex], w: f32, h: f32) {
+    gl_fill_ties_by(tris, w, h, |v| &mut v.pos, 4, |v, i| &mut v.color[i]);
+}
+
+/// [`gl_fill_ties`] for any vertex type: `pos` projects a vertex onto its clip-space position and `attr(v, i)` for
+/// `i < n_attr` onto the vertex attributes that are interpolated linearly in screen space.
+pub fn gl_fill_ties_by<T>(
+    tris: &mut [T],
+    w: f32,
+    h: f32,
+    mut pos: impl FnMut(&mut T) -> &mut [f32; 2],
+    n_attr: usize,
+    mut attr: impl FnMut(&mut T, usize) -> &mut f32,
+) {
     let snap = |v: f32| (v * SUB_PIXEL).round_ties_even() as i64;
-    let key = |p: [f32; 2]| {
-        let q = to_px(p, w, h);
+    let key = |pos: &mut dyn FnMut(&mut T) -> &mut [f32; 2], v: &mut T| {
+        let q = to_px(*pos(v), w, h);
         (snap(q[0]), snap(q[1]))
     };
     let half = SUB_PIXEL as i64 / 2;
-    let mut moved: Vec<(i64, i64)> = Vec::new();
-    for t in tris.as_chunks::<3>().0 {
+    let mut edges: Vec<[(i64, i64); 2]> = Vec::new();
+    for t in tris.as_chunks_mut::<3>().0 {
+        let k = [
+            key(&mut pos, &mut t[0]),
+            key(&mut pos, &mut t[1]),
+            key(&mut pos, &mut t[2]),
+        ];
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
-            let (ka, kb) = (key(t[a].pos), key(t[b].pos));
+            let (ka, kb) = (k[a], k[b]);
             if ka.1 == kb.1 && ka.0 != kb.0 && ka.1.rem_euclid(SUB_PIXEL as i64) == half {
-                moved.push(ka);
-                moved.push(kb);
+                edges.push(if ka < kb { [ka, kb] } else { [kb, ka] });
             }
         }
+    }
+    edges.sort_unstable();
+    let mut moved: Vec<(i64, i64)> = Vec::new();
+    let mut i = 0;
+    while i < edges.len() {
+        let n = edges[i..].iter().take_while(|e| **e == edges[i]).count();
+        if n == 1 {
+            moved.extend(edges[i]);
+        }
+        i += n;
     }
     if moved.is_empty() {
         return;
     }
     moved.sort_unstable();
     moved.dedup();
-    for v in tris.iter_mut() {
-        let k = key(v.pos);
-        if moved.binary_search(&k).is_ok() {
-            v.pos[1] = from_px([0.0, (k.1 + 1) as f32 / SUB_PIXEL], w, h)[1];
+    for t in tris.as_chunks_mut::<3>().0 {
+        let k = [
+            key(&mut pos, &mut t[0]),
+            key(&mut pos, &mut t[1]),
+            key(&mut pos, &mut t[2]),
+        ];
+        let hit = k.map(|k| moved.binary_search(&k).is_ok());
+        if !hit.contains(&true) {
+            continue;
+        }
+        let p = [
+            to_px(*pos(&mut t[0]), w, h),
+            to_px(*pos(&mut t[1]), w, h),
+            to_px(*pos(&mut t[2]), w, h),
+        ];
+        let (e1, e2) = (
+            [p[1][0] - p[0][0], p[1][1] - p[0][1]],
+            [p[2][0] - p[0][0], p[2][1] - p[0][1]],
+        );
+        let area = e1[0] * e2[1] - e2[0] * e1[1];
+        for j in 0..n_attr {
+            let a = [
+                *attr(&mut t[0], j),
+                *attr(&mut t[1], j),
+                *attr(&mut t[2], j),
+            ];
+            // d attr / d y of the triangle's plane
+            let gy = (e1[0] * (a[2] - a[0]) - e2[0] * (a[1] - a[0])) / area;
+            if gy.is_finite() {
+                for i in 0..3 {
+                    if hit[i] {
+                        *attr(&mut t[i], j) = a[i] + gy / SUB_PIXEL;
+                    }
+                }
+            }
+        }
+        for i in 0..3 {
+            if hit[i] {
+                pos(&mut t[i])[1] = from_px([0.0, (k[i].1 + 1) as f32 / SUB_PIXEL], w, h)[1];
+            }
         }
     }
 }
@@ -1038,12 +1171,22 @@ mod tests {
     fn warp_gpu_triangles_use_projectms_vertex_order() {
         let g = MeshGeometry::new(4, 2, 64, 48).unwrap();
         let vars = vec![crate::warp_mesh::VertexVars::default(); g.vertex_count()];
-        let v = build_warp_gpu_vertices(&g, &vars, true);
-        assert_eq!(v.len(), 4 * 2 * 6);
+        let verts = build_warp_gpu_vertices(&g, &vars);
+        assert_eq!(verts.len(), g.vertex_count());
+        let idx = warp_gpu_indices(&g, true);
+        assert_eq!(idx.len(), 4 * 2 * 6);
+        let v: Vec<WarpVertex> = idx.iter().map(|&i| verts[i as usize]).collect();
         // first cell (lactea row 0 = image bottom): top-left c = (0, 1), top-right d = (1, 1), bottom-left a = (0, 0), b = (1, 0)
         let at = |x: u32, y: u32| warp_gpu_vertex(&g, &vars, x, y);
         let want = [at(0, 1), at(1, 1), at(0, 0), at(1, 1), at(0, 0), at(1, 0)];
         assert_eq!(&v[..6], &want[..]);
+        // MD2 order: a b c / b c d
+        let md2: Vec<WarpVertex> = warp_gpu_indices(&g, false)
+            .iter()
+            .map(|&i| verts[i as usize])
+            .collect();
+        let want = [at(0, 0), at(1, 0), at(0, 1), at(1, 0), at(0, 1), at(1, 1)];
+        assert_eq!(&md2[..6], &want[..]);
     }
 
     #[test]
@@ -1237,6 +1380,32 @@ mod tests {
         assert_eq!(shape_geometry(&s2, 1.0).sides, 100);
     }
 
+    /// An untextured shape skips the texture coordinates; the outline is the same, and a reused buffer carries nothing
+    /// over from the previous instance.
+    #[test]
+    fn untextured_shape_geometry_skips_uv_and_reuses_buffers() {
+        let big = ShapeInstance {
+            sides: 40,
+            rad: 0.3,
+            tex_zoom: 1.5,
+            tex_ang: 0.7,
+            ..Default::default()
+        };
+        let small = ShapeInstance {
+            sides: 5,
+            ..big.clone()
+        };
+        let mut g = ShapeGeom::default();
+        shape_geometry_into(&mut g, &big, 0.75, 0.75, 100, true);
+        shape_geometry_into(&mut g, &small, 0.75, 0.75, 100, false);
+        let want = shape_geometry_tex(&small, 0.75, 0.75);
+        assert_eq!(g.pts, want.pts);
+        assert_eq!(g.sides, 5);
+        assert!(g.uv.is_empty());
+        shape_geometry_into(&mut g, &small, 0.75, 0.75, 100, true);
+        assert_eq!(g.uv, want.uv);
+    }
+
     /// MilkDrop 3 (`max_shape_sides` 500): `sides` is `clamp(int(sides), 3, 500)`, the fan has `sides + 2` vertices.
     #[test]
     fn shape_sides_limit_follows_the_rule() {
@@ -1419,6 +1588,86 @@ mod tests {
             gl_fill_ties(&mut u, ww, h);
             assert_eq!(u, b, "size {size}");
         }
+    }
+
+    /// A fan `centre + closed rim` in pixel coordinates, centre colour 1, rim colour 0.2.
+    fn px_fan(centre: [f32; 2], rim: &[[f32; 2]], (w, h): (f32, f32)) -> Vec<WfVertex> {
+        let mut pts = vec![from_px(centre, w, h)];
+        pts.extend(rim.iter().map(|p| from_px(*p, w, h)));
+        let colors: Vec<[f32; 4]> = (0..pts.len())
+            .map(|k| if k == 0 { [1.0; 4] } else { [0.2; 4] })
+            .collect();
+        fan_to_list(&pts, &colors)
+    }
+
+    /// Linear interpolation of the vertex colours of a triangle at pixel position `p`.
+    fn plane_colour(t: &[WfVertex], p: [f32; 2], (w, h): (f32, f32)) -> f32 {
+        let q: Vec<[f32; 2]> = t.iter().map(|v| to_px(v.pos, w, h)).collect();
+        let d =
+            (q[1][0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (q[1][1] - q[0][1]);
+        let l1 =
+            ((p[0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (p[1] - q[0][1])) / d;
+        let l2 =
+            ((q[1][0] - q[0][0]) * (p[1] - q[0][1]) - (p[0] - q[0][0]) * (q[1][1] - q[0][1])) / d;
+        t[0].color[0] * (1.0 - l1 - l2) + t[1].color[0] * l1 + t[2].color[0] * l2
+    }
+
+    /// A fan whose top and bottom edges lie on pixel centres: those edges move down a step, the centre does not, and
+    /// the colour plane of every triangle (so the colour at any pixel) is the one it had before.
+    #[test]
+    fn gl_fill_ties_keep_the_colour_plane_of_moved_vertices() {
+        let wh = (64.0f32, 64.0f32);
+        let rim = [
+            [20.0, 10.5],
+            [44.0, 10.5],
+            [44.0, 30.5],
+            [20.0, 30.5],
+            [20.0, 10.5],
+        ];
+        let before = px_fan([32.0, 20.5], &rim, wh);
+        let mut t = before.clone();
+        gl_fill_ties(&mut t, wh.0, wh.1);
+        let dy = |i: usize| to_px(t[i].pos, wh.0, wh.1)[1] - to_px(before[i].pos, wh.0, wh.1)[1];
+        // triangles (c, r0, r1) top edge, (c, r1, r2), (c, r2, r3) bottom edge, (c, r3, r0)
+        assert!(
+            (dy(1) - 1.0 / 256.0).abs() < 1e-4 && (dy(2) - 1.0 / 256.0).abs() < 1e-4,
+            "top edge"
+        );
+        assert!(
+            (dy(7) - 1.0 / 256.0).abs() < 1e-4 && (dy(8) - 1.0 / 256.0).abs() < 1e-4,
+            "bottom edge"
+        );
+        assert_eq!(
+            t[0].pos, before[0].pos,
+            "the centre is not on a boundary edge"
+        );
+        for tri in 0..4 {
+            let (a, b) = (&before[tri * 3..tri * 3 + 3], &t[tri * 3..tri * 3 + 3]);
+            for p in [[30.0, 20.0], [26.5, 14.25], [38.0, 25.75]] {
+                let (x, y) = (plane_colour(a, p, wh), plane_colour(b, p, wh));
+                assert!((x - y).abs() < 1e-5, "triangle {tri} at {p:?}: {x} vs {y}");
+            }
+        }
+    }
+
+    /// An edge that two triangles of a fan share (a spoke) is inside the polygon, so a spoke on a pixel centre moves
+    /// nothing.
+    #[test]
+    fn gl_fill_ties_ignore_spokes_inside_the_polygon() {
+        let wh = (64.0f32, 64.0f32);
+        let rim = [
+            [44.0, 20.5],
+            [38.0, 10.2],
+            [26.0, 10.2],
+            [20.0, 20.5],
+            [26.0, 30.8],
+            [38.0, 30.8],
+            [44.0, 20.5],
+        ];
+        let before = px_fan([32.0, 20.5], &rim, wh);
+        let mut t = before.clone();
+        gl_fill_ties(&mut t, wh.0, wh.1);
+        assert_eq!(t, before);
     }
 
     #[test]

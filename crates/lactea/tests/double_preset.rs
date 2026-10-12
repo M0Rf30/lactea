@@ -275,6 +275,25 @@ fn side_at_half_splits_the_picture_and_stays_frozen() {
     assert_eq!(rig.engine.preset_name(), Some("pair.milk2"));
 }
 
+/// A mesh size change while a `.milk2` is on screen regenerates the permanent blend on the new grid: the frame
+/// that follows, and a resize after it, neither panic nor change the picture.
+#[test]
+fn mesh_size_change_keeps_the_double_preset_blend() {
+    let mut rig = rig!(Compat::MilkDrop3);
+    let text = milk2(&red(), &blue(), &side_header("0.5"));
+    rig.load(&text, "pair.milk2", Transition::Cut).unwrap();
+    let first = rig.run_to(0);
+    assert_eq!(rig.engine.set_mesh_size(40, 30), [40, 30]);
+    let after = rig.run_to(1);
+    assert!(mostly(&after, RED, 0, 19) && mostly(&after, BLUE, 46, 64));
+    assert_eq!(rig.engine.set_mesh_size(10, 8), [10, 8]);
+    rig.engine.resize(W, H);
+    // the coarser mesh moves the blend edge a little, the halves stay where they were
+    let again = rig.run_to(2);
+    assert!(mostly(&again, RED, 0, 19) && mostly(&again, BLUE, 46, 64));
+    assert!(max_abs_diff(&first, &again) < 255);
+}
+
 /// `blending_progress` is the new state's weight and is not clamped: 0 shows PRESET1 only, 1 PRESET2 only.
 #[test]
 fn progress_selects_the_roles() {

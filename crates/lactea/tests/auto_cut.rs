@@ -347,3 +347,41 @@ fn injection_is_a_milkdrop_2_family_feature() {
     rig.load(UV_COMP);
     assert!(!rig.engine.inject_comp_effect(Effect::Invert));
 }
+
+struct CountingProvider(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl lactea::TextureProvider for CountingProvider {
+    fn load(&mut self, name: &str) -> Option<lactea::Image> {
+        assert_eq!(name, "tex");
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(lactea::Image {
+            width: 2,
+            height: 2,
+            rgba8: vec![255; 16],
+        })
+    }
+
+    fn random_pool(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// An effect injection runs inside `render`: it must not ask the host for the preset's textures again.
+#[test]
+fn injecting_an_effect_does_not_reload_the_presets_textures() {
+    let preset = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=2\nPSVERSION_COMP=2\n\
+        [preset00]\nfDecay=0.5\ncomp_1=`shader_body\ncomp_2=`{\n\
+        comp_3=`  ret = tex2D(sampler_tex, uv).rgb;\ncomp_4=`}\n";
+    let Some(mut rig) = Rig::new(Compat::MilkDrop3, 0, 1.0 / 60.0) else {
+        return eprintln!("skipping: no wgpu adapter");
+    };
+    let loads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    rig.engine
+        .set_texture_provider(Box::new(CountingProvider(loads.clone())));
+    rig.load(preset);
+    let at_load = loads.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(at_load, 1, "the preset's own load asks once");
+    assert!(rig.engine.inject_comp_effect(Effect::Invert));
+    rig.step();
+    assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), at_load);
+}

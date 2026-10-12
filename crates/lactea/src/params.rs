@@ -77,11 +77,13 @@ impl Engine {
     /// preset's `meshx`/`meshy` variables follow.
     pub fn set_mesh_size(&mut self, width: u32, height: u32) -> [u32; 2] {
         let mesh = clamp_mesh_size(width, height);
+        let old = self.cfg.mesh;
         self.cfg.mesh = mesh;
         for r in self.all_renderers_mut() {
             // the mesh was clamped to an even grid above, which the renderer accepts
             let _ = r.set_mesh_size(mesh);
         }
+        self.md2_follow_mesh(old);
         mesh
     }
 

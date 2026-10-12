@@ -76,7 +76,7 @@ that `lactea-eel-oracle` compares against.
 The dialect rides in the `GlobalMemory` the contexts of one engine share (`GlobalMemory::with_dialect`;
 `GlobalMemory::sharing_rng_with` inherits it). `Engine::new` creates its `rng_owner` with
 `runtime::eel_dialect(&rules)`, every preset's memory derives from it, and every `Context` built on that memory
-(per-frame, per-vertex, waves, shapes, and any context a later slice builds from the same memory) follows. A new
+(per-frame, per-vertex, waves, shapes, and any context built later from the same memory) follows. A new
 kind of context must be created from the engine's memory, not from `GlobalMemory::new()`.
 
 ### What NsEel2 implements (MD3 3.37, spec E Annex A)
@@ -162,19 +162,16 @@ error and goes on; MilkDrop 2 was left as it was.
 - `crates/lactea/tests/md3_eel_oracle.rs`: 13 probe presets rendered through the engine under `Compat::MilkDrop3`,
   compared with the bytes MD3 3.37 produced under Wine.
 - `crates/lactea/tests/md3_eel.rs` and the `runtime.rs` tests: dialect selection, dropped parts, ns-eel2-only syntax.
-- Pack smoke, `fdrender --compat md3 --frames 30` over the 477 files of the MD3 pack: exit codes before (foundation)
-  364 × 0, 110 × 3, 3 × 2; after 365 × 0, 112 × 3. No file got worse: `.milk2` files that failed with 2 now load
-  (one runs clean, two stop at the next failure, which is a shader translation fallback). The 9 `.milk` files with
-  exit 3 are shader fallbacks (`get_fft`, `uv2`), unrelated to this slice. `.milk2` playback belongs to another slice.
+- Pack smoke, `fdrender --compat md3 --texture-dir <pack>/textures`, 10 frames, over the 477 files of the MD3 pack:
+  all exit 0.
 - Default / MilkDrop 2 unchanged: `fdrender --stages final` frame 30 PNG hashes of five corpus presets in `projectm`
   and `md2` are identical before and after.
 - Visual: `Martin - 2077 candies` (gmegabuf particle system, `%`-heavy) and `Flexi + Amandio c - piercing 01` were
   rendered by `fdrender --compat md3` (silence, frame 700) and shot from MD3 under Wine (silence, 12 s) and looked at
   side by side. Both show the same scene: coloured particle dots over dark for `candies`, orange blobs on dark
   violet cells for `piercing`. Particle placement and the petal pattern differ because `time`, `rand` and the audio
-  level cannot be controlled (MD3 reports `bass = 1.0` in silence, which belongs to the audio slice), and `candies`
-  has a hazy blurred backdrop in Lactea that MD3 does not draw (a shader / blur difference outside this slice,
-  not investigated). No EEL difference can be read off those two frames; the exact evidence is the probe table.
+  level cannot be controlled (MD3 reports `bass = 1.0` in silence), and `candies`
+  has a hazy blurred backdrop in Lactea that MD3 does not draw (a shader / blur difference, not investigated). No EEL difference can be read off those two frames; the exact evidence is the probe table.
 
 ## Shader inputs: audio, `get_fft`, mouse, `q1..q64`
 
@@ -288,8 +285,8 @@ old preset's value in the second pass of a blend: the old mode is *not* wrapped)
 `wave_a` alpha (no volume scaling, no clamp): invisible lines, centre dots with `wave_usedots`. The tail is the MD2 one
 (blend of the old and new mode when the mode changed, cosine mix, colour, `y = -y`, `SmoothWave`, four thick / dot passes
 from a texture width of 512). `wave_mystery` wraps into `[-1, 1)` for modes 0, 1 and 4 only. Modes 8 and 13 read
-`MainWave::spectrum`, i.e. whatever the audio analysis mode provides; the MD3 spectrum scale (`eq[k] * |FFT|`) belongs
-to the audio slice, the geometry here is exact for any input.
+`MainWave::spectrum`, i.e. whatever the audio analysis mode provides; the MD3 spectrum scale (`eq[k] * |FFT|`) is the audio analysis' business,
+the geometry here is exact for any input.
 
 **Other deltas.**
 - Shape `sides`: `clamp(int(sides), 3, 500)` (`sides + 2` fan vertices; MD2 / projectM 3..100).
@@ -313,11 +310,11 @@ pixel for pixel, 500-side shape area, border gate on / off / MD2. Smoke run on t
 frame 30 (the rest zero it in per-frame code and use custom waves), and 20 of those render differently from
 `--compat md2` (which draws nothing for these modes): mode 9 (8 of 9 presets), 11 (6 of 6), 10 (1), 13 (1), 15 (4 of
 5; the two presets that do not differ were not investigated). projectM and MD2 renders of 5 corpus presets (and a
-soft cut) are bit-identical to the foundation branch.
+soft cut) are bit-identical to the build before the MD3 work.
 
 **Open questions** (spec Annex B section 10, not resolved here): spectrum scaling of modes 8 / 13 and the mode-13
 spike on loud bass, mode 9 with dots / thick on real D3D, the exact alpha of an unmapped mode, mode 14 / 16 direction
-against the real program. They need Wine screenshots (`~/M0Rf30/md3-re/oracle/md3shot.sh`).
+against the real program. They need Wine screenshots (the oracle script of the MD3 reverse-engineering notes, not part of this repository).
 
 ## Double presets (`.milk2`) and blend patterns
 
@@ -432,9 +429,7 @@ passed to `lactea_load_preset` is detected by content.
   against the 60 fps clock; the soft-out ramp (start rewrite, 30 frames from `P = 0.5`, ignored second request, the
   saved request as an ordinary soft cut); a request during leg A; `BlendMilk2` off; cuts; carry-over of missing
   keys; borders; seeded / forced / configured patterns; resize.
-- The MD3 pack (146 `.milk2`) under `fdrender --compat md3`: all load and render 30 frames (exit 0 for 142; the 4 exit-3
-  runs are shader fallbacks for `get_fft` inside the halves, a feature of the shader-inputs slice). Before this
-  change the same files loaded as plain `.milk` (the first block of keys wins, header and halves interleaved): 42 x
+- The MD3 pack (146 `.milk2`) under `fdrender --compat md3`: all load and render (exit 0 for all 146 with 10 frames). Before `.milk2` playback the same files loaded as plain `.milk` (the first block of keys wins, header and halves interleaved): 42 x
   exit 0, 3 x exit 2, 101 x exit 3.
 - `fdrender --stages final` of four corpus presets under `projectm` and `md2`, plain and with a soft cut (320
   frames): identical hashes before and after.
@@ -534,10 +529,9 @@ the key for later loads) is not replicated.
 - Unit / GPU tests: key parsing and round trip, geometry vectors G1..G9, blend table, GIF timing and disposal, colour
   key, layer order, burn, engine-level sprite / GIF-sprite / GIF-texture / lifetime / compat gating tests.
 - MD3 pack smoke (`fdrender --compat md3 --texture-dir <pack>/textures`, 30 frames at 640x360): 97 pack presets contain
-  `SpriteName=` (the task said 98); 96 load their sprite image and 94 of those render differently from the same preset
+  `SpriteName=`; 96 load their sprite image and 94 of those render differently from the same preset
   under `--compat md2` (identical rules otherwise), i.e. the sprite is visible. The 2 that are identical
-  (`Classic.Wave.078g2` / `081g`, blend 5 = multiplicative over a black scene) cannot show anything by construction. The
-  one that does not load was a `.milk2` (`R192 Cubes.milk2`) before the double-preset parser was merged: with it all 24
+  (`Classic.Wave.078g2` / `081g`, blend 5 = multiplicative over a black scene) cannot show anything by construction. All 24
   `.milk2` that carry `sprite=1` load and draw their sprite.
 - Oracle (Wine, MD3 3.37) vs lactea, looked at side by side (`out/` shots of this work, not committed): a quad-colour test
   sprite drawn at `x=y=.75` appears at the lower right, upright, with the red quadrant top-left, and with

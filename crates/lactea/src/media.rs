@@ -54,6 +54,10 @@ pub enum Media {
 /// Largest canvas side accepted by [`decode_gif`].
 const MAX_GIF_SIDE: u32 = 16384;
 
+/// Budget for the decoded frames of one GIF (every frame stores a full canvas). Frames past it are dropped, and a
+/// canvas that does not fit even once is an error.
+const MAX_GIF_BYTES: usize = 256 << 20;
+
 /// Decode a GIF into full-canvas frames.
 ///
 /// Frames are composed the GIF89a way: the canvas starts transparent, each frame is drawn over it (transparent
@@ -89,6 +93,9 @@ pub fn decode_gif(bytes: &[u8]) -> Result<AnimatedImage, String> {
             if w == 0 || h == 0 || w > MAX_GIF_SIDE || h > MAX_GIF_SIDE {
                 return Err(format!("GIF canvas {w}x{h} is unusable"));
             }
+            if w as usize * h as usize * 4 > MAX_GIF_BYTES {
+                return Err(format!("GIF canvas {w}x{h} is too large"));
+            }
             canvas = vec![0; w as usize * h as usize * 4];
         }
         if let Some((method, rect, backup)) = pending.take() {
@@ -96,10 +103,9 @@ pub fn decode_gif(bytes: &[u8]) -> Result<AnimatedImage, String> {
                 gif::DisposalMethod::Background => {
                     for y in rect[1]..(rect[1] + rect[3]).min(h) {
                         let row = (y * w) as usize * 4;
-                        let (x0, x1) = (
-                            rect[0] as usize * 4,
-                            (rect[0] + rect[2]).min(w) as usize * 4,
-                        );
+                        // a frame may lie partly or wholly outside the logical screen
+                        let x0 = rect[0].min(w) as usize * 4;
+                        let x1 = (rect[0] + rect[2]).min(w) as usize * 4;
                         canvas[row + x0..row + x1].fill(0);
                     }
                 }
@@ -130,6 +136,9 @@ pub fn decode_gif(bytes: &[u8]) -> Result<AnimatedImage, String> {
                 let d = ((cy * w + cx) * 4) as usize;
                 canvas[d..d + 4].copy_from_slice(&buf[s..s + 4]);
             }
+        }
+        if (frames.len() + 1) * canvas.len() > MAX_GIF_BYTES {
+            break;
         }
         let delay = f64::from(frame.delay) / 100.0;
         frames.push(AnimFrame {
@@ -278,6 +287,53 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A GIF with a `w` x `h` logical screen and the given frames.
+    fn gif_sized(w: u16, h: u16, frames: &[TestFrame]) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = gif::Encoder::new(&mut out, w, h, &[255, 0, 0, 0, 255, 0]).unwrap();
+            for (l, t, fw, fh, idx, disp, delay, trans) in frames {
+                let f = gif::Frame {
+                    left: *l,
+                    top: *t,
+                    width: *fw,
+                    height: *fh,
+                    buffer: std::borrow::Cow::Owned(idx.clone()),
+                    dispose: gif::DisposalMethod::from_u8(*disp).unwrap(),
+                    delay: *delay,
+                    transparent: *trans,
+                    ..Default::default()
+                };
+                enc.write_frame(&f).unwrap();
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn background_disposal_of_an_out_of_canvas_frame_does_not_panic() {
+        // frame 0 lies right of the 4x4 screen (left > width) and is disposed to background
+        let g = gif_bytes(&[
+            (9, 1, 2, 2, vec![0; 4], 2, 5, None),
+            (0, 0, 4, 4, vec![1; 16], 1, 5, None),
+        ]);
+        let img = decode_gif(&g).unwrap();
+        assert_eq!(img.frames.len(), 2);
+        assert_eq!(px(&img, 1, 3, 3), [0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn gif_frames_are_bounded_by_the_byte_budget() {
+        // a 2048x2048 screen is 16 MiB per frame; 40 one-pixel frames would be 640 MiB
+        let frames: Vec<TestFrame> = (0..40).map(|_| (0, 0, 1, 1, vec![0], 1, 5, None)).collect();
+        let img = decode_gif(&gif_sized(2048, 2048, &frames)).unwrap();
+        assert!(!img.frames.is_empty());
+        assert!(img.frames.len() * 2048 * 2048 * 4 <= MAX_GIF_BYTES);
+        // one canvas that cannot fit is an error
+        let big = gif_sized(12000, 12000, &frames[..1]);
+        assert!(decode_gif(&big).is_err());
     }
 
     fn px(img: &AnimatedImage, frame: usize, x: u32, y: u32) -> [u8; 4] {

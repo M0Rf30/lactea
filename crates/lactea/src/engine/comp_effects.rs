@@ -108,16 +108,12 @@ impl Engine {
         let Some(comp) = comp.filter(|_| report.comp == ShaderOutcome::User) else {
             return false;
         };
-        let iface = comp.interface.clone();
         // on a rejected module the renderer keeps the previous composite shader
         if slot.renderer.set_comp_shader(Some(comp)).is_err() {
             return false;
         }
-        self.resolve_textures(
-            &mut slot.renderer,
-            std::slice::from_ref(&iface),
-            &mut report,
-        );
+        // the effect snippets only sample `sampler_main`: the preset's user textures are already registered on the
+        // renderer, and re-resolving them would reload and re-upload every file from inside the render loop
 
         let seed = self.cfg.seed;
         let l = &mut slot.loaded;

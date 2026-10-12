@@ -270,8 +270,20 @@ fn upload_3d(device: &wgpu::Device, queue: &wgpu::Queue, n: u32, rgba: &[u8], la
     }
 }
 
-/// `frames` must be a non-empty list of `w * h * 4` byte images of a non-empty size.
-fn check_frames(what: &str, w: u32, h: u32, frames: &[&[u8]]) -> Result<(), RenderError> {
+/// `frames` must be a non-empty list of `w * h * 4` byte images of a non-empty size that fits the device's
+/// largest 2D texture (`max_side`).
+fn check_frames(
+    what: &str,
+    max_side: u32,
+    w: u32,
+    h: u32,
+    frames: &[&[u8]],
+) -> Result<(), RenderError> {
+    if w > max_side || h > max_side {
+        return Err(RenderError::Invalid(format!(
+            "{what}: {w}x{h} exceeds the device texture limit of {max_side}"
+        )));
+    }
     let need = w as usize * h as usize * 4;
     if w == 0 || h == 0 || frames.is_empty() || frames.iter().any(|f| f.len() != need) {
         return Err(RenderError::Invalid(format!(
@@ -1744,13 +1756,13 @@ impl Renderer {
         h: u32,
         rgba8: &[u8],
     ) -> Result<(), RenderError> {
-        if w == 0 || h == 0 || rgba8.len() != (w * h * 4) as usize {
-            return Err(RenderError::Invalid(format!(
-                "user texture {name}: {w}x{h} needs {} bytes, got {}",
-                w as usize * h as usize * 4,
-                rgba8.len()
-            )));
-        }
+        check_frames(
+            &format!("user texture {name}"),
+            self.device.limits().max_texture_dimension_2d,
+            w,
+            h,
+            &[rgba8],
+        )?;
         let tex = upload_2d(&self.device, &self.queue, w, h, rgba8, true, name);
         self.user_tex
             .insert(name.to_ascii_lowercase(), UserTex { tex, anim: None });
@@ -1768,7 +1780,13 @@ impl Renderer {
         frames: &[&[u8]],
         delays: &[f64],
     ) -> Result<(), RenderError> {
-        check_frames(name, w, h, frames)?;
+        check_frames(
+            name,
+            self.device.limits().max_texture_dimension_2d,
+            w,
+            h,
+            frames,
+        )?;
         if delays.len() != frames.len() {
             return Err(RenderError::Invalid(format!(
                 "animated texture {name}: {} frames but {} delays",
@@ -1804,7 +1822,13 @@ impl Renderer {
         frames: &[&[u8]],
         mips: bool,
     ) -> Result<(), RenderError> {
-        check_frames("sprite", w, h, frames)?;
+        check_frames(
+            "sprite",
+            self.device.limits().max_texture_dimension_2d,
+            w,
+            h,
+            frames,
+        )?;
         let views = frames
             .iter()
             .map(|f| upload_2d(&self.device, &self.queue, w, h, f, mips, "sprite").view)

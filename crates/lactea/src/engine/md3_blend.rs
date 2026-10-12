@@ -553,6 +553,9 @@ pub(super) struct BlendLaunch {
     pub pattern: LaunchPattern,
     /// A `.milk2` is loaded: no borders.
     pub no_borders: bool,
+    /// The preset this blend loads honours its sprite block: ordinary presets always, a `.milk2` only for PRESET2 and
+    /// only with the header's `sprite=1`.
+    pub sprite: bool,
 }
 
 impl BlendLaunch {
@@ -567,6 +570,7 @@ impl BlendLaunch {
                 LaunchPattern::Md2
             },
             no_borders: false,
+            sprite: true,
         }
     }
 }
@@ -856,6 +860,8 @@ impl super::Engine {
             target: milk2.progress,
             pattern: LaunchPattern::Md3(inst),
             no_borders: true,
+            // leg A loads PRESET1, which never carries the sprite; the hard load builds PRESET2 with it
+            sprite: false,
         };
         let user = self.cfg.blend_time_user;
         let soft = matches!(transition, Transition::Soft { seconds } if seconds > 0.0)
@@ -898,7 +904,7 @@ impl super::Engine {
                 .sibling(),
         };
         renderer.reset_images();
-        let (mut old, rep1) = match self.build_loaded(&milk2.preset1, name, &mut renderer) {
+        let (mut old, rep1) = match self.build_loaded(&milk2.preset1, name, &mut renderer, false) {
             Ok(v) => v,
             Err(e) => {
                 self.spare = Some(renderer);
@@ -906,7 +912,7 @@ impl super::Engine {
             }
         };
         let prev = renderer.take_shader_state();
-        let (mut new, mut report) = match self.build_loaded(&milk2.preset2, name, &mut renderer) {
+        let (mut new, mut report) = match self.build_loaded(&milk2.preset2, name, &mut renderer, milk2.has_sprite) {
             Ok(v) => v,
             Err(e) => {
                 self.spare = Some(renderer);
@@ -959,6 +965,7 @@ impl super::Engine {
                     target: d.milk2.progress,
                     pattern: LaunchPattern::Md3(inst),
                     no_borders: true,
+                    sprite: d.milk2.has_sprite,
                 };
                 let user = self.cfg.blend_time_user;
                 if let Err(e) = self.load_preset_blend(&bytes, &name, user, launch) {

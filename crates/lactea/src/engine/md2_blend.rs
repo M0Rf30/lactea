@@ -1189,7 +1189,7 @@ impl super::Engine {
             .expect("a soft cut needs a running preset");
         // build the new preset's shaders next to the running ones, which stay safe in `prev`
         let prev = slot.renderer.take_shader_state();
-        match self.build_loaded(bytes, name, &mut slot.renderer) {
+        match self.build_loaded(bytes, name, &mut slot.renderer, launch.sprite) {
             Err(e) => {
                 slot.renderer.restore_shader_state(prev);
                 self.active = Some(slot);

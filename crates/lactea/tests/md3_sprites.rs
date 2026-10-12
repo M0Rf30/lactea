@@ -161,6 +161,16 @@ impl Rig {
         e
     }
 
+    fn engine_with(&self, mut config: EngineConfig, p: Provider) -> Engine {
+        config.width = SIZE.0;
+        config.height = SIZE.1;
+        config.mesh = [16, 12];
+        config.start_clean = true;
+        let mut e = Engine::new(&self.device, &self.queue, config);
+        e.set_texture_provider(Box::new(p));
+        e
+    }
+
     /// Render frame `frame` at `time` and return the centre pixel of the composite.
     fn centre_at(&self, e: &mut Engine, time: f64, frame: u32) -> [u8; 3] {
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -373,4 +383,93 @@ fn sprite_code_runs_and_done_kills() {
         near(rig.centre_at(&mut e, 0.7, 2), [0, 0, 0]),
         "then it is gone"
     );
+}
+
+/// A hand-made `.milk2` whose halves draw nothing. `sprite_header` is the optional `sprite=1` line, `half1` / `half2`
+/// extra lines of the halves, `block` the sprite block after `[PRESET2_END]`.
+fn milk2(sprite_header: &str, half1: &str, half2: &str, block: &str) -> String {
+    let half = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\nfDecay=1\nfWaveAlpha=0\nfGammaAdj=1\n";
+    format!(
+        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\n{sprite_header}blending_pattern=zoom\nblending_progress=1.00\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n\
+         [PRESET1_BEGIN]\nNAME=first\n{half}{half1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=second\n{half}{half2}[PRESET2_END]\n{block}"
+    )
+}
+
+fn block(name: &str) -> String {
+    format!(
+        "\n[SPRITE1_BEGIN]\nSpriteName=sprites\\{name}\nSpriteColorKey=0x000000\nSpriteLayer=0\nSpriteBlend=4\nSpriteAlpha=1.000000\nSpriteBurn=0\nSpriteX=0.000000\nSpriteY=0.000000\nSpriteSX=-0.500000\nSpriteSY=-0.500000\nSpriteRot=0.000000\nSpriteSpeed=0.000000\nSpriteRepeatX=1.000000\nSpriteRepeatY=1.000000\n[SPRITE1_END]\n"
+    )
+}
+
+/// The sprite block after `[PRESET2_END]` belongs to PRESET2 and is honoured only with the header's `sprite=1`; a
+/// sprite block lying inside either half is never read.
+#[test]
+fn milk2_sprite_belongs_to_preset2_and_needs_the_header_flag() {
+    let rig = rig_or_skip!();
+    let stale = block("stale.png");
+    // PRESET1 carries a stale block, PRESET2 has none of its own before the real one after `[PRESET2_END]`
+    let flagged = milk2("sprite=1\n", &stale, "", &block("red.png"));
+    let (p, asked) = provider(Some(red()), None);
+    let mut e = rig.engine(Compat::MilkDrop3, p);
+    let report = e
+        .load_preset(flagged.as_bytes(), "pair.milk2", Transition::Cut)
+        .unwrap();
+    assert_eq!(report.sprite.as_deref(), Some("sprites\\red.png"));
+    assert_eq!(*asked.borrow(), vec!["sprite sprites\\red.png"]);
+    assert!(near(rig.centre_at(&mut e, 0.0, 0), [255, 0, 0]));
+
+    // without `sprite=1` the block after `[PRESET2_END]` is outside both halves, a block inside PRESET2 is ignored
+    for text in [
+        milk2("", "", "", &block("red.png")),
+        milk2("", "", &block("red.png"), ""),
+    ] {
+        let (p, asked) = provider(Some(red()), None);
+        let mut e = rig.engine(Compat::MilkDrop3, p);
+        let report = e
+            .load_preset(text.as_bytes(), "pair.milk2", Transition::Cut)
+            .unwrap();
+        assert_eq!(report.sprite, None);
+        assert!(asked.borrow().is_empty(), "asked {:?}", asked.borrow());
+        assert!(near(rig.centre_at(&mut e, 0.0, 0), [0, 0, 0]));
+    }
+}
+
+/// A soft transition into a `.milk2` imports PRESET2 and its sprite when the first leg completes, not before.
+#[test]
+fn milk2_sprite_arrives_with_preset2_after_the_first_leg() {
+    let rig = rig_or_skip!();
+    let (p, asked) = provider(Some(red()), None);
+    let mut e = rig.engine_with(
+        EngineConfig {
+            compat: Compat::MilkDrop3,
+            blend_time_user: 1.0,
+            ..Default::default()
+        },
+        p,
+    );
+    let plain = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\nfDecay=1\nfWaveAlpha=0\nfGammaAdj=1\n";
+    e.load_preset(plain.as_bytes(), "plain", Transition::Cut)
+        .unwrap();
+    let mut frame = 0;
+    let mut step = |e: &mut Engine| {
+        let c = rig.centre_at(e, f64::from(frame) / 60.0, frame);
+        frame += 1;
+        c
+    };
+    step(&mut e);
+    let text = milk2("sprite=1\n", "", "", &block("red.png"));
+    e.load_preset(text.as_bytes(), "pair.milk2", Transition::Soft { seconds: 2.7 })
+        .unwrap();
+    // leg A takes `blend_time_user` = 1 s = 60 frames
+    let mut c = [0; 3];
+    for _ in 0..40 {
+        c = step(&mut e);
+    }
+    assert!(asked.borrow().is_empty(), "PRESET2 is not imported yet");
+    assert!(near(c, [0, 0, 0]));
+    for _ in 0..40 {
+        c = step(&mut e);
+    }
+    assert_eq!(*asked.borrow(), vec!["sprite sprites\\red.png"]);
+    assert!(near(c, [255, 0, 0]), "the sprite is drawn: {c:?}");
 }

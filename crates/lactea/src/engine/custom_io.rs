@@ -88,7 +88,7 @@ impl Engine {
         apply(&mut preset)?;
         let text = preset.to_milk();
         let name = slot.loaded.name.clone();
-        let (loaded, report) = self.build_loaded(text.as_bytes(), &name, &mut slot.renderer)?;
+        let (loaded, report) = self.build_loaded(text.as_bytes(), &name, &mut slot.renderer, true)?;
         slot.loaded = loaded;
         slot.last = LastFrame::default();
         Ok(report)

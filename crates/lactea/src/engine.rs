@@ -534,7 +534,7 @@ impl Engine {
                 .sibling(),
         };
         renderer.reset_images();
-        match self.build_loaded(bytes, name, &mut renderer) {
+        match self.build_loaded(bytes, name, &mut renderer, true) {
             Ok((loaded, report)) => {
                 self.commit(
                     Slot {
@@ -617,19 +617,24 @@ impl Engine {
     }
 
     /// Everything of a load that can fail or has to run in projectM's order: parse, expression
-    /// contexts, init code, shaders, textures.
+    /// contexts, init code, shaders, textures. `sprite` says whether the text's sprite block is honoured: a `.milk2`
+    /// half reads it only for PRESET2 with the header's `sprite=1`.
     fn build_loaded(
         &mut self,
         bytes: &[u8],
         name: &str,
         renderer: &mut Renderer,
+        sprite: bool,
     ) -> Result<(Loaded, PresetReport), EngineError> {
         let flavor = if self.cfg.compat.md2_family() {
             Flavor::Md2
         } else {
             Flavor::ProjectM
         };
-        let preset = Preset::parse_with(bytes, flavor)?;
+        let mut preset = Preset::parse_with(bytes, flavor)?;
+        if !sprite {
+            preset.sprite = None;
+        }
         let mut report = PresetReport {
             name: name.to_string(),
             preset_version: preset.milkdrop_preset_version,
@@ -1410,6 +1415,8 @@ fn prepare_slot(
     md3: Option<&Md3Frame>,
 ) -> FrameInput {
     let g = slot.renderer.mesh_geometry();
+    // sprite code sees `m_pState->m_fBlendProgress`: the blend's progress (`P` in a steady `.milk2`), 1 once none runs
+    let blend_progress = md2.as_ref().map_or(1.0, |m| m.progress);
     let mut fi = match md2 {
         Some(m) => {
             let cx = FrameCtx {
@@ -1441,7 +1448,7 @@ fn prepare_slot(
             time: clock.time,
             frame: clock.frame,
             fps: cfg.fps as f32,
-            progress,
+            progress: blend_progress,
             bass: audio.bass,
             mid: audio.mid,
             treb: audio.treb,

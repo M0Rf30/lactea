@@ -192,6 +192,13 @@ pub struct CompatRules {
     pub custom_shape_image: bool,
     /// The no-shader composite pass samples the feedback image with the `Wrap` address mode; otherwise `Clamp`.
     pub noshader_comp_wrap: bool,
+    /// MilkDrop 3: a preset's sprite block (`SpriteName` .. `SpriteRepeatY`, docs/md3.md) loads an image and draws
+    /// it every frame at the layer the preset names, with the 11 sprite blend modes. projectM and MilkDrop 2 never
+    /// draw preset sprites.
+    pub md3_preset_sprites: bool,
+    /// MilkDrop 3: shader textures (`sampler_<name>`) are also searched in the `sprites` and `gifs` folders, accept
+    /// `.gif` / `.jfif` files, and an animated GIF shows the frame picked by `fmod(time, total)` of its delays.
+    pub md3_gif_textures: bool,
 }
 
 impl Compat {
@@ -243,6 +250,8 @@ impl Compat {
                 warp_anim_projectm: true,
                 custom_shape_image: true,
                 noshader_comp_wrap: false,
+                md3_preset_sprites: false,
+                md3_gif_textures: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -289,9 +298,13 @@ impl Compat {
                 warp_anim_projectm: false,
                 custom_shape_image: false,
                 noshader_comp_wrap: true,
+                md3_preset_sprites: false,
+                md3_gif_textures: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
+                md3_preset_sprites: true,
+                md3_gif_textures: true,
                 ..Compat::MilkDrop2.rules()
             },
         }

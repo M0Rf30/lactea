@@ -84,6 +84,9 @@ pub struct FrameInput {
     /// MilkDrop 2's preset blend (`m_bBlending`) in progress (`CompatRules::md2_preset_blend`): the fields above are
     /// then the new state's blended values and this carries the rest, see [`Md2Blend`](crate::Md2Blend). `None` = no blend.
     pub md2_blend: Option<crate::blend::Md2Blend>,
+    /// MilkDrop 3 preset sprites to draw this frame (see [`SpriteDraw::layer`] for where each goes); empty for
+    /// everything but `Compat::MilkDrop3` presets that carry a sprite.
+    pub sprites: Vec<crate::sprite::SpriteDraw>,
 }
 
 /// Decay, composite-pass controls.
@@ -426,6 +429,7 @@ impl Default for FrameInput {
             comp_random: None,
             hue_offsets: None,
             md2_blend: None,
+            sprites: Vec::new(),
         }
     }
 }

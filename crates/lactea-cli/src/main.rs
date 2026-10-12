@@ -107,11 +107,12 @@ struct Args {
     /// MilkDrop 3 `VolumeSensitivity` (`--compat md3`, or `auto` with an md3 preset): linear gain on the 8-bit quantised audio input.
     #[arg(long, default_value_t = 1.0)]
     volume_sensitivity: f32,
-    /// MilkDrop 3 locked shader (`MD31` handle): replace the preset's warp stub with the HLSL in FILE. Repeatable.
-    /// The HLSL must be one you own; see docs/md3.md, "Locked shaders".
+    /// MilkDrop 3 encrypted warp shader (`MD31` handle): replace the preset's placeholder warp shader with the HLSL in
+    /// FILE. Repeatable. The HLSL must be one you own; see docs/md3.md, "Encrypted shaders".
     #[arg(long, value_name = "HANDLE=FILE")]
     shader_override_warp: Vec<String>,
-    /// MilkDrop 3 locked shader (`MD32` handle): replace the preset's composite stub with the HLSL in FILE. Repeatable.
+    /// MilkDrop 3 encrypted composite shader (`MD32` handle): replace the preset's placeholder composite shader with
+    /// the HLSL in FILE. Repeatable.
     #[arg(long, value_name = "HANDLE=FILE")]
     shader_override_comp: Vec<String>,
     /// second preset: replaced at --switch-frame by a soft cut of --soft-cut seconds

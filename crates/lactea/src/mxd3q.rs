@@ -10,8 +10,9 @@
 //!
 //! * four fixed constants (`1, 2, 3, 27`);
 //! * an energy accumulator and a bass accumulator (both linear in time under silence);
-//! * a beat detector (smoothed envelopes, a `1.15` threshold and a `0.15 s` minimum delay) that
-//!   advances a phase accumulator (`mod 4`) whose pulse windows reset the latches;
+//! * a beat detector (smoothed envelopes, a `1.15` threshold and a `0.15 s` minimum delay) whose
+//!   flag resets the latches (the reference's three `mod 4 / 3 / 4` phase accumulators and their
+//!   pulse windows, which reset each latch on a different beat, are approximated by one flag);
 //! * nine "time since last beat" latches;
 //! * a handful of `rand()` draws.
 //!
@@ -78,7 +79,8 @@ impl Mxd3qBlock {
     }
 
     /// Advance one frame. `elapsed` is seconds since the preset started; `fps` is the reported
-    /// frame rate (guarded against 0). Returns the seven uniform float4s.
+    /// frame rate (a non-positive rate counts as 1 fps, so the accumulators stay finite). Returns
+    /// the seven uniform float4s.
     pub fn step(&mut self, audio: &Mxd3qAudio, fps: f32, elapsed: f32) -> Mxd3q {
         let (bass, mid, treb) = (audio.bass, audio.mid, audio.treb);
         let (bass_att, mid_att, treb_att) = (audio.bass_att, audio.mid_att, audio.treb_att);
@@ -88,11 +90,19 @@ impl Mxd3qBlock {
 
         // energy + bass accumulators (linear in time under silence)
         self.energy += (asum * 0.2) * (asum * 0.2) * 0.1;
-        self.bass_acc += bass / fps;
+        self.bass_acc += bass * dt;
         // QX5 = E·0.4 + t·0.05 (spec §4 step 2)
         let qx5 = self.energy * 0.4 + elapsed * 0.05;
 
-        // random draws (refresh only while the beat timer is armed, so they stay 0 under silence)
+        // beat timer (spec §4 step 4, before the draws that read it): decrement, and re-arm on a
+        // loud frame (bass + mid + treb > 4.25) only when the decrement crossed below 0
+        let timer_prev = self.beat_timer;
+        self.beat_timer = (self.beat_timer - 0.0166).max(0.0);
+        if ssum > 4.25 && timer_prev - 0.0166 < 0.0 {
+            self.beat_timer = 0.25;
+        }
+
+        // random draws (refresh only on the frame the timer was armed, so they stay 0 under silence)
         if self.beat_timer > 0.24 {
             self.rands[0] = self.next_rand() % 6.0 + 8.0;
             self.rands[1] = self.next_rand() % 6.0 + 3.0;
@@ -121,14 +131,6 @@ impl Mxd3qBlock {
         } else {
             0.0
         };
-
-        // a beat re-arms the timer
-        let timer_prev = self.beat_timer;
-        self.beat_timer = (self.beat_timer - 0.0166).max(0.0);
-        // re-arm only when the decrement crossed below 0 (spec §4 step 4)
-        if ssum > 4.25 && timer_prev - 0.0166 < 0.0 {
-            self.beat_timer = 0.25;
-        }
 
         // latches: "time since the last beat". Under silence (no beat) they all accumulate `dt` and
         // track elapsed time; a beat resets them to zero.
@@ -182,6 +184,29 @@ mod tests {
         let mut b = Mxd3qBlock::default();
         let q = b.step(&silence(), 60.0, 1.0 / 60.0);
         assert_eq!(q.qxa, [1.0, 2.0, 3.0, 27.0]);
+    }
+
+    #[test]
+    fn zero_fps_keeps_the_accumulators_finite() {
+        // the block is never reset, so one non-finite value would poison every later preset
+        let mut b = Mxd3qBlock::default();
+        for f in 0..10 {
+            let q = b.step(&silence(), 0.0, f as f32);
+            assert!(q.qxb.iter().chain(&q.qsb).all(|v| v.is_finite()), "{q:?}");
+        }
+    }
+
+    #[test]
+    fn a_loud_frame_draws_on_the_frame_it_arms_the_timer() {
+        let loud = Mxd3qAudio {
+            bass: 2.0,
+            mid: 2.0,
+            treb: 2.0,
+            ..silence()
+        };
+        let q = Mxd3qBlock::default().step(&loud, 60.0, 1.0 / 60.0);
+        assert!((8.0..14.0).contains(&q.qxb[2]), "{:?}", q.qxb);
+        assert!((3.0..9.0).contains(&q.qxb[3]), "{:?}", q.qxb);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Locked-shader override (`docs/md3.md`, "Locked shaders"): a user HLSL registered for an `MD31` handle replaces the
+//! Encrypted-shader override (`docs/md3.md`, "Encrypted shaders"): a user HLSL registered for an `MD31` handle replaces the
 //! preset's stub warp shader. Skipped (with a note) when there is no GPU adapter.
 
 use lactea::{Compat, Engine, EngineConfig, FrameClock, ShaderOverride, Transition};

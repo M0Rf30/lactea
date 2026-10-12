@@ -26,10 +26,10 @@ Its behaviour was recovered by binary analysis, only to read and render MD3 pres
   here;
 - no MD3 code, binaries, presets or data are in the repository; tests use small hand-written fixtures.
 
-MD3's paid, locked shaders (the `MD31` / `MD32` keys) are not shipped: lactea cannot and does not decrypt them.
+MD3's encrypted shaders (the `MD31` / `MD32` keys) are not shipped: lactea cannot and does not decrypt them.
 A preset that carries one still loads and runs the placeholder shader that stands in for it in the file, unless
-the host registers its own HLSL for the handle (`EngineConfig::shader_overrides`; library and `fdrender` only,
-no app or C API exposure).
+the host registers its own HLSL for the handle (`EngineConfig::shader_overrides`; library, `fdrender` and the app,
+no C API exposure).
 
 ## Resources
 
@@ -46,7 +46,7 @@ no app or C API exposure).
 | Sprites (`[SPRITE1_BEGIN]` blocks, layers 0-4, 11 blend modes, burn, GIF sprites and GIF shader textures) | Supported, see [Sprites](#sprites); no `sprites.ini`, user sprite or webcam layers |
 | Auto hard cuts (`AutoHardCutMode` 1..7) and the MD3 display time | Supported: "Auto hard cuts"; F8 / `--auto-hard-cut` / C API |
 | `.wave` / `.shape` files (single custom wave / shape import and export), MD3 `.milk` writer incl. sprite block | Supported (library / engine API; no app UI) |
-| Locked shaders (`MD31` / `MD32`) | The placeholder shader in the file runs unless the host registers its own HLSL for the handle (library + `fdrender`; no app or C API) |
+| Encrypted shaders (`MD31` / `MD32`) | The placeholder shader in the file runs unless the host registers its own HLSL for the handle (library, `fdrender`, app; no C API) |
 
 MD3 pack (`~/M0Rf30/md3-re`, local smoke runs only; `fdrender --compat md3 --texture-dir <pack>/textures`, 30 frames):
 all 331 `.milk` and all 146 `.milk2` render with exit code 0, no shader fallback and no warning (before the MD3 work:
@@ -941,13 +941,13 @@ concern and not implemented here: a host should call `import_custom_wave(8, byte
   old-state copy.
 - MD3 writes `FFTAttack` / `FFTDecay` from process globals; here they are the preset's own values.
 - `MD31` / `MD32` handles are passed through verbatim to keep the file loadable by MD3; lactea only uses them to
-  look up a user-supplied shader override (see "Locked shaders (MD31 / MD32)").
+  look up a user-supplied shader override (see "Encrypted shaders (MD31 / MD32)").
 - Under `Compat::ProjectM` only 4 custom slots run (`CompatRules::custom_slots`), so an import into slot >= 4
   edits the preset but draws nothing; hosts that send dropped files to slot 8 need a MilkDrop-family compat.
 
-## Locked shaders (MD31 / MD32)
+## Encrypted shaders (MD31 / MD32)
 
-MD3's paid shader packs ship presets whose warp / composite shader is *locked*: the `.milk` carries `MD31=<u64>`
+Some MD3 shader packs ship presets whose warp / composite shader is encrypted: the `.milk` carries `MD31=<u64>`
 (warp) and/or `MD32=<u64>` (comp) in its header, and the `warp_` / `comp_` text is only a stub
 (`// This shader works only with MD3 :)`, then `ret = tex2D(sampler_main, uv).xyz; ret *= <decay>;`). Rendered as
 written, such a preset just fades the previous frame.
@@ -968,8 +968,8 @@ Lactea renders the stub unless the host supplies HLSL for the handle:
   an entry with the matching side `None` leaves that shader as the preset wrote it.
 - `Engine::set_shader_override(handle, ShaderOverride)` adds or replaces an entry; it affects the next
   `load_preset`. The override is reported as `ShaderOutcome::User`.
-- `fdrender --shader-override-warp HANDLE=FILE` / `--shader-override-comp HANDLE=FILE` (repeatable) read the HLSL from
-  `FILE`.
+- `fdrender` and the `lactea` app: `--shader-override-warp HANDLE=FILE` / `--shader-override-comp HANDLE=FILE`
+  (repeatable) read the HLSL from `FILE`.
 
 Only HLSL the user already owns can be supplied this way. The handle is read independent of the stub marker, so an
 override applies whenever the key is present and the pass's `PSVERSION_*` is above 0.

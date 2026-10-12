@@ -229,18 +229,45 @@ fn md3_writer_ps0_has_no_version_lines() {
     assert!(!t.contains("MILKDROP_PRESET_VERSION"));
 }
 
+/// A preset with a sprite is written as version 300 followed by the sprite block in MD3's layout (blank line,
+/// `%.6f` scalars, unpadded `0x%X` key except the literal `0x000000`), and reads back identically.
 #[test]
-fn md3_writer_version_300_with_sprite() {
+fn md3_writer_emits_version_300_and_the_sprite_block() {
     let mut p = Preset::default();
     p.warp_ps_version = 2;
     p.comp_ps_version = 2;
-    assert!(!p.has_sprite());
     assert!(p.to_milk_md3().starts_with("MILKDROP_PRESET_VERSION=201\n"));
-    p.extra.push(("SpriteName".into(), "x".into()));
-    assert!(p.has_sprite());
-    assert!(p.to_milk_md3().starts_with("MILKDROP_PRESET_VERSION=300\n"));
-    // unknown keys are not written
-    assert!(!p.to_milk_md3().contains("SpriteName"));
+    assert!(!p.to_milk_md3().contains("SPRITE1"));
+
+    p.sprite = Some(PresetSprite {
+        name: "sprites\\a.png".into(),
+        color_key: 0xFF,
+        layer: 1,
+        blend: 7,
+        alpha: 0.5,
+        burn: 0,
+        x: 0.25,
+        y: -0.125,
+        sx: -0.8,
+        sy: -0.6,
+        rot_mode: 1.0,
+        speed: 1.5,
+        repeat_x: 1.0,
+        repeat_y: 0.95,
+        code: "x=0.5+0.1*sin(time);\u{1}a=0.8;\u{1}".into(),
+    });
+    let t = p.to_milk_md3();
+    assert!(t.starts_with("MILKDROP_PRESET_VERSION=300\n"));
+    let block = "\n[SPRITE1_BEGIN]\nSpriteName=sprites\\a.png\nSpriteColorKey=0xFF\nSpriteLayer=1\nSpriteBlend=7\n\
+SpriteAlpha=0.500000\nSpriteBurn=0\nSpriteX=0.250000\nSpriteY=-0.125000\nSpriteSX=-0.800000\nSpriteSY=-0.600000\n\
+SpriteRot=1.000000\nSpriteSpeed=1.500000\nSpriteRepeatX=1.000000\nSpriteRepeatY=0.950000\n\
+code_1=x=0.5+0.1*sin(time);\ncode_2=a=0.8;\n[SPRITE1_END]\n";
+    assert!(t.ends_with(block), "{t}");
+
+    let back = Preset::parse(t.as_bytes()).unwrap().sprite.unwrap();
+    assert_eq!(back, p.sprite.clone().unwrap());
+    p.sprite.as_mut().unwrap().color_key = 0;
+    assert!(p.to_milk_md3().contains("SpriteColorKey=0x000000\n"));
 }
 
 #[test]

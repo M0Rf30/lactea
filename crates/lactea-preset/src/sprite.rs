@@ -196,6 +196,33 @@ impl PresetSprite {
         write_code(out, "code_", &self.code, false);
         out.push_str("[SPRITE1_END]\n");
     }
+
+    /// The block as MD3 3.37's `.milk` writer emits it (docs/md3.md, sprites): a blank line first, scalars with
+    /// `printf` `%.6f` / `%d` / `0x%X`.
+    pub(crate) fn write_md3(&self, out: &mut String) {
+        out.push_str("\n[SPRITE1_BEGIN]\n");
+        let _ = writeln!(out, "SpriteName={}", self.name);
+        // `0x%X` without padding, except that the value 0 is written literally as `0x000000`
+        if self.color_key == 0 {
+            out.push_str("SpriteColorKey=0x000000\n");
+        } else {
+            let _ = writeln!(out, "SpriteColorKey=0x{:X}", self.color_key);
+        }
+        let _ = writeln!(out, "SpriteLayer={}", self.layer);
+        let _ = writeln!(out, "SpriteBlend={}", self.blend);
+        let _ = writeln!(out, "SpriteAlpha={:.6}", self.alpha);
+        let _ = writeln!(out, "SpriteBurn={}", self.burn);
+        let _ = writeln!(out, "SpriteX={:.6}", self.x);
+        let _ = writeln!(out, "SpriteY={:.6}", self.y);
+        let _ = writeln!(out, "SpriteSX={:.6}", self.sx);
+        let _ = writeln!(out, "SpriteSY={:.6}", self.sy);
+        let _ = writeln!(out, "SpriteRot={:.6}", self.rot_mode);
+        let _ = writeln!(out, "SpriteSpeed={:.6}", self.speed);
+        let _ = writeln!(out, "SpriteRepeatX={:.6}", self.repeat_x);
+        let _ = writeln!(out, "SpriteRepeatY={:.6}", self.repeat_y);
+        write_code(out, "code_", &self.code, false);
+        out.push_str("[SPRITE1_END]\n");
+    }
 }
 
 #[cfg(test)]

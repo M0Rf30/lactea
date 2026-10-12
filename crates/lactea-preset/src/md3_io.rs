@@ -165,17 +165,6 @@ impl CustomShape {
 }
 
 impl Preset {
-    /// Whether a sprite block is attached to the preset.
-    ///
-    /// Sprites are not parsed by this crate: a sprite shows up only as unconsumed lines in
-    /// [`Preset::extra`], so this is a stub that reports `true` when an `extra` key starts with
-    /// `sprite` (ASCII case-insensitive).  Whoever parses sprites should replace it.
-    pub fn has_sprite(&self) -> bool {
-        self.extra
-            .iter()
-            .any(|(k, _)| k.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("sprite")))
-    }
-
     /// The `MD31` / `MD32` handle for `key` when the matching shader text is a locked-shader stub.
     fn locked_handle(&self, key: &str, shader: Option<&String>) -> Option<u64> {
         if !shader?.contains(LOCKED_SHADER_MARKER) {
@@ -194,11 +183,12 @@ impl Preset {
     ///
     /// Lines in order: `MD31=` / `MD32=` (only when the preset carries that handle in
     /// [`Preset::extra`] and the shader text is a locked-shader stub), the version lines (when
-    /// [`Preset::max_ps_version`] > 0: `MILKDROP_PRESET_VERSION=300` if [`Preset::has_sprite`]
-    /// else `201`, then `PSVERSION*`), `[preset00]`, the base values, waves, shapes, code blocks.
+    /// [`Preset::max_ps_version`] > 0: `MILKDROP_PRESET_VERSION=300` if the preset has a [`Preset::sprite`]
+    /// else `201`, then `PSVERSION*`), `[preset00]`, the base values, waves, shapes, code blocks and the sprite
+    /// block (blank line, `[SPRITE1_BEGIN]` .. `[SPRITE1_END]`, `%.6f` scalars).
     ///
     /// MD3 does not round-trip unknown keys: the rest of [`Preset::extra`] is not written, and
-    /// neither are the projectM-only shape `image` or a sprite section.  Use [`Preset::to_milk`]
+    /// neither is the projectM-only shape `image`.  Use [`Preset::to_milk`]
     /// for a lossless library round trip.
     pub fn to_milk_md3(&self) -> String {
         let mut out = String::new();
@@ -210,7 +200,7 @@ impl Preset {
         }
         let max = self.max_ps_version();
         if max > 0 {
-            let v = if self.has_sprite() { 300 } else { 201 };
+            let v = if self.sprite.is_some() { 300 } else { 201 };
             let _ = writeln!(out, "MILKDROP_PRESET_VERSION={v}");
             let _ = writeln!(out, "PSVERSION={max}");
             let _ = writeln!(out, "PSVERSION_WARP={}", self.warp_ps_version);
@@ -236,6 +226,9 @@ impl Preset {
             && let Some(c) = &self.comp_shader
         {
             write_code(&mut out, "comp_", c, true);
+        }
+        if let Some(sp) = &self.sprite {
+            sp.write_md3(&mut out);
         }
         out
     }

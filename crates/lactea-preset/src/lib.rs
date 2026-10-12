@@ -14,6 +14,7 @@
 
 mod cnum;
 mod md3_io;
+pub mod milk2;
 mod scan;
 
 use scan::{Lookup, decode, sane_entries};

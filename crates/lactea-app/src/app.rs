@@ -13,7 +13,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::monitor::{AudioMonitor, AudioStatus, MonitorConfig};
-use crate::cli::{Args, VisualizerKind};
+use crate::cli::{Args, CompatArg, VisualizerKind};
 use crate::feed::AudioFeed;
 use crate::gfx::{Acquired, Gfx};
 use crate::input::{Action, action_for_key, parse_script};
@@ -90,8 +90,10 @@ pub(crate) fn collect_presets(args: &Args) -> Vec<PresetEntry> {
                 .find(|d| d.is_dir()),
         );
     }
+    // `.milk2` double presets play only under `--compat milkdrop3`
+    let milk2 = args.compat == CompatArg::Milkdrop3;
     for d in dirs {
-        let found = presets::scan_dir(&d);
+        let found = presets::scan_dir(&d, milk2);
         if found.is_empty() {
             log::warn!("no .milk presets found under {}", d.display());
         }

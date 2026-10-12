@@ -32,6 +32,11 @@ mod custom_io;
 mod md2_blend;
 use md2_blend::{BlendBase, BlendState, build_blend_frame};
 mod comp_effects;
+mod md3_blend;
+pub use md3_blend::{
+    DoubleMode, DoublePresetInfo, Md3Locks, Md3Pattern, Md3PatternInstance,
+    default_enabled_patterns, md3_draw_progress, md3_fill_vertinfo, md3_random_instance,
+};
 
 /// projectM's default composite shader (`FinalComposite.cpp`): plain copy of the main image.
 const PASSTHROUGH_COMP: &str = "shader_body\n{\nret = tex2D(sampler_main, uv).xyz;\n}";
@@ -210,6 +215,12 @@ pub struct Engine {
     md2_pattern_rng: StreamRng,
     md2_clocks: md2_blend::PatternClocks,
     md2_forced_pattern: Option<u32>,
+    /// MilkDrop 3 (`CompatRules::md3_double_preset`): the `.milk2` on screen, the header values the previous load or
+    /// ordinary soft cut left (a `.milk2` without those keys falls back on them) and the stream the MD3 soft-cut
+    /// patterns are drawn from.
+    double: Option<md3_blend::DoubleState>,
+    md3_carry: lactea_preset::milk2::Milk2Header,
+    md3_pattern_rng: StreamRng,
     on_switch_failed: crate::callbacks::Hook<crate::callbacks::SwitchFailure>,
     /// MD3 `AutoHardCutMode` state and the cuts it asked for since the host last called `take_auto_cuts`.
     auto_cut: crate::auto_cut::AutoCut,
@@ -277,6 +288,9 @@ impl Engine {
             md2_pattern_rng: StreamRng::new(cfg.seed, "md2_blend_pattern"),
             md2_clocks: Default::default(),
             md2_forced_pattern: None,
+            double: None,
+            md3_carry: Default::default(),
+            md3_pattern_rng: StreamRng::new(cfg.seed, "md3_blend_pattern"),
             on_switch_failed: Default::default(),
             auto_cut: crate::auto_cut::AutoCut::new(cfg.seed, cfg.auto_hard_cut_mode),
             pending_auto_cuts: 0,
@@ -349,7 +363,12 @@ impl Engine {
     /// 1 = directional wipe, 2 = plasma ... 18 = Julia fractal) for the following soft cuts, `None` (the default,
     /// MD2's -1) draws one per soft cut from the seeded stream `md2_blend_pattern`.
     pub fn set_md2_blend_pattern(&mut self, pattern: Option<u32>) {
-        self.md2_forced_pattern = pattern.map(|k| k.min(md2_blend::TRANSITION_LIMIT));
+        let limit = if self.cfg.compat.rules().md3_blend_patterns {
+            Md3Pattern::ALL.len() as u32 - 1
+        } else {
+            md2_blend::TRANSITION_LIMIT
+        };
+        self.md2_forced_pattern = pattern.map(|k| k.min(limit));
     }
 
     /// The pattern kind of the MilkDrop 2 blend in progress.
@@ -428,6 +447,7 @@ impl Engine {
             // the size is non-zero and the mesh was validated when it was set, so this cannot fail
             let _ = r.resize(width, height);
         }
+        self.md3_refresh_pattern();
     }
 
     /// Teacher forcing for the **next** [`Engine::render`] call only.
@@ -482,6 +502,11 @@ impl Engine {
         name: &str,
         transition: Transition,
     ) -> Result<PresetReport, EngineError> {
+        // MilkDrop 3: `.milk2` double presets, and the next preset asked for while one is on screen
+        let transition = match self.load_preset_md3(bytes, name, transition) {
+            md3_blend::Md3Dispatch::Done(r) => return r,
+            md3_blend::Md3Dispatch::Plain(t) => t,
+        };
         // MilkDrop 2 blends inside one pipeline; a zero duration is its hard-cut path (`fBlendTime == 0`)
         let transition = if self.cfg.compat.rules().md2_preset_blend {
             match transition {
@@ -547,6 +572,7 @@ impl Engine {
                     // MilkDrop 2: a hard cut ends a running blend (`Default()` clears `m_bBlending`) and releases
                     // `m_OldShaders`
                     self.md2 = None;
+                    self.double = None;
                     old.renderer.set_old_shader_state(None);
                     self.spare = Some(old.renderer);
                 }
@@ -1102,6 +1128,13 @@ impl Engine {
                     a.renderer.set_old_shader_state(None);
                 }
             }
+        }
+        // MilkDrop 3 `progressMode` events (the first soft-in leg ends, the soft-out ramp ends): a new blend state may
+        // have replaced the old one
+        if self.double_tick()
+            && let Some(m) = self.md2.as_mut()
+        {
+            progress = m.preset_progress(clock.time, self.cfg.preset_duration);
         }
         if self.incoming.is_some()
             && self

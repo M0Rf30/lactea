@@ -79,9 +79,10 @@ pub struct Args {
     #[arg(short, long, value_name = "FILE")]
     pub preset: Option<PathBuf>,
 
-    /// Preset directory, scanned recursively for *.milk (repeatable). Default (when no --preset
-    /// was given): the first existing of /usr/share/projectM/presets,
-    /// /usr/local/share/projectM/presets and /opt/homebrew/share/projectM/presets; none on Windows.
+    /// Preset directory, scanned recursively for *.milk (and, with --compat milkdrop3, *.milk2 double
+    /// presets; repeatable). Default (when no --preset was given): the first existing of
+    /// /usr/share/projectM/presets, /usr/local/share/projectM/presets and
+    /// /opt/homebrew/share/projectM/presets; none on Windows.
     #[arg(short, long, value_name = "DIR")]
     pub dir: Vec<PathBuf>,
 

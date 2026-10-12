@@ -49,6 +49,8 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | no-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
 /// | expression language (`md3_ns_eel2`) | projectm-eval | projectm-eval / projectm-eval / ns-eel2 (MilkDrop 3 only) |
 /// | preset code that fails to compile (`md3_drop_failed_code`) | the preset is rejected | the preset is rejected (MilkDrop 2 itself drops the part; not ported) / MilkDrop 3 drops the part and loads |
+/// | `.milk2` double presets (`md3_double_preset`) | not loaded (error) | not loaded (error) |
+/// | soft-cut blend patterns (`md3_blend_patterns`) | (projectM transition shaders) | BeatDrop's 19 (MD3: its 30) |
 ///
 /// `MilkDrop3` is `MilkDrop2` plus the MilkDrop 3 deltas (see `docs/md3.md`); every MD3 delta is a field of
 /// [`CompatRules`], and [`Compat::md2_family`] is true for both variants.
@@ -237,6 +239,12 @@ pub struct CompatRules {
     /// zeroes the post-init `q` values, a failed per-frame / per-vertex / wave / shape part simply does not run.
     /// Otherwise the first failing part rejects the preset (`EngineError::Compile`).
     pub md3_drop_failed_code: bool,
+    /// MilkDrop 3 `.milk2` double presets: two presets in one file, played as a frozen MD2 soft cut with its own
+    /// progress modes (`docs/md3.md`). Loading a `.milk2` without this rule is an error.
+    pub md3_double_preset: bool,
+    /// Ordinary soft cuts draw their blend pattern from MilkDrop 3's 30 patterns (the enabled list) instead of
+    /// BeatDrop's 19. Needs `md2_preset_blend`.
+    pub md3_blend_patterns: bool,
 }
 
 impl Compat {
@@ -302,6 +310,8 @@ impl Compat {
                 md3_md2_comp_effects: false,
                 md3_ns_eel2: false,
                 md3_drop_failed_code: false,
+                md3_double_preset: false,
+                md3_blend_patterns: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -362,6 +372,8 @@ impl Compat {
                 md3_md2_comp_effects: false,
                 md3_ns_eel2: false,
                 md3_drop_failed_code: false,
+                md3_double_preset: false,
+                md3_blend_patterns: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
@@ -379,6 +391,8 @@ impl Compat {
                 md3_md2_comp_effects: true,
                 md3_ns_eel2: true,
                 md3_drop_failed_code: true,
+                md3_double_preset: true,
+                md3_blend_patterns: true,
                 ..Compat::MilkDrop2.rules()
             },
         }

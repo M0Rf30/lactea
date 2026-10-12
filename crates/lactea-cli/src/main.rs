@@ -683,6 +683,7 @@ fn run(args: &Args) -> Result<i32> {
             "unresolved_textures": report.unresolved_textures,
             "resolved_textures": report.resolved_textures,
             "warnings": report.warnings,
+            "sprite": report.sprite,
             "preset2": report2.as_ref().map(|r| serde_json::json!({
                 "preset_version": r.preset_version,
                 "warp_shader": format!("{:?}", r.warp),

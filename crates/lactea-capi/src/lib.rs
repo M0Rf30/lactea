@@ -25,7 +25,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 use lactea::{
-    Compat, Engine, EngineConfig, FrameClock, Image, PresetControl, SwitchRequest, TextureProvider,
+    Compat, Engine, EngineConfig, FrameClock, Image, Media, MediaFiles, PresetControl,
+    SwitchRequest, TEXTURE_EXTENSIONS as MEDIA_EXTENSIONS, TextureProvider, decode_gif,
 };
 
 mod events;
@@ -194,15 +195,70 @@ const TEXTURE_EXTENSIONS: [&str; 7] = ["jpg", "jpeg", "dds", "png", "tga", "bmp"
 /// sorted by (name, path) (same rules as the CLI and projectM's `FileScanner`).
 struct DirTextures {
     files: Vec<(String, PathBuf)>,
+    /// Every file MD3 may look for (sprites, GIFs, `.jfif`), by path relative to the MD3 data root.
+    media: MediaFiles<PathBuf>,
 }
 
 impl DirTextures {
+    /// Index `root` recursively; when `root` is one of the MD3 folders (`textures`, `sprites`, `gifs`) its parent
+    /// is the data root too, so a preset's `sprites\x.png` resolves next to the textures.
     fn scan(root: &Path) -> Self {
         let mut files = Vec::new();
         scan_dir(root, &mut files, 0);
         files.sort();
-        Self { files }
+        let mut media = MediaFiles::new();
+        scan_media(root, "", 0, &mut media);
+        let md3_folder = root.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+            ["textures", "sprites", "gifs"].contains(&n.to_ascii_lowercase().as_str())
+        });
+        if let (true, Some(parent)) = (md3_folder, root.parent()) {
+            for sub in ["textures", "sprites", "gifs"] {
+                scan_media(&parent.join(sub), sub, 0, &mut media);
+            }
+        }
+        Self { files, media }
     }
+}
+
+/// Register every media file under `dir` as `<rel>/<name>` (path relative to the data root).
+fn scan_media(dir: &Path, rel: &str, depth: u32, out: &mut MediaFiles<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries {
+        let Some(name) = p.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+            continue;
+        };
+        let path = if rel.is_empty() {
+            name
+        } else {
+            format!("{rel}/{name}")
+        };
+        if p.is_dir() {
+            if depth < 8 {
+                scan_media(&p, &path, depth + 1, out);
+            }
+            continue;
+        }
+        let ext = p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(str::to_ascii_lowercase);
+        if ext.is_some_and(|e| MEDIA_EXTENSIONS.contains(&e.as_str())) {
+            out.add(&path, p);
+        }
+    }
+}
+
+/// A GIF (by content) as frames, anything else as a still image.
+fn decode_media(path: &Path) -> Option<Media> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.starts_with(b"GIF8") {
+        return decode_gif(&bytes).ok().map(Media::Animated);
+    }
+    decode_file(path).map(Media::Still)
 }
 
 fn scan_dir(dir: &Path, out: &mut Vec<(String, PathBuf)>, depth: u32) {
@@ -260,6 +316,16 @@ impl TextureProvider for DirTextures {
 
     fn random_pool(&self) -> Vec<String> {
         self.files.iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn load_md3_texture(&mut self, name: &str) -> Option<Media> {
+        let path = self.media.find_texture(name)?.clone();
+        decode_media(&path)
+    }
+
+    fn load_sprite(&mut self, path: &str) -> Option<Media> {
+        let file = self.media.find_sprite(path)?.clone();
+        decode_media(&file)
     }
 }
 

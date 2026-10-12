@@ -14,12 +14,14 @@
 
 mod cnum;
 mod scan;
+mod sprite;
 
 use scan::{Lookup, decode, sane_entries};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
 pub use scan::LINEFEED_CONTROL_CHAR;
+pub use sprite::PresetSprite;
 
 /// `MAX_CUSTOM_WAVES` (md_defines.h)
 pub const MAX_CUSTOM_WAVES: usize = 16;
@@ -637,6 +639,9 @@ pub struct Preset {
     pub warp_shader: Option<String>,
     /// `comp_<n>` text; `None` -> default comp shader (`GenCompPShaderText`).
     pub comp_shader: Option<String>,
+    /// MD3 sprite block (`SpriteName` .. `SpriteRepeatY`, `code_N`); `None` when the preset has no sprite name.
+    /// MD2 and projectM ignore it.
+    pub sprite: Option<PresetSprite>,
     /// Every other `key=value` line (file order, duplicates kept), decoded lossily.
     pub extra: Vec<(String, String)>,
 }
@@ -655,6 +660,7 @@ impl Default for Preset {
             per_pixel: String::new(),
             warp_shader: None,
             comp_shader: None,
+            sprite: None,
             extra: Vec::new(),
         }
     }
@@ -732,6 +738,8 @@ impl Preset {
         // STATE_COMP
         let c = decode(&lk.read_code("comp_"));
         p.comp_shader = if c.is_empty() { None } else { Some(c) };
+        // MD3 sprite block: read wherever it is, only meaningful to `Compat::MilkDrop3`
+        p.sprite = PresetSprite::parse(&mut lk, bytes);
         p.comp_ps_version = comp_v;
 
         p.extra = p.collect_extra(bytes);
@@ -837,6 +845,9 @@ impl Preset {
                 }
             }
         }
+        if let Some(sp) = &self.sprite {
+            s.extend(sp.consumed_keys());
+        }
         s
     }
 
@@ -886,6 +897,9 @@ impl Preset {
         }
         if let Some(c) = &self.comp_shader {
             write_code(&mut out, "comp_", c, true);
+        }
+        if let Some(sp) = &self.sprite {
+            sp.write(&mut out);
         }
         for (k, v) in &self.extra {
             let _ = writeln!(out, "{k}={v}");

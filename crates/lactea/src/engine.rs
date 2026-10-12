@@ -1,5 +1,6 @@
 //! The engine: preset loading and the per-frame CPU pipeline (projectM `MilkdropPreset`).
 
+use crate::cache::{MediaCache, ShaderCache};
 use crate::md3_inputs::{Md3Frame, Md3Inputs, MouseState, new_analyzer, shader_ext};
 use crate::media::Media;
 use crate::rng::{ShaderStream, StreamRng, hue_offsets};
@@ -15,7 +16,7 @@ use crate::{
 use lactea_abi::{PassKind, ShaderInterface, TexSource};
 use lactea_audio::{Analyzer, AudioFrame};
 use lactea_eel::GlobalMemory;
-use lactea_hlsl::{Options as HlslOptions, default_comp_shader, default_warp_shader, translate};
+use lactea_hlsl::{Options as HlslOptions, default_comp_shader, default_warp_shader};
 use lactea_preset::{
     BaseValues, Flavor, MAX_CUSTOM_SHAPES, MAX_CUSTOM_WAVES, Preset, code_to_source,
 };
@@ -189,6 +190,10 @@ pub struct Engine {
     queue: wgpu::Queue,
     analyzer: Analyzer,
     provider: Option<Box<dyn TextureProvider>>,
+    /// Textures and sprites the provider decoded, kept across preset loads (cleared with the provider).
+    media_cache: MediaCache,
+    /// Translated shaders, kept across preset loads.
+    shader_cache: ShaderCache,
     /// The preset shown (the outgoing one during a soft cut). `None` until the first load.
     active: Option<Slot>,
     /// The preset fading in during a soft cut.
@@ -264,6 +269,8 @@ impl Engine {
             device: device.clone(),
             queue: queue.clone(),
             provider: None,
+            media_cache: MediaCache::new(),
+            shader_cache: ShaderCache::new(),
             active: None,
             incoming: None,
             spare: Some(renderer),
@@ -407,6 +414,8 @@ impl Engine {
     /// Sets the source of user textures (`sampler_<name>` in preset shaders).
     pub fn set_texture_provider(&mut self, provider: Box<dyn TextureProvider>) {
         self.provider = Some(provider);
+        // the new provider may map the same names to other pixels
+        self.media_cache.clear();
     }
 
     /// Interleaved float PCM (`-1..1`), any channel count (only the first two are used).
@@ -826,6 +835,7 @@ impl Engine {
         let sprite = match preset.sprite.as_ref().filter(|_| rules.md3_preset_sprites) {
             Some(cfg) => crate::sprites::load(
                 self.provider.as_mut(),
+                &mut self.media_cache,
                 cfg,
                 renderer,
                 &gm,
@@ -880,7 +890,7 @@ impl Engine {
     /// Translate the preset's shaders following the PSVERSION rules of projectM (MilkDrop 2 with
     /// [`crate::Compat::md2_family`]).
     fn build_shaders(
-        &self,
+        &mut self,
         p: &Preset,
         report: &mut PresetReport,
     ) -> (Option<CompiledShader>, Option<CompiledShader>) {
@@ -891,11 +901,11 @@ impl Engine {
         opts.floor_mod = !md2;
         opts.projectm_flavor = !md2;
         opts.md3 = self.cfg.compat.rules().md3_shader_prelude;
-        let to_compiled = |t: lactea_hlsl::Translated, report: &mut PresetReport| {
+        let to_compiled = |t: &lactea_hlsl::Translated, report: &mut PresetReport| {
             report.warnings.extend(t.warnings.iter().cloned());
             CompiledShader {
-                wgsl: t.wgsl,
-                interface: t.interface,
+                wgsl: t.wgsl.clone(),
+                interface: t.interface.clone(),
             }
         };
 
@@ -910,7 +920,7 @@ impl Engine {
                 _ => p.warp_shader.as_deref().map(code_to_source),
             };
             match text.filter(|t| !t.trim().is_empty()) {
-                Some(src) => match translate(PassKind::Warp, &src, &opts) {
+                Some(src) => match &*self.shader_cache.translate(PassKind::Warp, &src, &opts) {
                     Ok(t) => {
                         report.warp = ShaderOutcome::User;
                         warp = Some(to_compiled(t, report));
@@ -926,7 +936,7 @@ impl Engine {
                 },
                 None if md2 => {
                     let src = default_warp_shader(p.base.decay, p.base.tex_wrap);
-                    match translate(PassKind::Warp, &src, &opts) {
+                    match &*self.shader_cache.translate(PassKind::Warp, &src, &opts) {
                         Ok(t) => {
                             report.warp = ShaderOutcome::Default;
                             warp = Some(to_compiled(t, report));
@@ -967,7 +977,7 @@ impl Engine {
             let user = text.filter(|t| !t.trim().is_empty());
             let mut used_default = user.is_none();
             if let Some(src) = &user {
-                match translate(PassKind::Comp, src, &opts) {
+                match &*self.shader_cache.translate(PassKind::Comp, src, &opts) {
                     Ok(t) => {
                         report.comp = ShaderOutcome::User;
                         comp = Some(to_compiled(t, report));
@@ -987,7 +997,10 @@ impl Engine {
                 if report.comp != ShaderOutcome::Fallback {
                     report.comp = ShaderOutcome::Default;
                 }
-                match translate(PassKind::Comp, &default_src, &opts) {
+                match &*self
+                    .shader_cache
+                    .translate(PassKind::Comp, &default_src, &opts)
+                {
                     Ok(t) => comp = Some(to_compiled(t, report)),
                     Err(e) => report
                         .warnings
@@ -1035,13 +1048,16 @@ impl Engine {
                         reason: e.to_string(),
                         fallback: "default composite shader".into(),
                     });
-                    let passthrough =
-                        translate(PassKind::Comp, PASSTHROUGH_COMP, &HlslOptions::default())
-                            .ok()
-                            .map(|t| CompiledShader {
-                                wgsl: t.wgsl,
-                                interface: t.interface,
-                            });
+                    let passthrough = lactea_hlsl::translate(
+                        PassKind::Comp,
+                        PASSTHROUGH_COMP,
+                        &HlslOptions::default(),
+                    )
+                    .ok()
+                    .map(|t| CompiledShader {
+                        wgsl: t.wgsl,
+                        interface: t.interface,
+                    });
                     if let Some(p) = passthrough {
                         comp_ok = renderer.set_comp_shader(Some(p)).is_ok();
                     }
@@ -1089,7 +1105,7 @@ impl Engine {
         };
         let pool = provider.random_pool();
         let mut slot_pick: HashMap<usize, Option<String>> = HashMap::new();
-        let mut cache: HashMap<String, Option<Media>> = HashMap::new();
+        let mut cache: HashMap<String, Option<Arc<Media>>> = HashMap::new();
         let md3_gif = self.cfg.compat.rules().md3_gif_textures;
         for (name, pm_name) in wanted {
             let provider_name = match rand_slot(&name) {
@@ -1105,12 +1121,12 @@ impl Engine {
             };
             let media = cache.entry(pn.clone()).or_insert_with(|| {
                 if md3_gif {
-                    provider.load_md3_texture(&pn)
+                    self.media_cache.md3_texture(&mut **provider, &pn)
                 } else {
-                    provider.load(&pn).map(Media::Still)
+                    self.media_cache.still(&mut **provider, &pn)
                 }
             });
-            let set = match media {
+            let set = match media.as_deref() {
                 Some(Media::Still(img))
                     if img.width > 0
                         && img.height > 0
@@ -1535,7 +1551,10 @@ fn build_frame(
     eval_per_frame(l, &cx, &env, &base, forced, last);
     let anim = warp_anim(&cx, &base);
     let toff = warp_mesh::texel_offset_uv(cfg.texel_offset, cfg.width, cfg.height);
-    let (vertex_vars, warp_uv) = eval_vertices(l, g, &anim, toff);
+    let vertex_vars = eval_vertices(l, g);
+    // projectM's GPU evaluates the warp UV formula from the vertex variables: the CPU grid is not needed
+    let warp_uv =
+        (!cfg.compat.rules().warp_uv_on_gpu).then(|| warp_vertex_uvs(g, &vertex_vars, &anim, toff));
     let mut fi = frame_head(l, &cx, &base, vertex_vars, warp_uv, anim, true, None);
     push_shapes(l, &env, &mut fi.shapes);
     push_waves(l, &cx, &env, &mut fi.waves);
@@ -1605,15 +1624,9 @@ fn warp_anim(cx: &FrameCtx, base: &BaseValues) -> WarpAnim {
     anim
 }
 
-/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values) and
-/// the warp UV of every vertex they give.
-fn eval_vertices(
-    l: &mut Loaded,
-    g: &MeshGeometry,
-    anim: &WarpAnim,
-    toff: [f32; 2],
-) -> (Vec<VertexVars>, Vec<[f32; 2]>) {
-    let vertex_vars: Vec<VertexVars> = if l.pp.prog.is_some() {
+/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values).
+fn eval_vertices(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
+    if l.pp.prog.is_some() {
         per_pixel_vars(l, g)
     } else {
         let pv = |v| l.pf.ctx.get(v);
@@ -1631,13 +1644,21 @@ fn eval_vertices(
             sy: pv(vars.sy) as f32,
         };
         vec![vv; g.vertex_count()]
-    };
-    let warp_uv: Vec<[f32; 2]> = vertex_vars
+    }
+}
+
+/// The warp UV of every vertex of the mesh for its motion variables.
+fn warp_vertex_uvs(
+    g: &MeshGeometry,
+    vertex_vars: &[VertexVars],
+    anim: &WarpAnim,
+    toff: [f32; 2],
+) -> Vec<[f32; 2]> {
+    vertex_vars
         .iter()
         .enumerate()
         .map(|(n, vv)| warp_mesh::warp_vertex_uv(g, n, vv, anim, toff))
-        .collect();
-    (vertex_vars, warp_uv)
+        .collect()
 }
 
 /// Everything of a frame except shapes, custom waves and the shader pass random state: timing, audio, `q`, warp
@@ -1653,7 +1674,7 @@ fn frame_head(
     cx: &FrameCtx,
     base: &BaseValues,
     vertex_vars: Vec<VertexVars>,
-    warp_uv: Vec<[f32; 2]>,
+    warp_uv: Option<Vec<[f32; 2]>>,
     anim: WarpAnim,
     gpu: bool,
     wrap_snap: Option<f32>,
@@ -1682,7 +1703,7 @@ fn frame_head(
     if let Some(m) = cx.md3 {
         fi.ext = shader_ext(&cfg.compat.rules(), m, pf, l.start_time, clock.time, true);
     }
-    fi.warp_uv = Some(warp_uv);
+    fi.warp_uv = warp_uv;
     // projectM evaluates the warp UV formula on the GPU (the renderer ignores this for MilkDrop 2 compat)
     if gpu {
         fi.warp_gpu = Some(WarpGpu {
@@ -1979,22 +2000,16 @@ fn finish_frame(
     l.hue_offsets = hue;
 }
 
-/// Per-pixel inputs `(x, y, rad, ang)` exactly as projectM computes them (`PerPixelMesh`):
-/// its own mesh `y_pm = row_pm/gy*2-1` (row 0 on top; `-y` of ours is *not* bit-identical in f32:
+/// Per-pixel inputs `(x, y, rad, ang)` exactly as projectM computes them (`PerPixelMesh`), taken from the mesh's
+/// precomputed projectM vertex ([`MeshGeometry::projectm_vertex`], constant per mesh): its own mesh
+/// `y_pm = row_pm/gy*2-1` (row 0 on top; `-y` of ours is *not* bit-identical in f32:
 /// e.g. 2/36*2-1 and -(34/36*2-1) differ by 1 ulp), `rad = hypotf(x*ax, y_pm*ay)`,
 /// `ang = -atan2f(y_pm*ay, x*ax)` (`atan2f(+0, -x) = +pi`, so the centre row left of the centre
 /// is `-pi`). `rad` is compared against constants by presets (`below(rad,0.5)` ...), so a 1-ulp
 /// difference flips whole cells (Memories Of The Castle: vertex rows 2 / 34, warped 48 -> 96+ dB).
 fn per_pixel_inputs(g: &MeshGeometry, x: u32, row_pm: u32) -> [f32; 4] {
-    let vx = x as f32 / g.gx() as f32 * 2.0 - 1.0;
-    let vy = row_pm as f32 / g.gy() as f32 * 2.0 - 1.0;
+    let ([vx, vy], rad, ang) = g.projectm_vertex(x, g.gy() - row_pm);
     let (ax, ay) = (g.aspect_x(), g.aspect_y());
-    let rad = (vx * ax).hypot(vy * ay);
-    let ang = if row_pm == g.gy() / 2 && x == g.gx() / 2 {
-        0.0
-    } else {
-        (vy * ay).atan2(vx * ax)
-    };
     [vx * 0.5 * ax + 0.5, vy * 0.5 * ay + 0.5, rad, -ang]
 }
 

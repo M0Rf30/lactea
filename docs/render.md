@@ -92,7 +92,11 @@ Measured with `ov_mv*` probes against the oracle's `warpsrc` stage (`fdrender --
   **snapped to the 1/256 px grid** in the GPU's draw order (upper triangle `c d a`, lower `d a b`), **truncated** to
   half. Against the oracle's own UV map (patched dump, Aderrasi, 320x180) 0-2 of 115 200 texels differ; with the
   unsnapped mesh fractions the lines were a pixel off (mv-s55 `warpsrc` 55-66 dB -> 99 dB). The vertex UVs are the
-  GPU's own (`Renderer::gpu_warp_vertex_uv` runs `warp_vs` on the previous frame's inputs);
+  GPU's own (`Renderer::gpu_warp_vertex_uv` runs `warp_vs` on the previous frame's inputs: the readback is submitted as its
+  own small submission at the end of the frame that produced the inputs, with persistent buffers, and the next frame
+  waits for that submission only; `FrameInput::warp_uv` is not needed then, the CPU UVs the lookup falls back on if the
+  readback fails are derived from `warp_gpu`). The GPU warp mesh is drawn indexed: one vertex per mesh vertex plus an
+  index buffer in the triangle order above;
 * the vertex buffer holds `(countX+1)*2` entries that are never cleared and drawn completely after every row; unfilled
   slots (`posX = 1` is skipped, so always the last pair) stay `(0,0)`: an extra line from the bottom-left corner per
   row. The index buffer keeps the vertex count of the first draw, while the GL vertex buffer is re-allocated at every

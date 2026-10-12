@@ -36,6 +36,10 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
   order, GIFs) and `load_sprite(path) -> Option<Media>` (a preset sprite's path relative to the MD3 data root);
   `Media` is a still `Image` or an `AnimatedImage` (full-canvas frames + delays, `lactea::decode_gif`). Hosts index their
   files with `lactea::MediaFiles` (path arithmetic and search order only, no I/O). See `md3.md`, Sprites.
+  The engine keeps what the provider returned (found textures, shape images, sprites; up to 128 MiB, least recently
+  used evicted) and the translated shaders (16 MiB) across `load_preset` calls, so a reload, a playlist revisit or the
+  two halves of a `.milk2` do not decode or translate again; the provider is asked once per name. `set_texture_provider`
+  drops the media. A provider whose files change while it is installed is not re-read.
 * `PresetReport`: `warp`/`comp` `ShaderOutcome {NotUsed, User, Default, Fallback}`, `warnings`,
   `shader_fallbacks`, `unresolved_textures`, `resolved_textures`.
 * `EngineError {Parse, Compile{what,error}, Render}`. On error the previous preset stays active.

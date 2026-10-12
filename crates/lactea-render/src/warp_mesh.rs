@@ -31,6 +31,8 @@ pub struct MeshGeometry {
     pub(crate) y: Vec<f32>,
     pub(crate) rad: Vec<f32>,
     pub(crate) ang: Vec<f32>,
+    /// [`MeshGeometry::projectm_vertex`] of every vertex, indexed like `x`: constant for the mesh, so computed once.
+    pm: Vec<([f32; 2], f32, f32)>,
 }
 
 /// `(m_fAspectX, m_fAspectY)` from texture size (plugin.cpp).
@@ -70,6 +72,7 @@ impl MeshGeometry {
             y: Vec::with_capacity(n),
             rad: Vec::with_capacity(n),
             ang: Vec::with_capacity(n),
+            pm: Vec::with_capacity(n),
         };
         for y in 0..=gy {
             for x in 0..=gx {
@@ -85,6 +88,7 @@ impl MeshGeometry {
                 g.y.push(vy);
                 g.rad.push(rad);
                 g.ang.push(ang);
+                g.pm.push(projectm_vertex(gx, gy, ax, ay, x, gy - y));
             }
         }
         Ok(g)
@@ -156,18 +160,41 @@ impl MeshGeometry {
     /// `row_pm / gy * 2 - 1` with `row_pm = gy - y` (float rounding differs from `-self.y[n]`);
     /// `rad = hypotf(x*ax, y*ay)`, `ang = atan2f(y*ay, x*ax)` (0 at the centre vertex).
     /// Returns `(pos, rad, ang)`.
+    #[inline]
     pub fn projectm_vertex(&self, x: u32, y: u32) -> ([f32; 2], f32, f32) {
-        let row_pm = self.gy - y;
-        let vx = x as f32 / self.gx as f32 * 2.0 - 1.0;
-        let vy = row_pm as f32 / self.gy as f32 * 2.0 - 1.0;
-        let rad = (vx * self.aspect_x).hypot(vy * self.aspect_y);
-        let ang = if row_pm == self.gy / 2 && x == self.gx / 2 {
-            0.0
+        if x <= self.gx && y <= self.gy {
+            self.pm[self.index(x, y)]
         } else {
-            (vy * self.aspect_y).atan2(vx * self.aspect_x)
-        };
-        ([vx, vy], rad, ang)
+            projectm_vertex(
+                self.gx,
+                self.gy,
+                self.aspect_x,
+                self.aspect_y,
+                x,
+                self.gy.wrapping_sub(y),
+            )
+        }
     }
+}
+
+/// The uncached formula behind [`MeshGeometry::projectm_vertex`]; `row_pm` is projectM's mesh row (0 = top).
+fn projectm_vertex(
+    gx: u32,
+    gy: u32,
+    ax: f32,
+    ay: f32,
+    x: u32,
+    row_pm: u32,
+) -> ([f32; 2], f32, f32) {
+    let vx = x as f32 / gx as f32 * 2.0 - 1.0;
+    let vy = row_pm as f32 / gy as f32 * 2.0 - 1.0;
+    let rad = (vx * ax).hypot(vy * ay);
+    let ang = if row_pm == gy / 2 && x == gx / 2 {
+        0.0
+    } else {
+        (vy * ay).atan2(vx * ax)
+    };
+    ([vx, vy], rad, ang)
 }
 
 /// The ten per-vertex motion variables after (optional) per-pixel code

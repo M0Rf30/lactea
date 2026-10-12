@@ -26,7 +26,7 @@
 use super::md3_blend::{BlendLaunch, ProgressMode};
 use super::{
     FrameCtx, LastFrame, Loaded, Slot, eval_per_frame, eval_vertices, finish_frame, frame_env,
-    frame_head, push_shapes, push_waves, warp_anim,
+    frame_head, push_shapes, push_waves, warp_anim, warp_vertex_uvs,
 };
 use crate::rng::StreamRng;
 use crate::runtime::PerFrame;
@@ -1042,11 +1042,22 @@ pub(super) fn build_blend_frame(
     // (the old state's UVs use the *new* state's warp animation terms, like MD2)
     let toff = warp_mesh::texel_offset_uv(cfg.texel_offset, cfg.width, cfg.height);
     let anim = warp_anim(cx, &base_new);
-    let (_vv_new, uv_new) = eval_vertices(new, g, &anim, toff);
-    let (_, uv_old) = eval_vertices(&mut m.old, g, &anim, toff);
+    let vv_new = eval_vertices(new, g);
+    let vv_old = eval_vertices(&mut m.old, g);
+    let uv_new = warp_vertex_uvs(g, &vv_new, &anim, toff);
+    let uv_old = warp_vertex_uvs(g, &vv_old, &anim, toff);
     let (uv, vert_alpha) = blend_mesh(&uv_new, &uv_old, &m.pattern, m.progress);
 
-    let mut fi = frame_head(new, cx, &base_new, Vec::new(), uv, anim, false, Some(snap));
+    let mut fi = frame_head(
+        new,
+        cx,
+        &base_new,
+        Vec::new(),
+        Some(uv),
+        anim,
+        false,
+        Some(snap),
+    );
     // MilkDrop 3: no ob / ib borders while a blend is running (`DisableBox`), and never while a `.milk2` is
     // loaded (`fromMilk2`)
     fi.borders.hidden |=

@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- Auto compat, md3 hardening, perf, fidelity and ux improvements
+- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
+
+### Fixed
+
+- **lactea:** Fall back to milkdrop 2 when projectm cannot translate a shader
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- Auto compat, md3 hardening, perf, fidelity and ux improvements
+- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- Auto compat, md3 hardening, perf, fidelity and ux improvements
+- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- Auto compat, md3 hardening, perf, fidelity and ux improvements
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- Auto compat, md3 hardening, perf, fidelity and ux improvements
+- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- Auto compat, md3 hardening, perf, fidelity and ux improvements
+
+
+## [0.1.2] - 2026-10-12
+
+### Added
+
+- Add MilkDrop 3 support (Compat::MilkDrop3)
+- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
+
+
 ### Added
 
 - `lactea`: the MilkDrop 3 `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch shader uniforms (and the

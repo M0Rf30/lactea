@@ -13,6 +13,7 @@
 #![warn(missing_docs)]
 
 mod cnum;
+pub mod milk2;
 mod scan;
 
 use scan::{Lookup, decode, sane_entries};

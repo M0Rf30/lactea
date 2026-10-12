@@ -16,9 +16,9 @@
 //! The port keeps the scans byte for byte, including their quirks (see the comments), because the
 //! rewritten text is what decides how a preset's expression evaluates.
 
-/// Nesting limit of the rewriter's recursion (the right-hand side of an operator is rewritten by a
-/// recursive call).  The C code has none and needs a deep native stack for adversarial input.
-const MAX_REWRITE_DEPTH: u32 = 1000;
+// The recursion of the rewriter (the right-hand side of an operator is rewritten by a recursive
+// call) is bounded by the caller's `Context::max_depth`; the C code has no limit and needs a deep
+// native stack for adversarial input.
 
 /// `isspace` in the C locale.
 fn is_space(c: u8) -> bool {
@@ -122,17 +122,17 @@ fn strtoul16(s: &[u8]) -> (u32, usize) {
     (v, i)
 }
 
-/// Rewrites `src` as `preprocessCode` does.  `Err` only for the recursion limit.
-pub(crate) fn preprocess(src: &[u8]) -> Result<Vec<u8>, ()> {
+/// Rewrites `src` as `preprocessCode` does.  `Err` only when the nesting exceeds `max_depth`.
+pub(crate) fn preprocess(src: &[u8], max_depth: u32) -> Result<Vec<u8>, ()> {
     let src = match src.iter().position(|&c| c == 0) {
         Some(n) => &src[..n],
         None => src,
     };
-    rewrite(src, 0)
+    rewrite(src, 0, max_depth)
 }
 
-fn rewrite(src: &[u8], depth: u32) -> Result<Vec<u8>, ()> {
-    if depth > MAX_REWRITE_DEPTH {
+fn rewrite(src: &[u8], depth: u32, max_depth: u32) -> Result<Vec<u8>, ()> {
+    if depth > max_depth {
         return Err(());
     }
     // The C code reads a NUL terminated string; indices past the end read 0.
@@ -253,6 +253,11 @@ fn rewrite(src: &[u8], depth: u32) -> Result<Vec<u8>, ()> {
                         let ch = buf[lp as usize];
                         if ch == b')' {
                             lsem += 1;
+                            // A left operand nested deeper than the limit is rejected by the parser
+                            // anyway; stopping here keeps long `^` / `%` chains linear.
+                            if lsem > max_depth as i32 {
+                                return Err(());
+                            }
                         } else if ch == b'(' {
                             lsem -= 1;
                             if lsem < 0 {
@@ -364,7 +369,7 @@ fn rewrite(src: &[u8], depth: u32) -> Result<Vec<u8>, ()> {
                         rp += 1;
                     }
                 }
-                let mut r_text = rewrite(&src[r_begin..rp.min(src.len())], depth + 1)?;
+                let mut r_text = rewrite(&src[r_begin..rp.min(src.len())], depth + 1, max_depth)?;
                 p = rp;
 
                 match n {
@@ -463,7 +468,7 @@ mod tests {
     use super::preprocess;
 
     fn pp(s: &str) -> String {
-        String::from_utf8(preprocess(s.as_bytes()).unwrap()).unwrap()
+        String::from_utf8(preprocess(s.as_bytes(), 1000).unwrap()).unwrap()
     }
 
     #[test]

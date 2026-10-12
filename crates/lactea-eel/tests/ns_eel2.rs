@@ -513,6 +513,36 @@ fn deep_nesting_is_rejected_not_overflowed() {
         .unwrap();
 }
 
+/// The rewriter honours `Context::set_max_depth`: a host that lowered the limit to fit a small
+/// thread stack gets an error, not an abort.  Long `^` / `%` chains are rejected without
+/// quadratic work.
+#[test]
+fn rewriter_honours_max_depth_on_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(256 << 10)
+        .spawn(|| {
+            let n = 999;
+            for src in [
+                format!("r={}x;", "!".repeat(n)),
+                format!("r={}x;", "a=".repeat(n)),
+                format!("r=2{};", "^1".repeat(n)),
+                format!("r=2{};", "%1".repeat(n)),
+            ] {
+                let mut c = ctx();
+                c.set_max_depth(50);
+                assert!(c.compile(&src).is_err(), "{}", &src[..12]);
+            }
+            let start = std::time::Instant::now();
+            let mut c = ctx();
+            c.set_max_depth(50);
+            assert!(c.compile(&format!("r=2{};", "^1".repeat(40_000))).is_err());
+            assert!(start.elapsed().as_secs() < 2, "long ^ chain is not linear");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
 #[test]
 fn names_are_significant_up_to_128_bytes() {
     let long_a = format!("{}a", "n".repeat(128));

@@ -652,12 +652,13 @@ pub(crate) fn compile(ctx: &mut Context, src: &str) -> Result<Program, CompileEr
     let ns = ctx.dialect() == Dialect::NsEel2;
     let rewritten;
     let src = if ns {
-        rewritten = ns_pre::preprocess(src.as_bytes()).map_err(|()| CompileError {
-            message: "expression nested too deeply".into(),
-            line: 1,
-            column: 0,
-            column_end: 0,
-        })?;
+        rewritten =
+            ns_pre::preprocess(src.as_bytes(), ctx.max_depth).map_err(|()| CompileError {
+                message: "expression nested too deeply".into(),
+                line: 1,
+                column: 0,
+                column_end: 0,
+            })?;
         String::from_utf8_lossy(&rewritten)
     } else {
         std::borrow::Cow::Borrowed(src)

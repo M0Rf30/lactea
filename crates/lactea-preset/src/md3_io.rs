@@ -190,10 +190,7 @@ impl Preset {
         if !shader?.contains(LOCKED_SHADER_MARKER) {
             return None;
         }
-        self.extra
-            .iter()
-            .find(|(k, _)| k == key)
-            .and_then(|(_, v)| v.trim().parse().ok())
+        self.extra_handle(key)
     }
 
     /// Serialise like MilkDrop 3 3.37 `Export` (docs/md3.md): no banner, `\n` line ends, `printf`

@@ -24,9 +24,10 @@ Its behaviour was recovered by binary analysis, only to read and render MD3 pres
   here;
 - no MD3 code, binaries, presets or data are in the repository; tests use small hand-written fixtures.
 
-MD3's paid, locked shaders (the `MD31` / `MD32` keys) are not supported: lactea cannot and does not
-decrypt them. A preset that carries one still loads and runs the placeholder shader that stands in for it
-in the file, exactly like a build without the license.
+MD3's paid, locked shaders (the `MD31` / `MD32` keys) are not shipped: lactea cannot and does not decrypt them.
+A preset that carries one still loads and runs the placeholder shader that stands in for it in the file, unless
+the host registers its own HLSL for the handle (`EngineConfig::shader_overrides`; library and `fdrender` only,
+no app or C API exposure).
 
 ## Resources
 
@@ -43,7 +44,7 @@ in the file, exactly like a build without the license.
 | Sprites (`[SPRITE1_BEGIN]` blocks, layers 0-4, 11 blend modes, burn, GIF sprites and GIF shader textures) | Supported, see [Sprites](#sprites); no `sprites.ini`, user sprite or webcam layers |
 | Auto hard cuts (`AutoHardCutMode` 1..7) and the MD3 display time | Supported: "Auto hard cuts"; F8 / `--auto-hard-cut` / C API |
 | `.wave` / `.shape` files (single custom wave / shape import and export), MD3 `.milk` writer incl. sprite block | Supported (library / engine API; no app UI) |
-| Locked shaders (`MD31` / `MD32`) | Not supported: the placeholder shader in the file runs |
+| Locked shaders (`MD31` / `MD32`) | The placeholder shader in the file runs unless the host registers its own HLSL for the handle (library + `fdrender`; no app or C API) |
 
 MD3 pack (`~/M0Rf30/md3-re`, local smoke runs only; `fdrender --compat md3 --texture-dir <pack>/textures`, 30 frames):
 all 331 `.milk` and all 146 `.milk2` render with exit code 0, no shader fallback and no warning (before the MD3 work:
@@ -134,9 +135,10 @@ its own scanner and Bison-style precedence climbing (`Dialect::ProjectMEval`, un
 ### Measured corrections of the spec
 
 These spec statements were inferred or derived, not measured. They were checked on the real program (MD3 3.37 under
-Wine, `md3shot.sh`) with probe presets that write expression results into the border colours (`fixtures/md3/eel/`;
-the measured bytes are in `crates/lactea/tests/md3_eel_oracle.rs`). Lactea reproduces the border pixels of all 17
-probes exactly (14 are kept as fixtures).
+Wine, `md3shot.sh`) with probe presets that write expression results into the border colours (20 files in
+`fixtures/md3/eel/`: 14 are pinned by their measured bytes in `crates/lactea/tests/md3_eel_oracle.rs`, the
+six `ns_*` probes in `crates/lactea-eel/tests/ns_eel2.rs`). Lactea reproduces the border pixels of all of them
+exactly.
 
 | Spec statement | Measured on MD3 | Implemented |
 |---|---|---|

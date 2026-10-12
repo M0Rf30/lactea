@@ -903,3 +903,50 @@ fn gpu_warp_vertex_stage_matches_cpu_uv() {
         );
     }
 }
+
+/// Under projectM's rules the CPU warp grid is optional: a frame that only carries `warp_gpu` (what the engine
+/// sends) draws and feeds the motion vectors of the next frame exactly like one that also carries `warp_uv`.
+#[test]
+fn gpu_warp_frames_do_not_need_the_cpu_grid() {
+    let (device, queue) = need_gpu!();
+    let (w, h) = (64, 48);
+    let img = gradient(w, h);
+    let run = |with_cpu_grid: bool| -> Vec<u8> {
+        let mut r = Renderer::new(&device, &queue, cfg(w, h)).unwrap();
+        assert!(r.compat() == Compat::ProjectM);
+        let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
+        r.inject_main(&img).unwrap();
+        let g = r.mesh_geometry().clone();
+        for frame in 0..3 {
+            let anim = lactea_render::warp_mesh::WarpAnim::projectm(0.1 * frame as f32, 1.0, 1.0);
+            let vars: Vec<lactea_render::warp_mesh::VertexVars> = (0..g.vertex_count())
+                .map(|i| lactea_render::warp_mesh::VertexVars {
+                    zoom: 1.0 + 0.05 * (i % 7) as f32,
+                    rot: 0.05 * frame as f32,
+                    warp: 0.5,
+                    ..Default::default()
+                })
+                .collect();
+            let mut f = quiet_input();
+            f.post.decay = 0.95;
+            f.mv.x = 8.0;
+            f.mv.y = 6.0;
+            f.mv.l = 5.0;
+            f.mv.rgba = [1.0, 1.0, 1.0, 0.8];
+            if with_cpu_grid {
+                f.warp_uv = Some(
+                    vars.iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            lactea_render::warp_mesh::warp_vertex_uv(&g, i, v, &anim, [0.0; 2])
+                        })
+                        .collect(),
+                );
+            }
+            f.warp_gpu = Some(lactea_render::WarpGpu { vars, anim });
+            render(&mut r, &device, &queue, &f, &view);
+        }
+        r.read_stage(Stage::Main).unwrap().2
+    };
+    assert_eq!(run(true), run(false));
+}

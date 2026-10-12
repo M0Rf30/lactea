@@ -1095,6 +1095,21 @@ fn padded_bytes_per_row(row_bytes: u32) -> u32 {
     row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
 }
 
+/// Index buffer of the GPU warp mesh ([`geom::warp_gpu_indices`]) and its index count; only projectM's rules draw it.
+/// Constant for a mesh size, so built when the mesh changes rather than every frame.
+fn warp_index_buffer(
+    device: &wgpu::Device,
+    geom: &MeshGeometry,
+    rules: &CompatRules,
+) -> Option<(wgpu::Buffer, u32)> {
+    if !rules.warp_uv_on_gpu {
+        return None;
+    }
+    let idx = geom::warp_gpu_indices(geom, rules.warp_diag_flipped);
+    let buf = buffer_init(device, "warp indices", &idx, wgpu::BufferUsages::INDEX);
+    Some((buf, idx.len() as u32))
+}
+
 /// The mesh geometry of `cfg`, after checking that its size and mesh are usable.
 fn checked_geometry(cfg: &RenderConfig) -> Result<MeshGeometry, RenderError> {
     if cfg.width == 0 || cfg.height == 0 {
@@ -1117,6 +1132,8 @@ pub struct Renderer {
     cfg: RenderConfig,
     rules: CompatRules,
     geom: MeshGeometry,
+    /// Triangles of the GPU warp mesh over the unique vertices of [`geom::build_warp_gpu_vertices`].
+    warp_indices: Option<(wgpu::Buffer, u32)>,
     rot: RotParams,
     pipes: std::sync::Arc<Pipelines>,
     /// `m_lpVS[0..2]` ping-pong; `main[main_idx]` holds the latest `main` image.
@@ -1348,12 +1365,14 @@ impl Renderer {
         let dummy_3d = upload_3d(device, queue, 1, &[0, 0, 0, 255], "dummy3d");
         let fft = create_fft_tex(device, queue);
 
+        let warp_indices = warp_index_buffer(device, &geom, &rules);
         let r = Renderer {
             device: device.clone(),
             queue: queue.clone(),
             cfg,
             rules,
             geom,
+            warp_indices,
             rot,
             pipes,
             main,
@@ -1465,6 +1484,7 @@ impl Renderer {
         }
         self.geom = MeshGeometry::new(mesh[0], mesh[1], self.cfg.width, self.cfg.height)?;
         self.cfg.mesh = mesh;
+        self.warp_indices = warp_index_buffer(&self.device, &self.geom, &self.rules);
         self.prev_warp_uv = None;
         self.prev_warp_gpu = None;
         self.mv_state.reset();
@@ -1944,12 +1964,7 @@ impl Renderer {
     /// port of the formula (`warp_mesh`) differs from it by the GPU's `pow` / `sin` / `cos` approximations and fusion.
     fn gpu_warp_vertex_uv(&self, wg: &crate::frame::WarpGpu) -> Result<Vec<[f32; 2]>, RenderError> {
         let (w, h) = (self.geom.gx + 1, self.geom.gy + 1);
-        let mut verts = Vec::with_capacity((w * h) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                verts.push(geom::warp_gpu_vertex(&self.geom, &wg.vars, x, y));
-            }
-        }
+        let verts = geom::build_warp_gpu_vertices(&self.geom, &wg.vars);
         let mut vu = self.warp_vs_uniforms(wg, self.texel_offset_uv(), 1.0);
         vu.diffuse = [w as f32, h as f32, 0.0, 0.0];
         let vs_bg = self.warp_vs_bind_group(&vu);
@@ -2075,6 +2090,17 @@ impl Renderer {
         warp_mesh::warp_mesh_uniform(&self.geom, &v, &anim, self.texel_offset_uv())
     }
 
+    /// The CPU warp UV grid of `wg` (`warp_mesh`, as the engine computes it for a renderer without a GPU warp stage):
+    /// the fallback of a motion vector lookup whose GPU readback failed.
+    fn cpu_warp_uv(&self, wg: &crate::frame::WarpGpu) -> Vec<[f32; 2]> {
+        let toff = self.texel_offset_uv();
+        wg.vars
+            .iter()
+            .enumerate()
+            .map(|(n, vv)| warp_mesh::warp_vertex_uv(&self.geom, n, vv, &wg.anim, toff))
+            .collect()
+    }
+
     /// Record one frame into `encoder`, ending with the composite blitted to `target`.
     ///
     /// All per-frame GPU data is baked into buffers at record time, so frames may be recorded in
@@ -2161,6 +2187,18 @@ impl Renderer {
                 )));
             }
         }
+        if self.rules.warp_uv_on_gpu
+            && let Some(wg) = &input.warp_gpu
+            && wg.vars.len() != self.geom.vertex_count()
+        {
+            return Err(RenderError::Invalid(format!(
+                "FrameInput.warp_gpu has {} vertices, the {}x{} mesh needs {}",
+                wg.vars.len(),
+                self.geom.gx,
+                self.geom.gy,
+                self.geom.vertex_count()
+            )));
+        }
         if input.md2_blend.is_some() && !self.rules.md2_preset_blend {
             return Err(RenderError::Invalid(
                 "FrameInput.md2_blend needs Compat::MilkDrop2 or Compat::MilkDrop3".to_owned(),
@@ -2187,8 +2225,19 @@ impl Renderer {
         let next_i = 1 - prev_i;
         let aspect = (self.geom.aspect_x, self.geom.aspect_y);
 
+        // projectM: the GPU evaluates the warp UV formula (see `shaders::warp_vs`)
+        let gpu_warp = if rules.warp_uv_on_gpu {
+            input.warp_gpu.as_ref()
+        } else {
+            None
+        };
+        // With a GPU warp stage the CPU grid is only the motion vector lookup's fallback, which `cpu_warp_uv` derives
+        // from `warp_gpu` when it is needed: a frame that supplies none costs nothing.
+        let uv_unneeded =
+            input.warp_uv.is_none() && gpu_warp.is_some() && input.md2_blend.is_none();
         let warp_uv: std::borrow::Cow<'_, [[f32; 2]]> = match &input.warp_uv {
             Some(u) => std::borrow::Cow::Borrowed(u),
+            None if uv_unneeded => std::borrow::Cow::Borrowed(&[]),
             None => std::borrow::Cow::Owned(self.default_warp_uv(input)),
         };
 
@@ -2207,7 +2256,16 @@ impl Renderer {
             } else {
                 None
             };
-            if let Some(prev_uv) = gpu_uv.as_ref().or(self.prev_warp_uv.as_ref()) {
+            let cpu_uv = if gpu_uv.is_none() && self.prev_warp_uv.is_none() {
+                self.prev_warp_gpu.as_ref().map(|wg| self.cpu_warp_uv(wg))
+            } else {
+                None
+            };
+            if let Some(prev_uv) = gpu_uv
+                .as_ref()
+                .or(self.prev_warp_uv.as_ref())
+                .or(cpu_uv.as_ref())
+            {
                 let color = geom::conv_color_raw(&rules, input.mv.rgba);
                 let verts: Vec<WfVertex> = if rules.mv_mirrored_lookup {
                     // MilkDrop 2: one D3D line list, mirrored-row lookup into the previous mesh
@@ -2273,20 +2331,10 @@ impl Renderer {
             } else {
                 Address::Clamp
             };
-            // projectM: the GPU evaluates the warp UV formula (see `shaders::warp_vs`)
-            let gpu_warp = if rules.warp_uv_on_gpu {
-                input.warp_gpu.as_ref()
-            } else {
-                None
-            };
             match &self.warp_shader {
                 None => {
                     if let Some(wg) = gpu_warp {
-                        let verts = geom::build_warp_gpu_vertices(
-                            &self.geom,
-                            &wg.vars,
-                            rules.warp_diag_flipped,
-                        );
+                        let verts = geom::build_warp_gpu_vertices(&self.geom, &wg.vars);
                         let vu = self.warp_vs_uniforms(wg, toff, decay);
                         self.run_warp_gpu_plain(
                             encoder,
@@ -2348,11 +2396,7 @@ impl Renderer {
                         .warp_main_sampler_from_wrap
                         .then_some(sampler_wrap);
                     if let Some(wg) = gpu_warp {
-                        let verts = geom::build_warp_gpu_vertices(
-                            &self.geom,
-                            &wg.vars,
-                            rules.warp_diag_flipped,
-                        );
+                        let verts = geom::build_warp_gpu_vertices(&self.geom, &wg.vars);
                         let vu = self.warp_vs_uniforms(wg, toff, diffuse_scalar);
                         self.run_shader_pass(
                             encoder,
@@ -2552,15 +2596,15 @@ impl Renderer {
         }
 
         // keep this frame's UVs for the next frame's motion vectors, reusing the previous buffer
-        let mut kept = self.prev_warp_uv.take().unwrap_or_default();
-        kept.clear();
-        kept.extend_from_slice(&warp_uv);
-        self.prev_warp_uv = Some(kept);
-        let gpu_src = if rules.warp_uv_on_gpu {
-            input.warp_gpu.as_ref()
+        if uv_unneeded {
+            self.prev_warp_uv = None;
         } else {
-            None
-        };
+            let mut kept = self.prev_warp_uv.take().unwrap_or_default();
+            kept.clear();
+            kept.extend_from_slice(&warp_uv);
+            self.prev_warp_uv = Some(kept);
+        }
+        let gpu_src = gpu_warp;
         match (gpu_src, &mut self.prev_warp_gpu) {
             (Some(src), Some(dst)) => {
                 dst.vars.clone_from(&src.vars);
@@ -2828,7 +2872,10 @@ impl Renderer {
         rp.set_bind_group(0, &tex_bg, &[]);
         rp.set_bind_group(1, &vs_bg, &[]);
         rp.set_vertex_buffer(0, vb.slice(..));
-        rp.draw(0..verts.len() as u32, 0..1);
+        if let Some((ib, n)) = &self.warp_indices {
+            rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            rp.draw_indexed(0..*n, 0, 0..1);
+        }
     }
 
     /// Draw a user warp / composite shader over `verts` into `target`.
@@ -3052,7 +3099,15 @@ impl Renderer {
         rp.set_bind_group(0, &bg0, &[]);
         rp.set_bind_group(1, &bg1, &[]);
         rp.set_vertex_buffer(0, vb.slice(..));
-        rp.draw(0..count as u32, 0..1);
+        match (&verts, &self.warp_indices) {
+            (PassVerts::Mesh(_), _) => rp.draw(0..count as u32, 0..1),
+            (PassVerts::Warp(..), Some((ib, n))) => {
+                rp.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..*n, 0, 0..1);
+            }
+            // only projectM's rules request a warp-vertex pass, and they always have the index buffer
+            (PassVerts::Warp(..), None) => {}
+        }
     }
 
     /// The warp pass of `RenderFrame` while MD2 blends two presets: `WarpedBlit_Shaders` / `WarpedBlit_NoShaders` once

@@ -1517,7 +1517,10 @@ fn build_frame(
     eval_per_frame(l, &cx, &env, &base, forced, last);
     let anim = warp_anim(&cx, &base);
     let toff = warp_mesh::texel_offset_uv(cfg.texel_offset, cfg.width, cfg.height);
-    let (vertex_vars, warp_uv) = eval_vertices(l, g, &anim, toff);
+    let vertex_vars = eval_vertices(l, g);
+    // projectM's GPU evaluates the warp UV formula from the vertex variables: the CPU grid is not needed
+    let warp_uv =
+        (!cfg.compat.rules().warp_uv_on_gpu).then(|| warp_vertex_uvs(g, &vertex_vars, &anim, toff));
     let mut fi = frame_head(l, &cx, &base, vertex_vars, warp_uv, anim, true, None);
     push_shapes(l, &env, &mut fi.shapes);
     push_waves(l, &cx, &env, &mut fi.waves);
@@ -1587,15 +1590,9 @@ fn warp_anim(cx: &FrameCtx, base: &BaseValues) -> WarpAnim {
     anim
 }
 
-/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values) and
-/// the warp UV of every vertex they give.
-fn eval_vertices(
-    l: &mut Loaded,
-    g: &MeshGeometry,
-    anim: &WarpAnim,
-    toff: [f32; 2],
-) -> (Vec<VertexVars>, Vec<[f32; 2]>) {
-    let vertex_vars: Vec<VertexVars> = if l.pp.prog.is_some() {
+/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values).
+fn eval_vertices(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
+    if l.pp.prog.is_some() {
         per_pixel_vars(l, g)
     } else {
         let pv = |v| l.pf.ctx.get(v);
@@ -1613,13 +1610,21 @@ fn eval_vertices(
             sy: pv(vars.sy) as f32,
         };
         vec![vv; g.vertex_count()]
-    };
-    let warp_uv: Vec<[f32; 2]> = vertex_vars
+    }
+}
+
+/// The warp UV of every vertex of the mesh for its motion variables.
+fn warp_vertex_uvs(
+    g: &MeshGeometry,
+    vertex_vars: &[VertexVars],
+    anim: &WarpAnim,
+    toff: [f32; 2],
+) -> Vec<[f32; 2]> {
+    vertex_vars
         .iter()
         .enumerate()
         .map(|(n, vv)| warp_mesh::warp_vertex_uv(g, n, vv, anim, toff))
-        .collect();
-    (vertex_vars, warp_uv)
+        .collect()
 }
 
 /// Everything of a frame except shapes, custom waves and the shader pass random state: timing, audio, `q`, warp
@@ -1635,7 +1640,7 @@ fn frame_head(
     cx: &FrameCtx,
     base: &BaseValues,
     vertex_vars: Vec<VertexVars>,
-    warp_uv: Vec<[f32; 2]>,
+    warp_uv: Option<Vec<[f32; 2]>>,
     anim: WarpAnim,
     gpu: bool,
     wrap_snap: Option<f32>,
@@ -1664,7 +1669,7 @@ fn frame_head(
     if let Some(m) = cx.md3 {
         fi.ext = shader_ext(&cfg.compat.rules(), m, pf, l.start_time, clock.time, true);
     }
-    fi.warp_uv = Some(warp_uv);
+    fi.warp_uv = warp_uv;
     // projectM evaluates the warp UV formula on the GPU (the renderer ignores this for MilkDrop 2 compat)
     if gpu {
         fi.warp_gpu = Some(WarpGpu {
@@ -1961,22 +1966,16 @@ fn finish_frame(
     l.hue_offsets = hue;
 }
 
-/// Per-pixel inputs `(x, y, rad, ang)` exactly as projectM computes them (`PerPixelMesh`):
-/// its own mesh `y_pm = row_pm/gy*2-1` (row 0 on top; `-y` of ours is *not* bit-identical in f32:
+/// Per-pixel inputs `(x, y, rad, ang)` exactly as projectM computes them (`PerPixelMesh`), taken from the mesh's
+/// precomputed projectM vertex ([`MeshGeometry::projectm_vertex`], constant per mesh): its own mesh
+/// `y_pm = row_pm/gy*2-1` (row 0 on top; `-y` of ours is *not* bit-identical in f32:
 /// e.g. 2/36*2-1 and -(34/36*2-1) differ by 1 ulp), `rad = hypotf(x*ax, y_pm*ay)`,
 /// `ang = -atan2f(y_pm*ay, x*ax)` (`atan2f(+0, -x) = +pi`, so the centre row left of the centre
 /// is `-pi`). `rad` is compared against constants by presets (`below(rad,0.5)` ...), so a 1-ulp
 /// difference flips whole cells (Memories Of The Castle: vertex rows 2 / 34, warped 48 -> 96+ dB).
 fn per_pixel_inputs(g: &MeshGeometry, x: u32, row_pm: u32) -> [f32; 4] {
-    let vx = x as f32 / g.gx() as f32 * 2.0 - 1.0;
-    let vy = row_pm as f32 / g.gy() as f32 * 2.0 - 1.0;
+    let ([vx, vy], rad, ang) = g.projectm_vertex(x, g.gy() - row_pm);
     let (ax, ay) = (g.aspect_x(), g.aspect_y());
-    let rad = (vx * ax).hypot(vy * ay);
-    let ang = if row_pm == g.gy() / 2 && x == g.gx() / 2 {
-        0.0
-    } else {
-        (vy * ay).atan2(vx * ax)
-    };
     [vx * 0.5 * ax + 0.5, vy * 0.5 * ay + 0.5, rad, -ang]
 }
 

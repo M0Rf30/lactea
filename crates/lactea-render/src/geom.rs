@@ -391,23 +391,35 @@ pub fn warp_gpu_vertex(
     }
 }
 
-/// Triangle list of the warp mesh for the GPU vertex stage (same cells / triangulation as
-/// [`build_warp_vertices`]); `vars` is indexed like `warp_uv` (lactea mesh index). Positions, `rad` and
-/// `ang` are projectM's own floats ([`MeshGeometry::projectm_vertex`]).
+/// The vertices of the warp mesh for the GPU vertex stage, one per mesh vertex in lactea mesh index order
+/// ([`MeshGeometry::index`]; also the point order of the UV readback); `vars` is indexed the same way. Positions,
+/// `rad` and `ang` are projectM's own floats ([`MeshGeometry::projectm_vertex`]). [`warp_gpu_indices`] gives the
+/// triangles over them.
 pub fn build_warp_gpu_vertices(
     g: &MeshGeometry,
     vars: &[crate::warp_mesh::VertexVars],
-    diag_flip: bool,
 ) -> Vec<WarpVertex> {
+    let mut out = Vec::with_capacity(g.vertex_count());
+    for y in 0..=g.gy {
+        for x in 0..=g.gx {
+            out.push(warp_gpu_vertex(g, vars, x, y));
+        }
+    }
+    out
+}
+
+/// Triangle list of the warp mesh over [`build_warp_gpu_vertices`] (same cells / triangulation as
+/// [`build_warp_vertices`]).
+pub fn warp_gpu_indices(g: &MeshGeometry, diag_flip: bool) -> Vec<u32> {
     let (gx, gy) = (g.gx, g.gy);
     let mut out = Vec::with_capacity((gx * gy * 6) as usize);
-    let mk = |x: u32, y: u32| warp_gpu_vertex(g, vars, x, y);
+    let ix = |x: u32, y: u32| g.index(x, y) as u32;
     for cy in 0..gy {
         for cx in 0..gx {
-            let a = mk(cx, cy);
-            let b = mk(cx + 1, cy);
-            let c = mk(cx, cy + 1);
-            let d = mk(cx + 1, cy + 1);
+            let a = ix(cx, cy);
+            let b = ix(cx + 1, cy);
+            let c = ix(cx, cy + 1);
+            let d = ix(cx + 1, cy + 1);
             if diag_flip {
                 // projectM's index buffer: `(v, v+1, v+gx+1)`, `(v+1, v+gx+1, v+gx+2)` with `v` the top-left vertex
                 // of its row-0-on-top mesh, i.e. `c d a` / `d a b` here. The order is the GPU's attribute-setup order.
@@ -1038,12 +1050,22 @@ mod tests {
     fn warp_gpu_triangles_use_projectms_vertex_order() {
         let g = MeshGeometry::new(4, 2, 64, 48).unwrap();
         let vars = vec![crate::warp_mesh::VertexVars::default(); g.vertex_count()];
-        let v = build_warp_gpu_vertices(&g, &vars, true);
-        assert_eq!(v.len(), 4 * 2 * 6);
+        let verts = build_warp_gpu_vertices(&g, &vars);
+        assert_eq!(verts.len(), g.vertex_count());
+        let idx = warp_gpu_indices(&g, true);
+        assert_eq!(idx.len(), 4 * 2 * 6);
+        let v: Vec<WarpVertex> = idx.iter().map(|&i| verts[i as usize]).collect();
         // first cell (lactea row 0 = image bottom): top-left c = (0, 1), top-right d = (1, 1), bottom-left a = (0, 0), b = (1, 0)
         let at = |x: u32, y: u32| warp_gpu_vertex(&g, &vars, x, y);
         let want = [at(0, 1), at(1, 1), at(0, 0), at(1, 1), at(0, 0), at(1, 0)];
         assert_eq!(&v[..6], &want[..]);
+        // MD2 order: a b c / b c d
+        let md2: Vec<WarpVertex> = warp_gpu_indices(&g, false)
+            .iter()
+            .map(|&i| verts[i as usize])
+            .collect();
+        let want = [at(0, 0), at(1, 0), at(0, 1), at(1, 0), at(0, 1), at(1, 1)];
+        assert_eq!(&md2[..6], &want[..]);
     }
 
     #[test]

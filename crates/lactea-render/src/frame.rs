@@ -49,12 +49,14 @@ pub struct FrameInput {
 
     /// Final UV of every warp-mesh vertex, `(gx+1)*(gy+1)` entries, row 0 first (clip y = -1); a different length
     /// is rejected by [`Renderer::render_frame`](crate::Renderer::render_frame). Build with [`crate::warp_mesh`].
-    /// `None` = no motion (zoom 1, no warp). The UVs are also what the next frame's motion vectors read, and what
-    /// the MilkDrop 2 compat paths draw.
+    /// `None` = no motion (zoom 1, no warp), except with `warp_gpu` under projectM's compat rules, where the GPU
+    /// computes the UVs and the renderer derives this grid from `warp_gpu` only if a motion vector lookup needs
+    /// it. The UVs are also what the next frame's motion vectors read, and what the MilkDrop 2 compat paths draw.
     pub warp_uv: Option<Vec<[f32; 2]>>,
     /// Per-vertex inputs of projectM's warp *vertex shader*: with `Compat::ProjectM` the renderer lets the
     /// GPU evaluate the warp UV formula (`pow`/`sin`/`cos` are GPU approximations, not libm, so the
-    /// result is only reproducible on the GPU) from these instead of using `warp_uv`. `None` = use `warp_uv`.
+    /// result is only reproducible on the GPU) from these instead of using `warp_uv`; `vars` must then have one
+    /// entry per mesh vertex. `None` = use `warp_uv`.
     pub warp_gpu: Option<WarpGpu>,
 
     /// Decay and composite-pass controls.

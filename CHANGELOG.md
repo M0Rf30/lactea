@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-12
+
+### Fixed
+
+- Release: the Windows archive is built again (the 0.1.0 Windows job produced no zip, so no GitHub release was published).
+
 ## [0.1.0] - 2026-10-11
 
 First public release.
@@ -32,5 +38,6 @@ First public release.
   reports; method and numbers in `docs/fidelity.md`.
 - Release pipeline: binaries for Linux, Windows and macOS; crates.io publishing with release-plz.
 
-[Unreleased]: https://github.com/M0Rf30/lactea/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/M0Rf30/lactea/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/M0Rf30/lactea/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/M0Rf30/lactea/releases/tag/v0.1.0

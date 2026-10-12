@@ -1,6 +1,6 @@
 # AGENTS.md — working on Lactea
 
-Lactea is a pure-Rust MilkDrop 2 / projectM-compatible visualizer on wgpu. Rendering changes are
+Lactea is a pure-Rust MilkDrop 2/3 and projectM-compatible visualizer on wgpu. Rendering changes are
 justified by numbers against projectM, never by eye: the method, gate and current results are in
 [`docs/fidelity.md`](docs/fidelity.md); `CONTRIBUTING.md` has the workflow.
 

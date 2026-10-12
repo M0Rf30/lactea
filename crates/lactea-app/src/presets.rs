@@ -23,14 +23,15 @@ pub(crate) fn default_preset_dirs() -> &'static [&'static str] {
 #[derive(Clone, Debug)]
 pub struct PresetEntry {
     pub path: PathBuf,
-    /// Display name: path relative to its scan root, without `.milk`.
+    /// Display name: path relative to its scan root, without `.milk` (a `.milk2` keeps its extension).
     pub name: String,
 }
 
-/// Recursively collect `*.milk` (any case) below `dir`, sorted by path. Directories are visited
-/// once (by canonical path), so symlink loops and aliases cannot blow the scan up.
-pub fn scan_dir(dir: &Path) -> Vec<PresetEntry> {
-    fn walk(dir: &Path, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
+/// Recursively collect `*.milk` (any case) below `dir`, and with `milk2` also `*.milk2` (double presets, which only
+/// `--compat milkdrop3` plays), sorted by path. Directories are visited once (by canonical path), so symlink loops
+/// and aliases cannot blow the scan up.
+pub fn scan_dir(dir: &Path, milk2: bool) -> Vec<PresetEntry> {
+    fn walk(dir: &Path, milk2: bool, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
         let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         if !visited.insert(canon) {
             return;
@@ -41,25 +42,30 @@ pub fn scan_dir(dir: &Path) -> Vec<PresetEntry> {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                walk(&p, visited, out);
+                walk(&p, milk2, visited, out);
             } else if p
                 .extension()
                 .and_then(|x| x.to_str())
                 .is_some_and(|x| x.eq_ignore_ascii_case("milk"))
+                || (milk2 && is_milk2(&p))
             {
                 out.push(p);
             }
         }
     }
     let mut files = Vec::new();
-    walk(dir, &mut HashSet::new(), &mut files);
+    walk(dir, milk2, &mut HashSet::new(), &mut files);
     files.sort();
     files
         .into_iter()
         .map(|path| {
             let rel = path.strip_prefix(dir).unwrap_or(&path);
             PresetEntry {
-                name: rel.with_extension("").to_string_lossy().into_owned(),
+                name: if is_milk2(&path) {
+                    rel.to_string_lossy().into_owned()
+                } else {
+                    rel.with_extension("").to_string_lossy().into_owned()
+                },
                 path,
             }
         })
@@ -99,14 +105,26 @@ pub fn append_unique(out: &mut Vec<PresetEntry>, found: Vec<PresetEntry>) {
     }
 }
 
+/// Display name of a preset file: its file name without `.milk`; a `.milk2` keeps its extension (the engine takes
+/// it as a hint that the file is a double preset).
 pub fn entry_for_file(path: &Path) -> PresetEntry {
+    let milk2 = is_milk2(path);
     PresetEntry {
-        name: path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        name: if milk2 {
+            path.file_name()
+        } else {
+            path.file_stem()
+        }
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string()),
         path: path.to_path_buf(),
     }
+}
+
+fn is_milk2(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| x.eq_ignore_ascii_case("milk2"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +145,10 @@ pub struct PresetBrowser {
     duration: Duration,
     loaded_at: Instant,
     rng: fastrand::Rng,
+    /// MD3 display time (`BlendTimeAuto`, `TimeBetweenPresetsRand` in seconds); `None` = `duration` alone.
+    md3_time: Option<(Duration, f64)>,
+    /// Random part of the current preset's MD3 display time, drawn by `commit`.
+    md3_extra: Duration,
 }
 
 impl PresetBrowser {
@@ -140,6 +162,27 @@ impl PresetBrowser {
             duration,
             loaded_at: Instant::now(),
             rng: fastrand::Rng::with_seed(seed),
+            md3_time: None,
+            md3_extra: Duration::ZERO,
+        }
+    }
+
+    /// Use MD3's display time for the presets started from now on: `blend + duration + (r % 1000) * rand *
+    /// 0.001` with `r` from the seeded stream, one draw per `commit` (MD3 3.37, docs/md3.md §Auto hard cuts).
+    /// `blend` is `BlendTimeAuto` (the soft cut length), `rand` is `TimeBetweenPresetsRand` (negative = 0).
+    /// A zero `duration` still never rotates.
+    pub fn set_md3_time(&mut self, blend: Duration, rand: f64) {
+        self.md3_time = Some((blend, rand.max(0.0)));
+    }
+
+    /// Time a preset stays before the timer asks for the next one.
+    fn period(&self) -> Duration {
+        match self.md3_time {
+            Some((blend, _)) => self
+                .duration
+                .saturating_add(blend)
+                .saturating_add(self.md3_extra),
+            None => self.duration,
         }
     }
 
@@ -180,7 +223,7 @@ impl PresetBrowser {
             return None;
         }
         Some(
-            self.duration
+            self.period()
                 .saturating_sub(now.saturating_duration_since(self.loaded_at)),
         )
     }
@@ -241,6 +284,10 @@ impl PresetBrowser {
         }
         self.current = Some(idx);
         self.loaded_at = now;
+        if let Some((_, rand)) = self.md3_time {
+            let secs = f64::from(self.rng.u32(..1000)) * rand * 0.001;
+            self.md3_extra = Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO);
+        }
     }
 
     /// Index to try after a failed load of `failed` during `nav` (so a broken preset is skipped
@@ -326,6 +373,75 @@ mod tests {
         assert!(!b.auto_due(Instant::now() + Duration::from_secs(3600)));
     }
 
+    /// Time the browser waits after a commit at `t0` (`auto_remaining(t0)` is the whole period).
+    fn period_after_commit(b: &mut PresetBrowser, t0: Instant) -> Duration {
+        let i = b.pick(Nav::Next).unwrap();
+        b.commit(i, Nav::Next, t0);
+        b.auto_remaining(t0).unwrap()
+    }
+
+    fn md3_browser(seed: u64, duration: u64, blend: u64, rand: f64) -> PresetBrowser {
+        let mut b = PresetBrowser::new(entries(3), false, Duration::from_secs(duration), seed);
+        b.set_md3_time(Duration::from_secs(blend), rand);
+        b
+    }
+
+    #[test]
+    fn md3_time_is_blend_plus_duration_plus_a_seeded_draw() {
+        let t0 = Instant::now();
+        let mut b = md3_browser(7, 30, 3, 10.0);
+        let periods: Vec<_> = (0..200).map(|_| period_after_commit(&mut b, t0)).collect();
+        let (lo, hi) = (Duration::from_secs(33), Duration::from_secs(43));
+        assert!(periods.iter().all(|p| (lo..hi).contains(p)), "{periods:?}");
+        // the draw varies, and the first preset gets one: the first value of the seeded stream
+        assert!(periods.iter().any(|p| *p != periods[0]));
+        let first = f64::from(fastrand::Rng::with_seed(7).u32(..1000)) * 10.0 * 0.001;
+        assert_eq!(periods[0], lo + Duration::from_secs_f64(first));
+
+        // same seed, same sequence; another seed, another one
+        let again: Vec<_> = {
+            let mut b = md3_browser(7, 30, 3, 10.0);
+            (0..200).map(|_| period_after_commit(&mut b, t0)).collect()
+        };
+        assert_eq!(periods, again);
+        let mut other = md3_browser(8, 30, 3, 10.0);
+        let others: Vec<_> = (0..200)
+            .map(|_| period_after_commit(&mut other, t0))
+            .collect();
+        assert_ne!(periods, others);
+    }
+
+    #[test]
+    fn md3_time_edge_cases() {
+        let t0 = Instant::now();
+        // negative rand = 0: exactly blend + duration
+        let mut b = md3_browser(1, 30, 3, -5.0);
+        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+        // rand 0 likewise
+        let mut b = md3_browser(1, 30, 3, 0.0);
+        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+        // zero duration never rotates, whatever blend and rand are
+        let mut b = md3_browser(1, 0, 3, 10.0);
+        let i = b.pick(Nav::Next).unwrap();
+        b.commit(i, Nav::Next, t0);
+        assert_eq!(b.auto_remaining(t0), None);
+        assert!(!b.auto_due(t0 + Duration::from_secs(3600)));
+        // due once the (drawn) period elapsed
+        let mut b = md3_browser(1, 30, 3, 10.0);
+        let p = period_after_commit(&mut b, t0);
+        assert!(!b.auto_due(t0 + p - Duration::from_millis(1)));
+        assert!(b.auto_due(t0 + p));
+    }
+
+    #[test]
+    fn md3_time_disabled_is_the_plain_duration() {
+        let t0 = Instant::now();
+        let mut b = browser(3);
+        for _ in 0..5 {
+            assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(30));
+        }
+    }
+
     #[test]
     fn failure_skips_in_direction_and_terminates() {
         let mut b = browser(3);
@@ -350,7 +466,7 @@ mod tests {
         std::fs::write(d.join("a/x.milk"), b"").unwrap();
         std::os::unix::fs::symlink(&d, d.join("a/loop")).unwrap();
         std::os::unix::fs::symlink(d.join("a"), d.join("alias")).unwrap();
-        let found = scan_dir(&d);
+        let found = scan_dir(&d, false);
         assert_eq!(found.len(), 1, "{found:?}");
         let _ = std::fs::remove_dir_all(d);
     }
@@ -363,7 +479,7 @@ mod tests {
         std::fs::write(d.join("one.milk"), b"").unwrap();
         std::fs::create_dir_all(d.join("sub")).unwrap();
         let mut out = vec![entry_for_file(&d.join("sub/../one.milk"))];
-        let mut found = scan_dir(&d);
+        let mut found = scan_dir(&d, false);
         // 20k extra entries must not make this quadratic.
         for i in 0..20_000 {
             found.push(PresetEntry {
@@ -387,9 +503,32 @@ mod tests {
         std::fs::write(d.join("a/y.MILK"), b"").unwrap();
         std::fs::write(d.join("a/b/z.milk"), b"").unwrap();
         std::fs::write(d.join("a/readme.txt"), b"").unwrap();
-        let e = scan_dir(&d);
+        let e = scan_dir(&d, false);
         let names: Vec<_> = e.iter().map(|e| e.name.replace('\\', "/")).collect();
         assert_eq!(names, vec!["a/b/z", "a/y", "x"]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// `.milk2` double presets are listed only on request (they need `--compat milkdrop3`) and keep their extension in
+    /// the name, so the engine can tell them from plain presets.
+    #[test]
+    fn scan_dir_lists_milk2_on_request() {
+        let d = std::env::temp_dir().join(format!("lactea-presets-m2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("a")).unwrap();
+        std::fs::write(d.join("x.milk"), b"").unwrap();
+        std::fs::write(d.join("a/y.milk2"), b"").unwrap();
+        std::fs::write(d.join("a/z.MILK2"), b"").unwrap();
+        let names = |milk2| -> Vec<String> {
+            scan_dir(&d, milk2)
+                .iter()
+                .map(|e| e.name.replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(names(false), vec!["x"]);
+        assert_eq!(names(true), vec!["a/y.milk2", "a/z.MILK2", "x"]);
+        assert_eq!(entry_for_file(&d.join("a/y.milk2")).name, "y.milk2");
+        assert_eq!(entry_for_file(&d.join("x.milk")).name, "x");
         let _ = std::fs::remove_dir_all(d);
     }
 }

@@ -9,6 +9,9 @@ trait Visualizer {
     fn push_pcm(&mut self, interleaved: &[f32], channels: usize);
     fn render(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, time: f64, frame: u32);
     fn resize(&mut self, w: u32, h: u32);
+    fn take_auto_cuts(&mut self) -> u32 { 0 }                       // default-implemented (MD3 auto hard cuts)
+    fn set_auto_hard_cut_mode(&mut self, mode: u8) {}               // default-implemented
+    fn auto_hard_cut_mode(&self) -> Option<u8> { None }             // None = no such feature / compat does not support it
 }
 ```
 
@@ -37,6 +40,7 @@ depends on a pinned git fork of symphonia, which crates.io does not accept.
 | F, F11, double-click | fullscreen (cursor hidden while fullscreen) |
 | Esc, Q | quit |
 | D | write every pipeline stage of the last frame as PNG into `$LACTEA_DEBUG_DIR` (default `<temp dir>/lactea-debug`) |
+| F8 | cycle the MD3 auto hard cut mode off, 1 ... 7, off (`--compat milkdrop3` only; logs `auto hard cut needs --compat milkdrop3` otherwise) |
 
 Auto-advance every `--duration S` (default 30, 0 = never) unless locked; `--shuffle` picks the next
 preset at random. Every preset change after the first (auto-advance, N / P / R / arrows) is a **soft cut**:
@@ -44,7 +48,21 @@ the engine blends the old and the new preset over `--transition-duration S` seco
 `m_softCutDuration`; 0 = hard cuts) while both keep running; the first preset appears at once. A preset that fails to
 load (parse/compile error, GPU validation error, engine
 panic) is logged and skipped in the direction of travel. The window title shows
-`preset [i/n] | LOCKED | audio status | fps`.
+`preset [i/n] | LOCKED | hardcut<N> | audio status | fps` (`LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on).
+
+### MD3 auto hard cuts (`--compat milkdrop3`)
+
+MD3's `AutoHardCutMode` (`--auto-hard-cut N`, F8 at runtime; `hardcut1` ... `hardcut7`, `off`; behaviour in
+`docs/md3.md` §Auto hard cuts) is ignored under projectM and MilkDrop 2. Modes 1..6 ask for an instant preset
+change on beat/loudness triggers: after each rendered frame the shell asks the visualizer for pending cuts
+(`take_auto_cuts`), and the next frame loads the next preset (random when `--shuffle`) as a **hard cut**, whatever
+`--transition-duration` says; the display timer restarts. Mode 7 changes no preset: the engine injects a random
+effect into the composite shader. Auto cuts are independent of projectM's `hard_cut_*` settings.
+Deviation: MD3 ignores its preset lock, here a locked browser (L) also ignores auto cuts, and a single preset is not reloaded by one.
+
+With `--compat milkdrop3` the auto-advance time of a preset is MD3's `--transition-duration` + `--duration` + a
+random `0 ... --duration-rand` seconds (`TimeBetweenPresetsRand`, default 10, negative = 0) drawn per preset from
+the `--seed`ed stream (`--duration 0` still never advances); the other compat modes use `--duration` alone.
 
 ## Command line
 
@@ -55,11 +73,13 @@ panic) is logged and skipped in the direction of travel. The window title shows
                        /opt/homebrew/share/projectM/presets (none on Windows: pass --dir)
 --duration S           auto-advance period (30; 0 = never)      --shuffle
 --transition-duration S  soft cut length (3; 0 = hard cuts)
+--auto-hard-cut N      MD3 AutoHardCutMode 0..7 (0 = off; 1..6 hard cuts, 7 composite effects; --compat milkdrop3 only; F8 cycles)
+--duration-rand S      MD3 TimeBetweenPresetsRand (10; --compat milkdrop3 only)
 --fps N                frame cap (default: vsync only; --deterministic: 60)
 --no-vsync             Mailbox/Immediate instead of Fifo
 --size WxH [--pixels]  initial window size, logical (HiDPI) units unless --pixels
 --fullscreen
---visualizer engine|scope   --seed N   --compat projectm|milkdrop2   --mesh WxH
+--visualizer engine|scope   --seed N   --compat projectm|milkdrop2|milkdrop3   --mesh WxH
 --texture-dir DIR      (repeatable; searched before the defaults)
 --capture-device NAME  cpal input (name, substring or id like alsa:default); implies cpal
 --audio-backend auto|pipewire|cpal     --pipewire-target NODE

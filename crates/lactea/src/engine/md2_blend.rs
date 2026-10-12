@@ -1,4 +1,4 @@
-//! MilkDrop 2's preset blend, CPU side (`Compat::MilkDrop2`, `CompatRules::md2_preset_blend`).
+//! MilkDrop 2's preset blend, CPU side (`Compat::MilkDrop2` / `Compat::MilkDrop3`, `CompatRules::md2_preset_blend`).
 //!
 //! Port of the parts of `third_party/md2` that make `m_bBlending` work:
 //!
@@ -23,6 +23,7 @@
     clippy::manual_clamp
 )]
 
+use super::md3_blend::{BlendLaunch, ProgressMode};
 use super::{
     FrameCtx, LastFrame, Loaded, Slot, eval_per_frame, eval_vertices, finish_frame, frame_env,
     frame_head, push_shapes, push_waves, warp_anim,
@@ -964,6 +965,11 @@ pub(super) struct BlendState {
     /// `m_fPresetStartTime` and `m_fNextPresetTime` (set on the first frame after the load) for `progress`.
     pub preset_start: f64,
     pub next_preset: Option<f64>,
+    /// MilkDrop 3 `progressMode` (`Normal` = MD2's ramp), `blending_progress` (the target of the held modes) and
+    /// whether borders are suppressed (`.milk2` loaded). MD2 blends use `Normal`, `1.0`, `false`.
+    pub mode: ProgressMode,
+    pub target: f32,
+    pub no_borders: bool,
 }
 
 /// `m_fBlendProgress = (GetTime() - m_fBlendStartTime) / m_fBlendDuration`, in `float` like MD2.
@@ -973,10 +979,30 @@ pub(super) fn blend_progress(time: f32, start: f32, duration: f32) -> f32 {
 
 impl BlendState {
     /// `RenderFrame`'s blend update: `m_fBlendProgress = (GetTime() - start) / duration`, the blend ends once it is
-    /// above 1. Returns whether it is still running.
+    /// above 1. Returns whether it is still running. The MilkDrop 3 modes follow `progressMode` (see
+    /// [`ProgressMode`]); only `Normal` ever ends here, the others end through the engine's double-preset events.
     pub fn update(&mut self, time: f32) -> bool {
-        self.progress = blend_progress(time, self.start, self.duration);
-        self.progress <= 1.0
+        let ramp = blend_progress(time, self.start, self.duration);
+        match self.mode {
+            ProgressMode::Normal => {
+                self.progress = ramp;
+                self.progress <= 1.0
+            }
+            ProgressMode::Frozen => {
+                self.progress = self.target;
+                true
+            }
+            ProgressMode::SoftInSecond => {
+                if self.progress < self.target {
+                    self.progress = ramp.min(self.target);
+                }
+                true
+            }
+            ProgressMode::SoftInFirst | ProgressMode::SoftOut => {
+                self.progress = ramp;
+                true
+            }
+        }
     }
 
     /// `progress` of the preset variable: `(GetTime() - m_fPresetStartTime) / (m_fNextPresetTime - m_fPresetStartTime)`.
@@ -1021,6 +1047,10 @@ pub(super) fn build_blend_frame(
     let (uv, vert_alpha) = blend_mesh(&uv_new, &uv_old, &m.pattern, m.progress);
 
     let mut fi = frame_head(new, cx, &base_new, Vec::new(), uv, anim, false, Some(snap));
+    // MilkDrop 3: no ob / ib borders while a blend is running (`DisableBox`), and never while a `.milk2` is
+    // loaded (`fromMilk2`)
+    fi.borders.hidden |=
+        (cx.cfg.md3_disable_box && cx.cfg.compat.rules().md3_border_gate) || m.no_borders;
 
     // ShowToUser_NoShaders: the video echo flips its orientation / fades across the blend
     if base_new.video_echo_alpha > 0.01
@@ -1075,11 +1105,23 @@ pub(super) fn build_blend_frame(
     for (i, q) in q.iter_mut().enumerate() {
         *q = opf.q(i) as f32;
     }
+    let ext = match cx.md3 {
+        Some(md3) => crate::md3_inputs::shader_ext(
+            &cfg.compat.rules(),
+            md3,
+            opf,
+            m.old.start_time,
+            cx.clock.time,
+            false,
+        ),
+        None => Default::default(),
+    };
     fi.md2_blend = Some(lactea_render::Md2Blend {
         progress: m.progress,
         vert_alpha,
         old: Md2OldPass {
             q,
+            ext,
             blur: BlurParams {
                 min: [
                     f32v(opf.v.blur1_min),
@@ -1120,13 +1162,26 @@ impl super::Engine {
         name: &str,
         seconds: f64,
     ) -> Result<PresetReport, EngineError> {
+        let launch = BlendLaunch::ordinary(self.cfg.compat.rules().md3_blend_patterns);
+        self.load_preset_blend(bytes, name, seconds, launch)
+    }
+
+    /// [`Engine::load_preset_md2_soft`] with an explicit progress mode, pattern source and border rule (the MilkDrop 3
+    /// double-preset legs). The new preset is built next to the running one; on error nothing changes.
+    pub(super) fn load_preset_blend(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        seconds: f64,
+        launch: BlendLaunch,
+    ) -> Result<PresetReport, EngineError> {
         let mut slot: Slot = self
             .active
             .take()
             .expect("a soft cut needs a running preset");
         // build the new preset's shaders next to the running ones, which stay safe in `prev`
         let prev = slot.renderer.take_shader_state();
-        match self.build_loaded(bytes, name, &mut slot.renderer) {
+        match self.build_loaded(bytes, name, &mut slot.renderer, launch.sprite) {
             Err(e) => {
                 slot.renderer.restore_shader_state(prev);
                 self.active = Some(slot);
@@ -1137,40 +1192,50 @@ impl super::Engine {
                 let old_last = std::mem::take(&mut slot.last);
                 let t = self.clock.now as f32;
                 let dur = seconds as f32;
-                let (gx, gy) = (self.cfg.mesh[0], self.cfg.mesh[1]);
-                if self.md2_vertinfo.len() != ((gx + 1) * (gy + 1)) as usize {
-                    // `m_vertinfo` initial values: a = 1, c = 0
-                    self.md2_vertinfo = vec![[1.0, 0.0]; ((gx + 1) * (gy + 1)) as usize];
-                }
                 let geom = slot.renderer.mesh_geometry();
                 let aspect = (geom.aspect_x(), geom.aspect_y());
-                let pattern_kind = randomize_blend_pattern(
-                    &mut self.md2_vertinfo,
-                    [gx, gy],
-                    aspect,
-                    self.cfg.fps as f32,
-                    &mut self.md2_pattern_rng,
-                    &mut self.md2_clocks,
-                    self.md2_forced_pattern,
-                );
+                let pattern_kind = self.fill_blend_pattern(&launch.pattern, aspect);
                 let statics = start_blend_from(&mut slot.loaded, &mut old, t, dur);
                 slot.renderer.set_old_shader_state(Some(prev));
                 self.clock.start_preset();
-                self.md2 = Some(BlendState {
+                self.md2 = Some(self.new_blend_state(
                     old,
                     old_last,
-                    start: t,
-                    duration: dur,
-                    progress: 0.0,
                     statics,
-                    pattern: self.md2_vertinfo.clone(),
+                    (t, dur),
                     pattern_kind,
-                    preset_start: self.clock.now,
-                    next_preset: None,
-                });
+                    &launch,
+                ));
                 self.active = Some(slot);
                 Ok(report)
             }
+        }
+    }
+
+    /// The bookkeeping of a blend that starts now: progress 0, `m_vertinfo` as the pattern left it.
+    pub(super) fn new_blend_state(
+        &self,
+        old: Loaded,
+        old_last: LastFrame,
+        statics: BlendStatics,
+        (start, duration): (f32, f32),
+        pattern_kind: u32,
+        launch: &BlendLaunch,
+    ) -> BlendState {
+        BlendState {
+            old,
+            old_last,
+            start,
+            duration,
+            progress: 0.0,
+            statics,
+            pattern: self.md2_vertinfo.clone(),
+            pattern_kind,
+            preset_start: self.clock.now,
+            next_preset: None,
+            mode: launch.mode,
+            target: launch.target,
+            no_borders: launch.no_borders,
         }
     }
 }

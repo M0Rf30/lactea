@@ -9,6 +9,7 @@ use crate::blur::safe_blur_min_max;
 use crate::config::CompatRules;
 use crate::frame::{BlurParams, FrameInput, PassRandom};
 use crate::rng::Rng;
+use crate::shader_ext::ShaderExt;
 use lactea_abi::{MilkUniforms, NUM_ROT};
 
 /// Per-preset random rotation/translation parameters (`m_rot_base`, `m_rot_speed`, `m_xlate`)
@@ -200,8 +201,8 @@ pub(crate) fn noise_texsizes() -> [[f32; 4]; 6] {
 ///
 /// * `width`, `height`: `GetWidth()/GetHeight()` (used for aspect and the mip registers).
 /// * `tex_w`, `tex_h`: `m_nTexSizeX/Y` (`_c7`).
-/// * `q`, `blur`: the `q1..q32` values and blur range of the state the pass belongs to (the frame's own, or the old
-///   preset's during a MilkDrop 2 blend).
+/// * `q`, `blur`, `ext`: the `q1..q32` values, blur range and MilkDrop 3 inputs (shader time) of the state the pass
+///   belongs to (the frame's own, or the old preset's during a MilkDrop 2 / 3 blend).
 pub(crate) struct MilkUniformInputs<'a> {
     pub width: u32,
     pub height: u32,
@@ -210,13 +211,14 @@ pub(crate) struct MilkUniformInputs<'a> {
     pub frame: &'a FrameInput,
     pub q: &'a [f32; 32],
     pub blur: &'a BlurParams,
+    pub ext: &'a ShaderExt,
     pub rot: &'a RotParams,
     pub rules: &'a CompatRules,
     pub pass: Option<&'a PassRandom>,
 }
 
 impl<'a> MilkUniformInputs<'a> {
-    /// Inputs for a pass of `f`'s own state: texture size = `width x height`, `q` and `blur` taken from `f`.
+    /// Inputs for a pass of `f`'s own state: texture size = `width x height`, `q`, `blur` and `ext` taken from `f`.
     pub fn for_frame(
         width: u32,
         height: u32,
@@ -233,6 +235,7 @@ impl<'a> MilkUniformInputs<'a> {
             frame: f,
             q: &f.q,
             blur: &f.blur,
+            ext: &f.ext,
             rot,
             rules,
             pass,
@@ -250,6 +253,8 @@ impl<'a> MilkUniformInputs<'a> {
 /// * `mip_y`: projectM from the height; MD2 from the *width* (typo).
 /// * `_c1`: projectM zeros; MD2 the "sd" aspect.
 /// * `_c8.._c11` use the double-precision `time` (`time*0.329f` etc.).
+/// * `_c2.x` is `ext.time` (MilkDrop 3: seconds since the pass's own preset started) when set, else `time`; both are
+///   wrapped modulo 10000.
 pub(crate) fn fill_milk_uniforms(inp: &MilkUniformInputs<'_>, rot_rng: &mut Rng) -> MilkUniforms {
     let MilkUniformInputs {
         width,
@@ -259,6 +264,7 @@ pub(crate) fn fill_milk_uniforms(inp: &MilkUniformInputs<'_>, rot_rng: &mut Rng)
         frame: f,
         q,
         blur,
+        ext,
         rot,
         rules,
         pass,
@@ -290,7 +296,7 @@ pub(crate) fn fill_milk_uniforms(inp: &MilkUniformInputs<'_>, rot_rng: &mut Rng)
         u.c[1] = [aspect_x, aspect_y, 1.0 / aspect_x, 1.0 / aspect_y];
     }
     // `_c2.x`: time since preset start wrapped at 10000 s (`ApplyShaderParams` / projectM `LoadVariables`).
-    let ft = f.time as f32;
+    let ft = ext.time.unwrap_or(f.time) as f32;
     let wrapped = ft - ((ft as f64 / 10000.0) as i32 * 10000) as f32;
     u.c[2] = [wrapped, f.fps, f.frame as f32, f.progress];
     let (vol, vol_att) = if rules.vol_is_comma_bug {
@@ -531,5 +537,66 @@ mod tests {
                 assert!(r.speed[k][c].abs() <= 0.9 * (k as f32 / 8.0).powf(3.2) + 1e-6);
             }
         }
+    }
+
+    fn fill(f: &FrameInput, rules: &CompatRules) -> MilkUniforms {
+        fill_milk_uniforms(
+            &MilkUniformInputs::for_frame(640, 360, f, &RotParams::default(), rules, None),
+            &mut Rng::new(1),
+        )
+    }
+
+    /// `_c2.x` shows `ShaderExt::time` when set, wrapped modulo 10000 like the absolute time; `_c8.._c11` still
+    /// follow `FrameInput::time`.
+    #[test]
+    fn shader_time_is_the_ext_time_wrapped_at_10000() {
+        let rules = Compat::MilkDrop3.rules();
+        // E-core Annex D T9: the preset started at 100 s and it is now 12445.5 s; the engine passes the difference
+        let mut f = frame();
+        f.ext.time = Some(12345.5);
+        let u = fill(&f, &rules);
+        assert_eq!(u.c[2][0], 2345.5);
+        let base = fill(&frame(), &rules);
+        assert_eq!(
+            u.c[2][1..],
+            base.c[2][1..],
+            "fps, frame, progress untouched"
+        );
+        assert_eq!(
+            u.c[8..12],
+            base.c[8..12],
+            "roam registers use FrameInput::time"
+        );
+        // no ext time: FrameInput::time, same wrap as before
+        let mut g = frame();
+        g.time = 12345.5;
+        assert_eq!(fill(&g, &rules).c[2][0], 2345.5);
+        // the ext time wins over a different absolute time and does not wrap below the limit
+        let mut h = frame();
+        h.time = 99999.0;
+        h.ext.time = Some(3.25);
+        assert_eq!(fill(&h, &rules).c[2][0], 3.25);
+    }
+
+    /// `ShaderExt::default()` is neutral: `_c2.x` is `FrameInput::time` and nothing of the extension (mouse, q33..,
+    /// FFT) leaks into the frozen `MilkUniforms` block.
+    #[test]
+    fn default_ext_leaves_the_registers_alone() {
+        let rules = Compat::MilkDrop2.rules();
+        let bytes = |f: &FrameInput| bytemuck::bytes_of(&fill(f, &rules)).to_vec();
+        let f = frame();
+        assert_eq!(f.ext, ShaderExt::default());
+        assert_eq!(fill(&f, &rules).c[2][0], 12.5);
+        let base = bytes(&f);
+
+        let mut g = frame();
+        g.ext.mouse = [0.3, 0.6, 1.0, 1.0];
+        g.ext.q_hi = [7.0; 32];
+        g.ext.fft = Some(std::sync::Arc::new([0.5; lactea_abi::FFT_BINS]));
+        assert_eq!(bytes(&g), base);
+
+        let mut h = frame();
+        h.ext.time = Some(h.time);
+        assert_eq!(bytes(&h), base);
     }
 }

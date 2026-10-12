@@ -61,14 +61,14 @@ fn default_shader_texts() {
     let w = default_warp_shader(0.98, true);
     assert!(w.contains("ret = tex2D( sampler_main, uv ).xyz;") && w.contains("ret *= 0.98;"));
     assert!(default_warp_shader(0.9, false).contains("sampler_fc_main"));
-    let c = default_comp_shader(1.0, 0.0, 1.0, 0, 0.0, false, false, false, false);
+    let c = default_comp_shader(1.0, 0.0, 1.0, 0, 0.0, false, false, false, false, false);
     assert!(c.contains("ret = tex2D(sampler_main, uv).xyz;") && c.contains("ret *= 1.00; //gamma"));
-    let c = default_comp_shader(1.5, 0.5, 2.0, 3, 0.5, true, true, true, true);
+    let c = default_comp_shader(1.5, 0.5, 2.0, 3, 0.5, true, true, true, true, false);
     assert!(c.contains("float2 uv_echo = (uv - 0.5)*0.500*float2(-1,-1) + 0.5;"));
     assert!(c.contains("ret *= 0.50 + 0.50*hue_shader;") && c.contains("//invert"));
     // all variants translate
     for (a, d) in [(0.0, 0.0), (0.4, 1.0), (0.4, 0.3)] {
-        let txt = default_comp_shader(1.2, a, 1.1, 1, d, true, false, true, false);
+        let txt = default_comp_shader(1.2, a, 1.1, 1, d, true, false, true, false, false);
         translate(PassKind::Comp, &txt, &Options::default()).unwrap();
     }
     for wrap in [true, false] {

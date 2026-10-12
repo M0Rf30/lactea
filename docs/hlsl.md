@@ -72,6 +72,90 @@ Unsupported (corpus needs none): `struct`, `switch`, bitwise/shift operators (no
 SM2/3), sampler-typed function parameters, `texCUBE/tex1D`, matrix `_m00` swizzles, writing to
 matrix rows.
 
+## MilkDrop 3 prelude
+
+`Options { md3: true, .. }` translates for `Compat::MilkDrop3` (see `md3.md`). With the flag off nothing changes:
+`md2_wrapped_hlsl` is untouched and every translation is byte-identical to a build without MD3 support (the shared
+`abi::WGSL_COMMON` only grew the `mx` block, which the snapshots strip with the rest of the prelude).
+
+Text assembly follows MD3 3.37: comment-stripped `include.fx`, then the **MD3 prelude**, then the per-pass `#define`s, then
+the wrapped user text. `md3_wrapped_hlsl(kind, user)` builds it (`translate` uses it when `md3` is set;
+`translate_wrapped` needs the same flag for text that came from `md3_wrapped_hlsl`). The prelude (written from the
+documented behaviour, nothing copied from MD3) declares:
+
+| Name | Meaning |
+|---|---|
+| `float4 _c14;` and the macros `mouse` (= `_c14`), `mouse_x/_y/_z/_w`, `mouse_pos` (= `_c14.xy`) | `(px/W, py/H, held, released)`, `(-1, -1, ..)` outside the window; emitted as `mx.mouse` |
+| `float4 _qi .. _qp;` and the macros `q33 .. q64` | `qN` = component `(N-1)%4` of register `(N-1)/4` (`_qa` = q1-4 ... `_qi` = q33-36 ... `_qp` = q61-64); `_qi.._qp` are `mx.q_hi[0..7]`, `_qa.._qh` stay `mu.q[0..7]` |
+| `sampler2D sampler_fft;` | the shader FFT, `TexSource::Fft` (below) |
+| `get_fft(pos)` | macro: `tex2D(sampler_fft, float2(clamp(pos, 0, 1), 0.5)).r`, **no `sqrt`** (BeatDrop's has one) |
+| `get_fft_hz(freq)` | macro: `get_fft(clamp((freq) / 24000.0, 0, 1))` (MD3 assumes a 48 kHz capture; BeatDrop divides by 22050) |
+
+`get_fft*` are macros like in MD3, so the argument expression is pasted textually (once) into the `clamp` and nested
+macros (`get_fft(mouse_x)`, `get_fft(bass > 0.5 ? .25 : .75)`) work. Not declared, on purpose: `get_fft_peak*`,
+`get_wave*`, `HAS_FFT_PEAK`, `sysTime*`, `mouse_clicked`, `aspect_sd` (BeatDrop only), `_c15..` (MD3 never uploads
+them), `_mxd3qx*` / `_mxd3qs*` / `MXD3Q*` (engine-private accumulators of locked presets, not implemented). The
+prelude's `sampler_fft` counts as declared for the implicit `sampler_<name>` declarations.
+
+**Decisions**
+
+* One dialect for every PSVERSION (0..5): the translator does not know about shader models, so MD3's retry ladder
+  (`ps_2_0` -> `ps_3_0` -> `ps_4_0`) has nothing to do.
+* `sampler_wave` stays what it is without MD3: an undeclared-unless-used user texture (`TexSource::User("wave")`,
+  bilinear + clamp, the `fw_/fc_/pw_/pc_` prefixes apply). MD3 creates a 480 x 2 `R32F` texture for it and never
+  writes it, so the engine's 1 x 1 black dummy for unresolved user textures is the faithful content. No `get_wave`.
+* `fft` -> `TexSource::Fft` only with `md3` (otherwise `User("fft")`, as before). Default clamp + bilinear; the prefixes
+  select filter and wrap (`sampler_pw_fft`: point, `sampler_fw_fft`: wrap). No anisotropy special case: MD3 never sets
+  it. `texsize_fft` also reports `TexSource::Fft` (MD3 leaves it unresolved; the host answers 512 x 1).
+* `_c14` and `_qi.._qp` only exist (and map to `mx`) under `md3`; a shader that writes to them (`q40 = 1;`,
+  `mouse.x = 0.5;`) gets the same private per-invocation copy as for `_qa` (seeded from the uniform).
+
+**FFT lowering.** The texture is `FFT_BINS` (512) x 1 `R32Float`, which wgpu cannot filter without
+`FLOAT32_FILTERABLE`, so no `textureSample` is emitted for a sampler whose root is `fft`. Every `tex2D`, `tex2Dlod`,
+`tex2Dbias`, `tex2Dproj` (`x / w`) and `tex2Dgrad` becomes `fft_fetch(tex_<sampler>, u, linear, wrapped)`, with the
+filter and address of the sampler's binding baked in as literals. The WGSL helper (`fft_fetch` / `fft_texel`,
+appended once after the group(1) bindings whenever the interface has a `TexSource::Fft` binding) reproduces D3D9:
+
+* result `(r, 1, 1, 1)` (D3D9 `R32F`), the `v` coordinate is ignored (MD3's texture had two identical rows);
+* linear: `x = u * 512 - 0.5`, `i0 = floor(x)`, `mix(S[i0], S[i0 + 1], x - i0)`, the indices clamped to `0..511` (clamp
+  address) or wrapped modulo 512 (wrap address); point: `S[floor(u * 512)]`, clamped or wrapped the same way.
+
+So `get_fft(0.5)` is the mean of `S[255]` and `S[256]`, `get_fft(0) = S[0]`, `get_fft(1) = S[511]`,
+`get_fft(-3) = S[0]`. The group(1) bindings keep the usual `texture_2d<f32>` + `sampler` pair; the renderer binds an
+`R32Float` view declared as non-filterable and never samples it.
+
+**Legacy comp generator.** `default_comp_shader(.., md3_effects)`: with `true` the `brighten` line is
+`ret = sqrt(ret);` and `solarize` is `ret = ret*(1-ret)*4;` (MD2: `1 - (1-ret)*(1-ret)` and `*2`).
+
+**Scoping regression.** `float aspect = aspect.x / aspect.y;` (the macro makes it `float _c0 = _c0.x / _c0.y;`)
+is valid HLSL and MD2/MD3 compile it: the initialiser sees the outer `_c0`, the rest of the block the new scalar. The
+emitter evaluates an initialiser before it declares the local, so it translates with and without `md3` (also when the
+shadow is assigned to, which turns the outer uniform into a seeded private copy). Only whole-register macros (`aspect`,
+`mouse`, `texsize`) can be shadowed: component macros (`q40`, `mouse_x`) expand to a swizzle, so `float q40` is a syntax
+error in D3DX too.
+
+**Visual check against MD3 3.37 under Wine** (`oracle/md3shot.sh`, 800x600, no audio, versus `fdrender --compat md3` with
+`fixtures/audio/silence.wav`; the oracle can only run on silence and its time and random state are not reproducible, so
+only static scenes compare pixel for pixel):
+
+* Generated composite shader: hand-written presets without `warp_N` / `comp_N` text (`PSVERSION=2`, `fDecay=1`, gamma 1,
+  no echo, a solid outer border `ob = (0.25, 0.5, 0.75)`, `ob_size=0.5`, one of `bBrighten` / `bSolarize` / `bDarken` /
+  `bInvert`) give the **same 8-bit pixel** in MD3 and in `--compat md3`: plain `(63, 127, 191)`, brighten `(127, 180, 221)`
+  (`sqrt`), solarize `(190, 255, 192)` (`* 4`), darken `(16, 63, 143)`, invert `(192, 128, 64)`. `--compat md2` gives
+  `(110, 191, 239)` for brighten and `(95, 127, 96)` for solarize, so the check does distinguish the two formulas.
+* `MilkDrop3 - Equalizer2 red.milk` (`get_fft` returns 0 on silence): the cyan glow along the bottom edge is identical in
+  both, down to the gradient. `Equalizer1`, `Equalizer2 purple`, `Equalizer4` and `Equalizer4 MidSoft` are black in both
+  (all bars at height 0); `Equalizer1b` shows the same sparse violet particles (positions differ, random).
+* With audio (`synth128.wav`; also `sweep.wav` for `Equalizer1`) `Equalizer1`, `Equalizer2 red` / `purple`, `Equalizer4` and
+  `Equalizer4 MidSoft` draw bar spectra (LED blocks, solid bars, centred bars) with a jagged, falling profile. MD3 cannot be fed
+  audio in this setup, so the bar heights themselves are only checked against the D3D9 model by the GPU tests, not
+  against MD3.
+* `lara - Flexi Romanesco Uncompressed [MOUSE].milk` (PSVERSION 4/3, `mouse.x/.y/.z`, `get_fft` in the composite): the same
+  faceted fractal with the same cyan-to-deep-blue palette and framing, morphing differently with time (and `mouse`, which is
+  `(-1, -1, 0, 0)` in `fdrender`, an unknown real cursor in the oracle); the exact shape was not compared.
+* A locked preset (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
+  runs) while MD3 draws its licensed laser scene: expected, see `md3.md`.
+
 ## Verification
 
 All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X] -- --nocapture`.
@@ -92,7 +176,12 @@ All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X]
   texture lookups, ...) vs glslang: all agree except the documented `matrix*matrix` deviation.
 * `unit` — wrapper, default shaders, sampler rules, interface, preprocessor, error paths, and a
   mutation/truncation robustness test (translator never panics on malformed input).
-* `snapshots` — 10 insta snapshots (`tests/snapshots/`).
+* `snapshots` — 11 insta snapshots (`tests/snapshots/`), one of them (`md3_fft_mouse_and_q`) with `md3`.
+* `md3` — the prelude text and ordering, `md2_wrapped_hlsl` untouched, `get_fft` / `mouse` / `q33..q64` lowering, sampler
+  prefixes, every `tex2D*` flavour on `sampler_fft`, the legacy comp texts, the shadowing regression, every corpus shader
+  translating byte-identically with and without `md3`, and three GPU tests (skipped without an adapter) that render
+  `get_fft` / `sampler_{pw,fw,pc}_fft` / `mouse` / `q_hi` through `tests/common/gpu.rs` (a jagged `R32Float` 512 x 1
+  texture and a fixed `MilkExtUniforms`) and compare every column with the D3D9 model above.
 
 ## Known divergences / limits
 
@@ -108,9 +197,9 @@ All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X]
   int literals (`7/2`) follows the integer rule above.
 * `sampler_pw_noise_lq` etc. must be declared by the user (`sampler sampler_pw_noise_lq;`); MD2
   rejects an undeclared one ("undefined identifier") and falls back — `Nebula Forge` (comp) is such a shader.
-* ABI note: `TexSource` has no `Fft`/`Wave` (BeatDrop extensions); they are reported as
-  `User("fft")`/`User("wave")`. `include.fx` here has no `_c14.._c16` (mouse/system time); ABI has no
-  place for them and no corpus shader uses them. No ABI change is required.
+* ABI note: `TexSource::Fft` is only produced with `Options::md3`; otherwise `fft` / `wave` are reported as
+  `User("fft")` / `User("wave")` (BeatDrop extensions). `include.fx` here has no `_c14.._c16` (mouse / BeatDrop system
+  time and date); with `md3` the prelude adds `_c14` (mouse, `MilkExtUniforms`), `_c15..` stay absent (MD3 never uploads them).
 * Undefined variables (`Options::projectm_flavor`, `emit/undef.rs`): a variable read before it is written is undefined in
   projectM's GLSL; Mesa's `nir_opt_undef` turns an undef whose every use is a float ALU operand into NaN (so
   `max(x, f(undef))` is `x`). `PS` locals / private globals with that property start as NaN, every other undef read keeps

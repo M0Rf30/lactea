@@ -13,13 +13,18 @@
 #![warn(missing_docs)]
 
 mod cnum;
+mod md3_io;
+pub mod milk2;
 mod scan;
+mod sprite;
 
 use scan::{Lookup, decode, sane_entries};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+pub use md3_io::{export_shape_file, export_wave_file, import_shape_file, import_wave_file};
 pub use scan::LINEFEED_CONTROL_CHAR;
+pub use sprite::PresetSprite;
 
 /// `MAX_CUSTOM_WAVES` (md_defines.h)
 pub const MAX_CUSTOM_WAVES: usize = 16;
@@ -58,6 +63,13 @@ pub enum ParseError {
     Empty,
     /// UTF-16 BOM: MD2 reads bytes and would see no keys at all.
     Utf16,
+    /// A `.wave` / `.shape` import named a slot that does not exist.
+    SlotOutOfRange {
+        /// The requested slot.
+        slot: usize,
+        /// Number of slots of that kind (valid slots are `0..count`).
+        count: usize,
+    },
 }
 
 /// Which importer's reading rules [`Preset::parse_with`] follows.  The two disagree on
@@ -79,6 +91,9 @@ impl std::fmt::Display for ParseError {
         match self {
             ParseError::Empty => f.write_str("empty preset"),
             ParseError::Utf16 => f.write_str("preset is UTF-16 (not supported by MilkDrop)"),
+            ParseError::SlotOutOfRange { slot, count } => {
+                write!(f, "custom wave/shape slot {slot} out of range (0..{count})")
+            }
         }
     }
 }
@@ -563,10 +578,11 @@ pub fn code_to_source(code: &str) -> String {
     code.replace(LINEFEED_CONTROL_CHAR, "\n")
 }
 
-/// `CState::StripLinefeedCharsAndComments`: drop the line terminators (no replacement
-/// despite the MD2 comment) and `//` / `\\` comments up to the end of their line.
-#[cfg(test)]
-fn strip_linefeeds_and_comments(code: &str) -> String {
+/// `CState::StripLinefeedCharsAndComments`, the way MilkDrop 2 turns a joined block into the text its
+/// expression compiler sees: [`LINEFEED_CONTROL_CHAR`] is deleted (no replacement despite the MD2 comment, so a
+/// statement split over two lines is glued together) and `//` / `\\` comments are dropped up to the next
+/// separator. Compare [`code_to_source`], which projectM's parser needs.
+pub fn strip_linefeeds_and_comments(code: &str) -> String {
     let b = code.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut comment = false;
@@ -636,6 +652,9 @@ pub struct Preset {
     pub warp_shader: Option<String>,
     /// `comp_<n>` text; `None` -> default comp shader (`GenCompPShaderText`).
     pub comp_shader: Option<String>,
+    /// MD3 sprite block (`SpriteName` .. `SpriteRepeatY`, `code_N`); `None` when the preset has no sprite name.
+    /// MD2 and projectM ignore it.
+    pub sprite: Option<PresetSprite>,
     /// Every other `key=value` line (file order, duplicates kept), decoded lossily.
     pub extra: Vec<(String, String)>,
 }
@@ -654,6 +673,7 @@ impl Default for Preset {
             per_pixel: String::new(),
             warp_shader: None,
             comp_shader: None,
+            sprite: None,
             extra: Vec::new(),
         }
     }
@@ -731,6 +751,8 @@ impl Preset {
         // STATE_COMP
         let c = decode(&lk.read_code("comp_"));
         p.comp_shader = if c.is_empty() { None } else { Some(c) };
+        // MD3 sprite block: read wherever it is, only meaningful to `Compat::MilkDrop3`
+        p.sprite = PresetSprite::parse(&mut lk, bytes);
         p.comp_ps_version = comp_v;
 
         p.extra = p.collect_extra(bytes);
@@ -836,6 +858,9 @@ impl Preset {
                 }
             }
         }
+        if let Some(sp) = &self.sprite {
+            s.extend(sp.consumed_keys());
+        }
         s
     }
 
@@ -885,6 +910,9 @@ impl Preset {
         }
         if let Some(c) = &self.comp_shader {
             write_code(&mut out, "comp_", c, true);
+        }
+        if let Some(sp) = &self.sprite {
+            sp.write(&mut out);
         }
         for (k, v) in &self.extra {
             let _ = writeln!(out, "{k}={v}");

@@ -13,7 +13,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowId};
 
 use crate::audio::monitor::{AudioMonitor, AudioStatus, MonitorConfig};
-use crate::cli::{Args, VisualizerKind};
+use crate::cli::{Args, CompatArg, VisualizerKind};
 use crate::feed::AudioFeed;
 use crate::gfx::{Acquired, Gfx};
 use crate::input::{Action, action_for_key, parse_script};
@@ -54,6 +54,10 @@ pub struct App {
     fps: f32,
     last_click: Option<(Instant, PhysicalPosition<f64>)>,
     cursor: PhysicalPosition<f64>,
+    /// The cursor is inside the window (`CursorEntered` / `CursorLeft`); forwarded to MilkDrop 3 presets.
+    cursor_inside: bool,
+    /// The left mouse button is down (window events only: unlike MD3 it is not tracked outside the window).
+    left_down: bool,
     fullscreen: bool,
     pending_size: Option<PhysicalSize<u32>>,
     error: Option<String>,
@@ -65,6 +69,9 @@ pub struct App {
     /// Cached monitor refresh rate (mHz) for the frame-cap decision.
     refresh_mhz: Option<u32>,
     refresh_checked: Option<Instant>,
+    /// An MD3 auto hard cut was asked for by the last rendered frame; the next frame loads the next
+    /// preset with a hard cut (ignored while the browser is locked).
+    pending_auto_cut: bool,
 }
 
 /// Preset list from the CLI: `--preset` first, then every `--dir` (or the first existing default
@@ -83,8 +90,10 @@ pub(crate) fn collect_presets(args: &Args) -> Vec<PresetEntry> {
                 .find(|d| d.is_dir()),
         );
     }
+    // `.milk2` double presets play only under `--compat milkdrop3`
+    let milk2 = args.compat == CompatArg::Milkdrop3;
     for d in dirs {
-        let found = presets::scan_dir(&d);
+        let found = presets::scan_dir(&d, milk2);
         if found.is_empty() {
             log::warn!("no .milk presets found under {}", d.display());
         }
@@ -98,6 +107,22 @@ pub(crate) fn collect_presets(args: &Args) -> Vec<PresetEntry> {
 fn debug_dump_dir() -> PathBuf {
     std::env::var_os("LACTEA_DEBUG_DIR")
         .map_or_else(|| std::env::temp_dir().join("lactea-debug"), PathBuf::from)
+}
+
+/// MD3 auto hard cut modes are 0 (off) ..= this (`--auto-hard-cut`).
+const AUTO_HARD_CUT_MODES: u8 = 7;
+
+/// The mode F8 selects after `mode`: 0 -> 1 -> ... -> 7 -> 0.
+fn next_auto_hard_cut(mode: u8) -> u8 {
+    (mode.min(AUTO_HARD_CUT_MODES) + 1) % (AUTO_HARD_CUT_MODES + 1)
+}
+
+/// MD3's wording for a mode: `off`, `hardcut1` .. `hardcut7`.
+fn auto_hard_cut_label(mode: u8) -> String {
+    match mode {
+        0 => "off".to_string(),
+        n => format!("hardcut{n}"),
+    }
 }
 
 pub fn run(args: Args) -> anyhow::Result<()> {
@@ -152,12 +177,18 @@ impl App {
         let deterministic = args.deterministic;
         let fps_cap = args.fps.or(if deterministic { Some(60) } else { None });
         let period = fps_cap.map(|f| Duration::from_secs_f64(1.0 / f.max(1) as f64));
-        let presets = PresetBrowser::new(
+        let mut presets = PresetBrowser::new(
             entries,
             args.shuffle,
             Duration::from_secs_f64(args.duration.max(0.0)),
             args.seed as u64,
         );
+        if args.compat.md3() {
+            presets.set_md3_time(
+                Duration::from_secs_f64(args.transition_duration.max(0.0)),
+                args.duration_rand,
+            );
+        }
         let static_status = audio.static_status();
         Self {
             explicit_first: args.preset.is_some(),
@@ -181,6 +212,8 @@ impl App {
             fps: 0.0,
             last_click: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
+            cursor_inside: false,
+            left_down: false,
             pending_size: None,
             error: None,
             gpu_rebuilds: 0,
@@ -189,6 +222,7 @@ impl App {
             last_audio_stats: now,
             refresh_mhz: None,
             refresh_checked: None,
+            pending_auto_cut: false,
         }
     }
 
@@ -250,6 +284,7 @@ impl App {
                         preset_duration: self.args.duration,
                         compat: self.args.compat,
                         mesh: self.args.mesh,
+                        auto_hard_cut_mode: self.args.auto_hard_cut,
                     },
                 )
                 .map(|v| Box::new(v) as Box<dyn Visualizer>)
@@ -307,10 +342,14 @@ impl App {
             "rebuilding GPU state after device loss (attempt {})",
             self.gpu_rebuilds
         );
+        let auto_mode = old.viz.auto_hard_cut_mode();
         let window = old.window.clone();
         drop(old);
         match self.create_run(el, Some(window)) {
             Ok(mut run) => {
+                if let Some(mode) = auto_mode {
+                    run.viz.set_auto_hard_cut_mode(mode);
+                }
                 if let Some(idx) = self.presets.current() {
                     let entry = self.presets.entry(idx).clone();
                     if let Err(e) = Self::load_entry(&mut run, &entry, Change::Cut) {
@@ -358,6 +397,12 @@ impl App {
 
     /// Navigate to the preset `nav` selects, skipping presets that fail to load.
     fn switch(&mut self, run: &mut Running, nav: Nav, now: Instant) {
+        self.switch_with(run, nav, now, false);
+    }
+
+    /// [`Self::switch`]; `force_cut` loads with a hard cut whatever `--transition-duration` says (MD3
+    /// auto hard cuts).
+    fn switch_with(&mut self, run: &mut Running, nav: Nav, now: Instant, force_cut: bool) {
         log::debug!("preset navigation: {nav:?}");
         let first = self.presets.current().is_none();
         let start = if first && self.explicit_first {
@@ -367,7 +412,7 @@ impl App {
         };
         let Some(mut idx) = start else { return };
         // the very first preset starts at once; every other change blends (`--transition-duration`)
-        let change = if first || self.args.transition_duration <= 0.0 {
+        let change = if first || force_cut || self.args.transition_duration <= 0.0 {
             Change::Cut
         } else {
             Change::Soft {
@@ -413,7 +458,7 @@ impl App {
                 }
             }
         }
-        self.update_title(&run.window, true);
+        self.update_title(run, true);
     }
 
     // ---- input ----------------------------------------------------------------------------
@@ -441,11 +486,23 @@ impl App {
         match action {
             Action::Quit => el.exit(),
             Action::Navigate(nav) => self.switch(&mut run, nav, now),
+            Action::CycleAutoHardCut => match run.viz.auto_hard_cut_mode() {
+                None => log::info!("auto hard cut needs --compat milkdrop3"),
+                Some(mode) => {
+                    let next = next_auto_hard_cut(mode);
+                    run.viz.set_auto_hard_cut_mode(next);
+                    if next == 0 {
+                        self.pending_auto_cut = false;
+                    }
+                    log::info!("auto hard cut: {}", auto_hard_cut_label(next));
+                    self.update_title(&run, true);
+                }
+            },
             Action::ToggleFullscreen => self.toggle_fullscreen(&run.window),
             Action::ToggleLock => {
                 let locked = self.presets.toggle_lock();
                 log::info!("preset {}", if locked { "locked" } else { "unlocked" });
-                self.update_title(&run.window, true);
+                self.update_title(&run, true);
             }
             Action::DumpStages => {
                 let stages = run.viz.dump_stages();
@@ -509,7 +566,7 @@ impl App {
         }
     }
 
-    fn update_title(&mut self, window: &Window, force: bool) {
+    fn update_title(&mut self, run: &Running, force: bool) {
         let now = Instant::now();
         if !force && now.duration_since(self.last_title_at) < Duration::from_millis(250) {
             return;
@@ -519,8 +576,12 @@ impl App {
             (Some(i), Some(e)) => format!("{} [{}/{}]", e.name, i + 1, self.presets.len()),
             _ => "no preset".to_string(),
         };
+        let hardcut = match run.viz.auto_hard_cut_mode() {
+            Some(mode) if mode > 0 => format!(" | {}", auto_hard_cut_label(mode)),
+            _ => String::new(),
+        };
         let title = format!(
-            "lactea | {preset}{} | {} | {:.0} fps",
+            "lactea | {preset}{}{hardcut} | {} | {:.0} fps",
             if self.presets.locked() {
                 " | LOCKED"
             } else {
@@ -531,7 +592,7 @@ impl App {
         );
         if title != self.last_title {
             log::debug!(target: "lactea::title", "{title}");
-            window.set_title(&title);
+            run.window.set_title(&title);
             self.last_title = title;
         }
     }
@@ -655,9 +716,16 @@ impl App {
             );
         }
 
-        // Preset: first load, then timer.
+        // Preset: first load, then an MD3 auto hard cut (a hard cut, nothing to do for mode 7 and
+        // while locked or with a single preset), then timer.
+        let auto_cut = std::mem::take(&mut self.pending_auto_cut)
+            && !self.presets.locked()
+            && self.presets.len() > 1;
         if self.presets.current().is_none() && !self.presets.is_empty() {
             self.switch(&mut run, Nav::Next, now);
+        } else if auto_cut {
+            log::debug!("preset switch requested: auto hard cut");
+            self.switch_with(&mut run, Nav::Auto, now, true);
         } else if self.presets.auto_due(now) {
             log::debug!("preset switch requested: display time is up");
             self.switch(&mut run, Nav::Auto, now);
@@ -679,7 +747,23 @@ impl App {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frame"),
                         });
+                let size = run.window.inner_size();
+                let inside = self.cursor_inside
+                    && (0.0..f64::from(size.width)).contains(&self.cursor.x)
+                    && (0.0..f64::from(size.height)).contains(&self.cursor.y);
+                run.viz.set_mouse(
+                    inside.then(|| {
+                        [
+                            (self.cursor.x / f64::from(size.width)) as f32,
+                            (self.cursor.y / f64::from(size.height)) as f32,
+                        ]
+                    }),
+                    self.left_down,
+                );
                 run.viz.render(&mut enc, &view, time, self.frame as u32);
+                if run.viz.take_auto_cuts() > 0 && !self.presets.locked() {
+                    self.pending_auto_cut = true;
+                }
                 let shot = match &self.args.screenshot {
                     Some(_) if self.frame == self.args.screenshot_frame => {
                         match crate::capture::encode_copy(&run.gfx.device, &mut enc, &tex.texture) {
@@ -730,7 +814,7 @@ impl App {
             self.fps_window = (now, self.frame);
             log::debug!("{:.1} fps", self.fps);
         }
-        self.update_title(&run.window, false);
+        self.update_title(&run, false);
         self.run = Some(run);
     }
 }
@@ -759,12 +843,17 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(el),
             WindowEvent::KeyboardInput { event, .. } => self.on_key(el, event),
             WindowEvent::CursorMoved { position, .. } => self.cursor = position,
+            WindowEvent::CursorEntered { .. } => self.cursor_inside = true,
+            WindowEvent::CursorLeft { .. } => self.cursor_inside = false,
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some(run) = self.run.take() {
+                self.left_down = state == ElementState::Pressed;
+                if self.left_down
+                    && let Some(run) = self.run.take()
+                {
                     self.on_click(&run.window);
                     self.run = Some(run);
                 }
@@ -788,5 +877,23 @@ impl ApplicationHandler for App {
         // Stop audio threads/streams before the window goes away.
         self.audio = AudioFeed::Silent;
         self.run = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f8_cycles_off_through_seven_and_back() {
+        let mut seen = vec![0];
+        let mut m = 0;
+        for _ in 0..8 {
+            m = next_auto_hard_cut(m);
+            seen.push(m);
+        }
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7, 0]);
+        // out of range (the engine clamps, so it never reports it) restarts at off
+        assert_eq!(next_auto_hard_cut(200), 0);
     }
 }

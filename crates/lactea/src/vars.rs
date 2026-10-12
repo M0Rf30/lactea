@@ -153,6 +153,14 @@ var_struct!(
     ]
 );
 
+/// MilkDrop 3: append `q33..q64` to `q` and, for contexts that have `t` variables, `t9..t16` to `t`.
+pub fn extend_md3(ctx: &mut Context, q: &mut Vec<Var>, t: &mut Vec<Var>) {
+    q.extend((q.len() + 1..=lactea_abi::NUM_Q_MD3).map(|i| ctx.var(&format!("q{i}"))));
+    if !t.is_empty() {
+        t.extend((t.len() + 1..=lactea_abi::NUM_T_MD3).map(|i| ctx.var(&format!("t{i}"))));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +179,21 @@ mod tests {
         let mut ctx2 = Context::new(Arc::new(GlobalMemory::new()));
         let s = ShVars::register(&mut ctx2);
         assert_eq!((s.q.len(), s.t.len()), (32, 8));
+    }
+
+    #[test]
+    fn md3_extension_adds_q33_to_q64_and_t9_to_t16() {
+        let mut ctx = Context::new(Arc::new(GlobalMemory::new()));
+        let mut v = PfVars::register(&mut ctx);
+        extend_md3(&mut ctx, &mut v.q, &mut v.t);
+        // per-frame contexts have no `t`: it stays empty
+        assert_eq!((v.q.len(), v.t.len()), (64, 0));
+        assert_eq!(ctx.find_var("q64"), Some(v.q[63]));
+        assert_eq!(ctx.var_count(), 75 + 64);
+        let mut ctx2 = Context::new(Arc::new(GlobalMemory::new()));
+        let mut s = ShVars::register(&mut ctx2);
+        extend_md3(&mut ctx2, &mut s.q, &mut s.t);
+        assert_eq!((s.q.len(), s.t.len()), (64, 16));
+        assert_eq!(ctx2.find_var("t16"), Some(s.t[15]));
     }
 }

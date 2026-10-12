@@ -84,6 +84,11 @@ pub struct FrameInput {
     /// MilkDrop 2's preset blend (`m_bBlending`) in progress (`CompatRules::md2_preset_blend`): the fields above are
     /// then the new state's blended values and this carries the rest, see [`Md2Blend`](crate::Md2Blend). `None` = no blend.
     pub md2_blend: Option<crate::blend::Md2Blend>,
+    /// MilkDrop 3 shader inputs (`_c14`, `_qi.._qp`, shader time, FFT); neutral outside MilkDrop 3.
+    pub ext: crate::ShaderExt,
+    /// MilkDrop 3 preset sprites to draw this frame (see [`crate::sprite::SpriteDraw::layer`] for where each goes); empty for
+    /// everything but `Compat::MilkDrop3` presets that carry a sprite.
+    pub sprites: Vec<crate::sprite::SpriteDraw>,
 }
 
 /// Decay, composite-pass controls.
@@ -135,6 +140,9 @@ pub struct Borders {
     pub ib_size: f32,
     /// `var_pf_ib_r/g/b/a`.
     pub ib_rgba: [f32; 4],
+    /// Skip both borders (`DrawSprites` border gate of MilkDrop 3: hidden during blends with `DisableBox`, never drawn
+    /// for a double preset).
+    pub hidden: bool,
 }
 
 /// Motion vector field: `var_pf_mv_x/y/dx/dy/l/r/g/b/a`.
@@ -157,7 +165,8 @@ pub struct MotionVectors {
 /// Main waveform (`DrawWave` inputs).
 #[derive(Clone, Debug)]
 pub struct MainWave {
-    /// `var_pf_wave_mode` (`% NUM_WAVES` is applied by the engine; modes 0..=8 are drawn).
+    /// `var_pf_wave_mode` as the renderer should draw it: the engine applies the compat mode's wrap (`% 18` MD2,
+    /// `% 16` projectM, the C remainder `% 17` of MilkDrop 3, where a negative value draws nothing visible).
     pub mode: i32,
     /// `var_pf_wave_r/g/b` and `var_pf_wave_a`.
     pub rgba: [f32; 4],
@@ -198,7 +207,7 @@ pub struct MainWave {
 /// One evaluated custom-shape instance (`CShape` after per-frame code for that instance).
 #[derive(Clone, Debug)]
 pub struct ShapeInstance {
-    /// `var_pf_sides` (clamped to 3..=100 by the renderer).
+    /// `var_pf_sides` (clamped to `3..=CompatRules::max_shape_sides` by the renderer).
     pub sides: i32,
     /// `var_pf_x`, projectM / MD2 compute the fan centre `x * 2.0 - 1.0` in double and round to `f32` once, so
     /// `x` / `y` stay in the equation VM's `f64` (0..1, y=1 top).
@@ -329,6 +338,7 @@ impl Default for Borders {
             ob_rgba: [0.0; 4],
             ib_size: 0.01,
             ib_rgba: [0.25, 0.25, 0.25, 0.0],
+            hidden: false,
         }
     }
 }
@@ -423,9 +433,11 @@ impl Default for FrameInput {
             waves: Vec::new(),
             darken_center: false,
             warp_random: None,
+            ext: crate::ShaderExt::default(),
             comp_random: None,
             hue_offsets: None,
             md2_blend: None,
+            sprites: Vec::new(),
         }
     }
 }

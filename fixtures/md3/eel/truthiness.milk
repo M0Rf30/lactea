@@ -1,0 +1,15 @@
+MILKDROP_PRESET_VERSION=201
+PSVERSION=2
+PSVERSION_WARP=0
+PSVERSION_COMP=0
+[preset00]
+fDecay=0.000000
+fWaveAlpha=0.000000
+wave_a=0
+per_frame_1=decay=0;zoom=1;rot=0;warp=0;ob_size=0.1;ob_a=1;ib_size=0.1;ib_a=1;wave_a=0;
+per_frame_2=t=if(0.000001,10,20);ob_r=0.25+0.01*t;
+per_frame_3=t=(0.00001&&1)*5;ob_g=0.25+0.01*t;
+per_frame_4=t=!0.000001;ob_b=0.25+0.01*t;
+per_frame_5=t=equal(1,1.000001)+equal(1,1.0001);ib_r=0.25+0.01*t;
+per_frame_6=t=above(1,0.999999);ib_g=0.25+0.01*t;
+per_frame_7=t=band(0.00001,1)+bor(0.00001,0);ib_b=0.25+0.01*t;

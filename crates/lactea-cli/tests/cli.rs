@@ -86,6 +86,64 @@ fn invalid_mesh_and_size_are_usage_errors_not_panics() {
     }
 }
 
+/// `--auto-hard-cut` is MD3's `AutoHardCutMode` 0..=7: anything else is a usage error before any GPU
+/// work; 0 runs; a mode that needs MD3 only reports cuts (`auto_cuts`) under `--compat md3`.
+#[test]
+fn auto_hard_cut_flag_is_validated_and_counts_cuts() {
+    let dir = tmp("autocut");
+    let preset = dir.join("p.milk");
+    let audio = dir.join("a.wav");
+    // `bass = 2` every frame: the cut modes read it from the second frame on
+    std::fs::write(
+        &preset,
+        "MILKDROP_PRESET_VERSION=100\nper_frame_1=bass=2;\n",
+    )
+    .unwrap();
+    wav(&audio);
+    let (p, a) = (preset.to_str().unwrap(), audio.to_str().unwrap());
+    // one output directory per run: its `fdrender.json` is what the checks read
+    let base = |name: &str, extra: &[&str]| {
+        let out = dir.join(name);
+        let out = out.to_str().unwrap().to_owned();
+        let mut args = vec![
+            "--preset", p, "--audio", a, "--out", &out, "--frames", "6", "--size", "64x36",
+        ];
+        args.extend_from_slice(extra);
+        let (code, err) = run(&args);
+        let info = std::fs::read_to_string(Path::new(&out).join("fdrender.json"))
+            .ok()
+            .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap());
+        (code, err, info)
+    };
+
+    let (code, err, _) = base("bad", &["--compat", "md3", "--auto-hard-cut", "9"]);
+    assert_eq!(code, 1, "{err}");
+    assert!(
+        err.contains("--auto-hard-cut") && err.contains("0..=7") && !err.contains("panicked"),
+        "{err}"
+    );
+
+    let (code, err, info) = base("off", &["--compat", "md3", "--auto-hard-cut", "0"]);
+    if code == 1 && err.contains("no wgpu adapter") {
+        eprintln!("skipping: no GPU");
+        return;
+    }
+    assert_eq!(code, 0, "{err}");
+    assert!(info.unwrap().get("auto_cuts").is_none());
+
+    // mode 6 under md3: frame 0 reads no levels, frames 1..=5 each ask for a cut
+    let (code, err, info) = base("md3", &["--compat", "md3", "--auto-hard-cut", "6"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(info.unwrap()["auto_cuts"], 5);
+
+    // inert (and not reported) under projectM
+    let (code, err, info) = base("pm", &["--compat", "projectm", "--auto-hard-cut", "6"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("--auto-hard-cut needs --compat md3"), "{err}");
+    assert!(info.unwrap().get("auto_cuts").is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn free_run_is_deterministic_and_teacher_reproduces_it() {
     let dir = tmp("e2e");
@@ -194,5 +252,53 @@ fn bad_preset_exits_2_and_bad_args_exit_nonzero() {
     assert!(out.join("fdrender.json").exists());
     let (code, _) = run(&["--preset", "x"]);
     assert_ne!(code, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.milk2` path renders under `--compat md3` and is a clear load failure (exit 2) under the default compat.
+#[test]
+fn milk2_needs_md3_compat() {
+    let dir = tmp("milk2");
+    let audio = dir.join("a.wav");
+    wav(&audio);
+    let half =
+        "MILKDROP_PRESET_VERSION=100\nfDecay=0.9\nfGammaAdj=1\nob_size=0.1\nob_a=1\nob_r=1\n";
+    let preset = dir.join("pair.milk2");
+    std::fs::write(
+        &preset,
+        format!(
+            "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\n\
+             blending_pattern=side\nblending_progress=0.50\nblending_direction=1\n\
+             random_1=0.250000\nrandom_2=0.500000\nrandom_3=0.500000\nrandom_4=0.500000\nrandom_5=0.500000\n\n\
+             [PRESET1_BEGIN]\nNAME=a\n{half}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{half}[PRESET2_END]\n"
+        ),
+    )
+    .unwrap();
+    let run_with = |compat: &[&str], out: &str| {
+        let out = dir.join(out);
+        let mut args = vec![
+            "--preset",
+            preset.to_str().unwrap(),
+            "--audio",
+            audio.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--frames",
+            "3",
+            "--size",
+            "64x36",
+        ];
+        args.extend_from_slice(compat);
+        run(&args)
+    };
+    let (code, err) = run_with(&["--compat", "md3"], "md3");
+    if code == 1 && err.contains("no wgpu adapter") {
+        return;
+    }
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.join("md3/final/00002.png").exists());
+    let (code, err) = run_with(&[], "projectm");
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("MilkDrop3"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,6 +1,6 @@
 [package]
 name = "lactea-preset"
-description = "MilkDrop .milk preset parser with MilkDrop 2 semantics and defaults."
+description = "MilkDrop .milk / .milk2 preset parser with MilkDrop 2/3 semantics and defaults."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

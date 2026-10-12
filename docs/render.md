@@ -216,3 +216,35 @@ the main image. Opt-in per shape (`image: None` = everything above). Measured ag
   texture (the engine skips them in `resolve_shape_images`). `idlem` / `idleheadphones` (embedded PNGs) are not available;
 * the vertical texture coordinate is evaluated as projectM does, `1 - (0.5 - 0.5*sin(a)/tex_zoom)` (same real number as
   `0.5 + ...`, a different `f32`): it flips nearest-filtered texels at ties.
+
+## MilkDrop 3 shader inputs (`ShaderExt`, `Compat::MilkDrop3`)
+
+Behaviour from `docs/md3.md` (shader inputs); the engine side (who computes the values) is described there. The renderer only
+transports them, never gates them on `Compat`: outside MilkDrop 3 the engine leaves `ShaderExt::default()` in place, which is
+neutral, so output stays bit-identical.
+
+* **Layout.** `WGSL_COMMON` declares, next to the frozen `mu` (`@group(0) @binding(0)`, `MilkUniforms`), the extension block
+  `@group(0) @binding(1) var<uniform> mx: MilkExt` (`lactea_abi::MilkExtUniforms`, `BINDING_MILK_EXT`, fragment stage):
+  `mx.mouse` = `_c14` and `mx.q_hi[0..8]` = `_qi.._qp` (`q33 == mx.q_hi[0].x`, `q64 == mx.q_hi[7].w`). `Pipelines::bgl_mu` always
+  has both entries and `run_shader_pass_ex` always uploads both buffers, so a shader that does not declare `mx` is unaffected
+  (the layout is a superset of what it uses).
+* **Who fills what.** Every warp / composite shader pass takes a `ShaderExt`: `FrameInput::ext` for the state the frame is built
+  for, `Md2OldPass::ext` for the *old* shader passes of a MilkDrop 2 / 3 preset blend (`run_md2_warp` / `run_md2_comp`, `Which::Old`):
+  the old state's `_c14`, `q33..q64` and shader time are its own, like its `q1..q32` and blur range.
+  * `mouse`: `(px/W, py/H, left held 0/1, released 1-frame 0/1)`, y from the top (matches `uv.y`), `(-1, -1, ..)` while the cursor
+    is outside the window; default `(-1, -1, 0, 0)`.
+  * `q_hi`: `q33..q64` after the state's per-frame code; default zeros.
+* **Shader time.** `fill_milk_uniforms` takes `_c2.x` from `ShaderExt::time` (seconds since *this state's* preset started, `None` =
+  `FrameInput::time`, as before) and wraps it modulo 10000 like the absolute time (start 100 s, now 12445.5 s: the engine passes
+  12345.5, the shader sees 2345.5). `_c8.._c11` and the `rot_*` matrices keep using `FrameInput::time`.
+* **FFT texture.** Each `Renderer` owns a 512 x 1 `R32Float` texture (`TEXTURE_BINDING | COPY_DST`, zero until the first upload,
+  created in `Renderer::new`, so `sibling()` gets its own) that `TexSource::Fft` bindings sample (`texsize` = `(512, 1, 1/512, 1)`).
+  A frame with `ext.fft = Some(..)` replaces its contents before any pass is recorded (`render_frame` and
+  `render_frame_to_output`); `None` keeps the previous contents; the old state's `fft` is ignored (renderer-global). The upload is a
+  staging-buffer copy recorded in the frame's encoder, not `queue.write_texture`: a queue write lands at the next submit ahead of all
+  recorded work, so two frames of one renderer recorded into one encoder would see the last spectrum.
+  `R32Float` is not filterable without `FLOAT32_FILTERABLE`: the group(1) layout entry of a `TexSource::Fft` binding is
+  `Float { filterable: false }` (its sampler entry stays `Filtering` and is never paired with it) and the translated WGSL does
+  `textureLoad` with its own clamp + bilinear. The dimensionality check treats `Fft` as a 2D texture.
+* tests: `tests/shader_ext.rs` (GPU: mouse, `q_hi`, FFT upload / keep / per-renderer / encoder order, old-state ext during a blend),
+  `uniforms.rs` (`_c2.x` wrap, neutral default).

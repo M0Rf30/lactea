@@ -19,7 +19,7 @@
 //!    `ShowToUser_NoShaders`: video echo, gamma, brighten/darken/solarize/invert),
 //! 6. blit `final` to the host target (sRGB-compensated if needed).
 //!
-//! With `Compat::MilkDrop2` the engine may hand over [`Md2Blend`] data (`FrameInput::md2_blend`): MilkDrop 2's own
+//! With `Compat::MilkDrop2` / `Compat::MilkDrop3` the engine may hand over [`Md2Blend`] data (`FrameInput::md2_blend`): MilkDrop 2's own
 //! preset blend, where steps 2, 4 and 5 run once or twice (old and new shader, alpha-tiled) on a blended warp mesh.
 //!
 //! Where MilkDrop 2 and projectM differ, [`Compat`] picks the behaviour (default projectM).
@@ -52,12 +52,15 @@ mod motion;
 pub mod noise;
 mod renderer;
 mod rng;
+mod shader_ext;
 mod shaders;
+mod sprite;
 mod stroke;
 mod transition;
 pub mod uniforms;
 pub mod warp_mesh;
 pub mod wavegen;
+pub mod wavegen_md3;
 
 pub use blend::{Md2Blend, Md2OldPass, cosine_interp};
 pub use config::{Compat, CompatRules, CompiledShader, RenderConfig, RenderError, StrokeRaster};
@@ -67,6 +70,11 @@ pub use frame::{
 };
 pub use renderer::Renderer;
 pub use rng::Rng;
+pub use shader_ext::ShaderExt;
+pub use sprite::{
+    SPRITE_MODES, SpriteDraw, SpriteVertex, gif_frame_index, sprite_blend_reference, sprite_mode,
+    sprite_vertex_color,
+};
 pub use transition::{TransitionBlender, TransitionKind, TransitionParams};
 #[cfg(feature = "diagnostics")]
 pub use uniforms::RotParams;

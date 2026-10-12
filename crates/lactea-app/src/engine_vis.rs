@@ -2,9 +2,10 @@
 //! and from [`FsTextureProvider`] to the engine's `TextureProvider`.
 
 use lactea::{
-    Compat, Engine, EngineConfig, FrameClock, Image, PresetReport, ShaderOutcome, TextureProvider,
-    Transition,
+    Compat, Engine, EngineConfig, FrameClock, Image, Media, MediaFiles, PresetReport,
+    ShaderOutcome, TEXTURE_EXTENSIONS, TextureProvider, Transition, decode_gif,
 };
+use std::path::{Path, PathBuf};
 
 use crate::cli::CompatArg;
 use crate::textures::FsTextureProvider;
@@ -18,13 +19,55 @@ pub struct EngineOptions {
     pub preset_duration: f64,
     pub compat: CompatArg,
     pub mesh: (u32, u32),
+    /// Initial MD3 `AutoHardCutMode` (0..=7; acts only with `--compat milkdrop3`).
+    pub auto_hard_cut_mode: u8,
 }
 
-struct FsProvider(FsTextureProvider);
+/// The directories' textures for the engine: plain lookups through [`FsTextureProvider`], MilkDrop 3's sprites and
+/// GIFs through a [`MediaFiles`] index of the same directories.
+struct FsProvider {
+    fs: FsTextureProvider,
+    media: MediaFiles<PathBuf>,
+}
+
+impl FsProvider {
+    fn new(fs: FsTextureProvider) -> Self {
+        let mut media = MediaFiles::new();
+        for (rel, file) in crate::textures::media_listing(fs.dirs(), &TEXTURE_EXTENSIONS) {
+            media.add(&rel, file);
+        }
+        Self { fs, media }
+    }
+}
+
+/// A GIF (by content) as frames, anything else as a still image.
+fn decode_media(path: &Path) -> Option<Media> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.starts_with(b"GIF8") {
+        return match decode_gif(&bytes) {
+            Ok(a) => Some(Media::Animated(a)),
+            Err(e) => {
+                log::warn!("gif {}: {e}", path.display());
+                None
+            }
+        };
+    }
+    match crate::textures::decode_file(path) {
+        Ok(t) => Some(Media::Still(Image {
+            width: t.width,
+            height: t.height,
+            rgba8: t.rgba8,
+        })),
+        Err(e) => {
+            log::warn!("image {}: {e}", path.display());
+            None
+        }
+    }
+}
 
 impl TextureProvider for FsProvider {
     fn load(&mut self, name: &str) -> Option<Image> {
-        self.0.load(name).map(|t| Image {
+        self.fs.load(name).map(|t| Image {
             width: t.width,
             height: t.height,
             rgba8: t.rgba8,
@@ -32,7 +75,17 @@ impl TextureProvider for FsProvider {
     }
 
     fn random_pool(&self) -> Vec<String> {
-        self.0.random_pool()
+        self.fs.random_pool()
+    }
+
+    fn load_md3_texture(&mut self, name: &str) -> Option<Media> {
+        let path = self.media.find_texture(name)?.clone();
+        decode_media(&path)
+    }
+
+    fn load_sprite(&mut self, path: &str) -> Option<Media> {
+        let file = self.media.find_sprite(path)?.clone();
+        decode_media(&file)
     }
 }
 
@@ -68,6 +121,7 @@ impl EngineVisualizer {
             compat: match opts.compat {
                 CompatArg::Projectm => Compat::ProjectM,
                 CompatArg::Milkdrop2 => Compat::MilkDrop2,
+                CompatArg::Milkdrop3 => Compat::MilkDrop3,
             },
             output_format: format,
             sample_rate,
@@ -78,10 +132,11 @@ impl EngineVisualizer {
             } else {
                 1e9
             },
+            auto_hard_cut_mode: opts.auto_hard_cut_mode,
             ..Default::default()
         };
         let mut engine = Engine::new(device, queue, cfg);
-        engine.set_texture_provider(Box::new(FsProvider(textures)));
+        engine.set_texture_provider(Box::new(FsProvider::new(textures)));
         engine.set_preset_switch_failed_callback(Some(|f: &lactea::SwitchFailure| {
             log::debug!(
                 "engine: preset switch failed for '{}': {}",
@@ -132,6 +187,17 @@ impl Visualizer for EngineVisualizer {
         match self.engine.load_preset(bytes, name, transition) {
             Ok(report) => {
                 log_report(&report);
+                if let Some(d) = self.engine.double_preset_info() {
+                    log::debug!(
+                        "double preset '{}': {} (direction {}) held at {}, {} + {}",
+                        d.name,
+                        d.pattern,
+                        d.direction,
+                        d.progress,
+                        d.name1.as_deref().unwrap_or("?"),
+                        d.name2.as_deref().unwrap_or("?")
+                    );
+                }
                 Ok(())
             }
             Err(e) => Err(e.to_string()),
@@ -168,5 +234,30 @@ impl Visualizer for EngineVisualizer {
 
     fn resize(&mut self, w: u32, h: u32) {
         self.engine.resize(w, h);
+    }
+
+    fn take_auto_cuts(&mut self) -> u32 {
+        self.engine.take_auto_cuts()
+    }
+
+    fn set_auto_hard_cut_mode(&mut self, mode: u8) {
+        self.engine.set_auto_hard_cut_mode(mode);
+    }
+
+    fn auto_hard_cut_mode(&self) -> Option<u8> {
+        // Unsupported compat modes store the mode but never act on it.
+        self.engine
+            .config()
+            .compat
+            .rules()
+            .md3_auto_hard_cut
+            .then(|| self.engine.auto_hard_cut_mode())
+    }
+
+    fn set_mouse(&mut self, position: Option<[f32; 2]>, left_down: bool) {
+        self.engine.set_mouse(lactea::MouseState {
+            position,
+            left_down,
+        });
     }
 }

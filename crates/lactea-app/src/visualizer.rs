@@ -31,10 +31,25 @@ pub trait Visualizer {
     );
     /// The target size changed (physical pixels, never 0).
     fn resize(&mut self, w: u32, h: u32);
+    /// The mouse for the next frame: the cursor as fractions of the target size (`px / width`, `py / height`, origin
+    /// top left; `None` outside the window) and the left button. Only the MilkDrop 3 engine mode uses it.
+    fn set_mouse(&mut self, _position: Option<[f32; 2]>, _left_down: bool) {}
     /// Pixels of every pipeline stage of the last rendered frame (`name`, width, height, RGBA8),
     /// for the debug dump key. Visualizers without internal stages return nothing.
     fn dump_stages(&mut self) -> Vec<(String, u32, u32, Vec<u8>)> {
         Vec::new()
+    }
+    /// Instant preset changes the visualizer asked for in the frames rendered since the last call
+    /// (MD3 auto hard cuts, `docs/app.md`); the host loads ONE preset for any count > 0.
+    fn take_auto_cuts(&mut self) -> u32 {
+        0
+    }
+    /// Set the MD3 auto hard cut mode (0 = off, 1..=7); ignored by visualizers without it.
+    fn set_auto_hard_cut_mode(&mut self, _mode: u8) {}
+    /// The current auto hard cut mode, or `None` when the visualizer has no such feature or its
+    /// compat mode does not support it (the key then tells the user what to enable).
+    fn auto_hard_cut_mode(&self) -> Option<u8> {
+        None
     }
 }
 

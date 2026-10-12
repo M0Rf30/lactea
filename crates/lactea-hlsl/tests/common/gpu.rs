@@ -31,15 +31,60 @@ pub struct Gpu {
     noise: [wgpu::TextureView; 4],
     vol: [wgpu::TextureView; 2],
     user: wgpu::TextureView,
+    fft: wgpu::TextureView,
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     index_count: u32,
     vs_vec4: wgpu::ShaderModule,
     vs_vec2: wgpu::ShaderModule,
     mu_buf: wgpu::Buffer,
+    mx_buf: wgpu::Buffer,
     pub target: wgpu::Texture,
     readback: wgpu::Buffer,
     pub kind_state: Option<PassKind>,
+}
+
+/// Deterministic, deliberately jagged contents of the MilkDrop 3 FFT texture (`TexSource::Fft`, 512 x 1 `R32Float`):
+/// every neighbouring pair differs, so interpolation weights and index errors show up. Values stay in `[0, 1]`.
+pub fn fft_texels() -> Vec<f32> {
+    (0..FFT_BINS)
+        .map(|i| ((i * 37 + 11) % 101) as f32 / 100.0)
+        .collect()
+}
+
+/// Deterministic `MilkExtUniforms` (`mx`): the mouse is inside the window with the button held, `q33..q64` count up.
+pub fn make_ext_uniforms() -> MilkExtUniforms {
+    let mut mx = MilkExtUniforms {
+        mouse: [0.25, 0.75, 1.0, 0.0],
+        ..Default::default()
+    };
+    for (i, v) in mx.q_hi.iter_mut().flatten().enumerate() {
+        *v = (i as f32 + 1.0) / 64.0;
+    }
+    mx
+}
+
+fn fft_tex(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::TextureView {
+    let t = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: FFT_BINS as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        bytemuck::cast_slice(&fft_texels()),
+    );
+    t.create_view(&Default::default())
 }
 
 fn tex2d(
@@ -364,6 +409,7 @@ impl Gpu {
             }
         }
         let user = tex2d(&device, &queue, 16, 16, &chk);
+        let fft = fft_tex(&device, &queue);
 
         let make = |comp: bool| {
             let (v, i) = make_mesh(comp);
@@ -402,6 +448,11 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
             contents: bytemuck::bytes_of(&mu),
             usage: wgpu::BufferUsages::UNIFORM,
         });
+        let mx_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(&make_ext_uniforms()),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -431,12 +482,14 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
             noise,
             vol,
             user,
+            fft,
             vertex_buf,
             index_buf,
             index_count: idx.len() as u32,
             vs_vec4,
             vs_vec2,
             mu_buf,
+            mx_buf,
             target,
             readback,
             kind_state: None,
@@ -457,6 +510,8 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
                 let _ = dim;
                 &self.user
             }
+            // R32Float, bound non-filterable: the translator only ever `textureLoad`s it
+            TexSource::Fft => &self.fft,
         }
     }
 
@@ -464,6 +519,7 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
         let (w, h) = match src {
             TexSource::User(_) => (16.0, 16.0),
             TexSource::Noise(NoiseTex::VolLq | NoiseTex::VolHq) => (16.0, 16.0),
+            TexSource::Fft => (FFT_BINS as f32, 1.0),
             _ => (SIZE as f32, SIZE as f32),
         };
         [w, h, 1.0 / w, 1.0 / h]
@@ -476,16 +532,28 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
         let d = &self.device;
         let g0 = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: BINDING_MILK_UNIFORMS,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: BINDING_MILK_EXT,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let mut e = vec![wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -502,7 +570,9 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
                 binding: texture_binding(i as u32),
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: wgpu::TextureSampleType::Float {
+                        filterable: tb.source != TexSource::Fft,
+                    },
                     view_dimension: if tb.dim == TexDim::D3 {
                         wgpu::TextureViewDimension::D3
                     } else {
@@ -603,10 +673,16 @@ struct VOut {{ @builtin(position) position: vec4<f32>, @location(0) diffuse: vec
         let g0 = d.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &g0l,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: self.mu_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: BINDING_MILK_UNIFORMS,
+                    resource: self.mu_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BINDING_MILK_EXT,
+                    resource: self.mx_buf.as_entire_binding(),
+                },
+            ],
         });
         let mut pu = PassUniforms::default();
         for (i, s) in texsize_slots.iter().enumerate().take(MAX_PASS_TEXTURES) {

@@ -15,7 +15,9 @@
 //!   diagnostic (D3D9 `ps_2_x` evaluates both sides of branches; MD2 textures that are mip-mapped
 //!   — user/noise textures — therefore need real implicit derivatives).
 //! * `fft` / `wave` samplers resolve to user textures of that name; the host supplies them or a
-//!   placeholder.
+//!   placeholder. With [`Options::md3`] (MilkDrop 3) the MD3 prelude is added after `include.fx` ([`md3_wrapped_hlsl`]:
+//!   `_c14`/`mouse*`, `_qi.._qp`/`q33..q64`, `sampler_fft`, `get_fft`, `get_fft_hz`) and `fft` becomes
+//!   [`TexSource::Fft`], whose lookups are lowered to manual `textureLoad` clamp/bilinear fetches.
 //!
 //! See `docs/hlsl.md` in the repository (<https://github.com/M0Rf30/lactea>) for the full list.
 #![warn(missing_docs)]
@@ -34,7 +36,7 @@ mod wrap;
 use lactea_abi::{PassKind, ShaderInterface, TexDim, TexSource};
 use std::fmt;
 
-pub use wrap::{default_comp_shader, default_warp_shader, md2_wrapped_hlsl};
+pub use wrap::{default_comp_shader, default_warp_shader, md2_wrapped_hlsl, md3_wrapped_hlsl};
 
 /// Why a shader could not be translated. The messages are for humans; [`TranslateError::category`] is stable
 /// enough to bucket failures.
@@ -106,6 +108,12 @@ pub struct Options {
     /// left-associative `?:`; `asin` / `acos` replaced by DX9-like polynomials outside `[-1, 1]` (instead of NaN);
     /// float literals printed with 6 significant digits (`ostream << float`). Default `false` (HLSL semantics).
     pub projectm_flavor: bool,
+    /// MilkDrop 3 prelude active: [`translate`] wraps with [`md3_wrapped_hlsl`] (adds `_c14`, `mouse*`, `_qi.._qp`,
+    /// `q33..q64`, `sampler_fft`, `get_fft`, `get_fft_hz` between `include.fx` and the per-pass defines), the root
+    /// sampler name `fft` resolves to [`TexSource::Fft`] and the shader writes `mx.mouse` / `mx.q_hi` for the new
+    /// names. [`translate_wrapped`] needs the same flag for text from [`md3_wrapped_hlsl`]. Default `false`: the
+    /// output is then identical to a translator without MD3 support.
+    pub md3: bool,
 }
 
 impl Default for Options {
@@ -114,6 +122,7 @@ impl Default for Options {
             derivative_uniformity_off: true,
             floor_mod: false,
             projectm_flavor: false,
+            md3: false,
         }
     }
 }
@@ -135,16 +144,22 @@ pub struct Translated {
 /// Translate one MD2 warp/composite shader (`src` = the preset's `warp_N=` / `comp_N=` lines
 /// joined with `\n`, one leading backtick per line already removed).
 pub fn translate(kind: PassKind, src: &str, opts: &Options) -> Result<Translated, TranslateError> {
-    let decls = wrap::implicit_declarations(src);
-    let full = if decls.is_empty() {
-        md2_wrapped_hlsl(kind, src)?
+    let wrap = if opts.md3 {
+        md3_wrapped_hlsl
     } else {
-        md2_wrapped_hlsl(kind, &format!("{decls}{src}"))?
+        md2_wrapped_hlsl
+    };
+    let decls = wrap::implicit_declarations(src, opts.md3);
+    let full = if decls.is_empty() {
+        wrap(kind, src)?
+    } else {
+        wrap(kind, &format!("{decls}{src}"))?
     };
     translate_wrapped(kind, &full, opts)
 }
 
-/// Translate already MD2-wrapped HLSL (the text from [`md2_wrapped_hlsl`]). Unlike [`translate`] this does not add
+/// Translate already wrapped HLSL (the text from [`md2_wrapped_hlsl`], or [`md3_wrapped_hlsl`] together with
+/// `Options { md3: true, .. }`). Unlike [`translate`] this does not add
 /// declarations for undeclared `sampler_*` / `texsize_*` names.
 pub fn translate_wrapped(
     kind: PassKind,
@@ -156,7 +171,7 @@ pub fn translate_wrapped(
     p.pm_flavor = opts.projectm_flavor;
     p.parse_program()?;
     let prog = p.prog;
-    let mut tr = emit::Tr::new(&prog);
+    let mut tr = emit::Tr::new(&prog, opts.md3);
     tr.floor_mod = opts.floor_mod;
     tr.pm_flavor = opts.projectm_flavor;
     if !tr.fns.contains_key("PS") {
@@ -178,7 +193,7 @@ pub fn translate_wrapped(
     let mut iface = ShaderInterface::default();
     let mut bindings = String::new();
     for (i, (name, _, dim, used3d)) in samplers.iter().enumerate() {
-        let tb = iface::resolve_sampler(name, *dim, *used3d);
+        let tb = iface::resolve_sampler(name, *dim, *used3d, opts.md3);
         let ty = if tb.dim == TexDim::D3 {
             "texture_3d<f32>"
         } else {
@@ -196,7 +211,7 @@ pub fn translate_wrapped(
     }
     let mut slots = vec![TexSource::Main; e.texsizes.len()];
     for (name, slot) in &e.texsizes {
-        slots[*slot] = iface::texsize_source(name, &iface.textures);
+        slots[*slot] = iface::texsize_source(name, &iface.textures, opts.md3);
     }
     iface.texsize_slots = slots;
 
@@ -206,6 +221,9 @@ pub fn translate_wrapped(
     }
     wgsl.push_str(lactea_abi::WGSL_COMMON);
     wgsl.push_str(&bindings);
+    if iface.textures.iter().any(|t| t.source == TexSource::Fft) {
+        wgsl.push_str(&emit::fft::helper_wgsl());
+    }
     wgsl.push_str(&e.body);
     let mut texsize_params = vec![String::new(); e.texsizes.len()];
     for (name, slot) in &e.texsizes {

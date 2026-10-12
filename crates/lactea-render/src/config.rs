@@ -41,6 +41,19 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | custom wave / shape slots that run | 4 each (`CustomWaveformCount`, `CustomShapeCount`; slots 4..15 are ignored) | 16 each |
 /// | warp shader `sampler_main` (first `main` sampler in name order) | filter linear, address from `bTexWrap` (`WarpedBlit` rebinds unit 0) | whatever the shader's sampler prefix says |
 /// | preset change (`Transition::Soft`) | image-space cross-fade of two independently rendered presets by one of six built-in transition shaders (`md2_preset_blend = false`) | MD2's own blend inside one frame pipeline: both states' equations run, per-vertex UVs blended by a random pattern, old/new shaders drawn as alpha-tiled passes (`md2_preset_blend = true`) |
+/// | preset code lines (`md2_code_join`) | joined with `\n` | joined with nothing and `//` / `\\` comments stripped (`CState::StripLinefeedCharsAndComments`) |
+/// | gamma / echo / filter flags / main-wave mode and flags (`frame_vars_drive_post`) | the preset's initial values | the per-frame variable values |
+/// | shader random streams (`shared_shader_rand`) | separate warp / comp streams, constructor draws after `rand_preset` | one shared stream per preset |
+/// | warp animation terms (`warp_anim_projectm`) | projectM's `y` sign and GPU `pow` | MD2's |
+/// | `shapecode_N_image` key (`custom_shape_image`) | read | not a key (stays in `extra`) |
+/// | no-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
+/// | expression language (`md3_ns_eel2`) | projectm-eval | projectm-eval / projectm-eval / ns-eel2 (MilkDrop 3 only) |
+/// | preset code that fails to compile (`md3_drop_failed_code`) | the preset is rejected | the preset is rejected (MilkDrop 2 itself drops the part; not ported) / MilkDrop 3 drops the part and loads |
+/// | `.milk2` double presets (`md3_double_preset`) | not loaded (error) | not loaded (error) |
+/// | soft-cut blend patterns (`md3_blend_patterns`) | (projectM transition shaders) | BeatDrop's 19 (MD3: its 30) |
+///
+/// `MilkDrop3` is `MilkDrop2` plus the MilkDrop 3 deltas (see `docs/md3.md`); every MD3 delta is a field of
+/// [`CompatRules`], and [`Compat::md2_family`] is true for both variants.
 ///
 /// Not switchable (identical in both): blur chain, blur source (previous frame image), blur
 /// min/max "push apart" typo.
@@ -51,6 +64,9 @@ pub enum Compat {
     ProjectM,
     /// MilkDrop 2's behaviour (Direct3D 9 semantics).
     MilkDrop2,
+    /// MilkDrop 3 (3.37) behaviour: MilkDrop 2 / BeatDrop rules plus the MilkDrop 3 deltas. MD3 is closed source;
+    /// its behaviour is implemented from clean-room specs, see `docs/md3.md`.
+    MilkDrop3,
 }
 
 /// The individual behaviours selected by a [`Compat`] value (see the table there for the
@@ -162,6 +178,84 @@ pub struct CompatRules {
     /// `m_OldShaders`). projectM instead renders both presets to their own images and blends the finished images with
     /// one of six transition shaders ([`TransitionKind`](crate::TransitionKind)).
     pub md2_preset_blend: bool,
+    /// Preset code lines are joined like `CState::StripLinefeedCharsAndComments`: the `\x01` line separators are
+    /// deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so a statement
+    /// split across two lines glues its halves together (`k1 = is_` + `beat*...` is `k1 = is_beat*...`). Otherwise the
+    /// lines are joined with `\n` (projectM). Applies to every EEL code part, never to shader text.
+    pub md2_code_join: bool,
+    /// `gamma`, `echo_*`, `brighten` / `darken` / `solarize` / `invert` and the main wave's `wave_mode` /
+    /// `wave_thick` / `wave_usedots` / `wave_additive` take the per-frame variable values instead of the preset's
+    /// initial values (projectM reads the file values).
+    pub frame_vars_drive_post: bool,
+    /// The warp and composite shaders share one random stream per preset (drawn once per frame); projectM keeps one
+    /// stream per pass and consumes the constructor draws after `rand_preset`.
+    pub shared_shader_rand: bool,
+    /// The warp animation terms use projectM's `y` sign and GPU-style `pow` (`WarpAnim::projectm`) instead of MD2's.
+    pub warp_anim_projectm: bool,
+    /// `shapecode_N_image` (projectM addition) names a user texture a textured shape samples.
+    pub custom_shape_image: bool,
+    /// The no-shader composite pass samples the feedback image with the `Wrap` address mode; otherwise `Clamp`.
+    pub noshader_comp_wrap: bool,
+    /// The main waveform follows MilkDrop 3 (`wavegen_md3::main_wave_geometry_md3_raw`): 17 modes `0..=16` selected by
+    /// the C remainder `(int)wave_mode % 17` (a negative result draws 480 zero vertices), one channel per formula.
+    pub md3_wave_modes: bool,
+    /// Largest `sides` a custom shape is drawn with (smallest is 3): projectM and MilkDrop 2 100, MilkDrop 3 500.
+    pub max_shape_sides: i32,
+    /// MilkDrop 3 adds the four warp `sin` / `cos` terms to the warp UV only when `|warp| > 0.0001`.
+    pub md3_warp_skip_tiny: bool,
+    /// MilkDrop 3 hides the outer / inner borders while a preset blend is running if the host's `DisableBox`
+    /// setting is on (`EngineConfig::md3_disable_box`).
+    pub md3_border_gate: bool,
+    /// MD3 `AutoHardCutMode` 1..7 (`lactea::auto_cut`) is active: the engine watches the previous frame's `bass` /
+    /// `treb` and asks for instant preset changes or injects composite-shader effects. Off under projectM and MD2.
+    pub md3_auto_hard_cut: bool,
+    /// MD3 display time of a preset: `BlendTimeAuto + TimeBetweenPresets + (rand() % 1000) * TimeBetweenPresetsRand *
+    /// 0.001` (hosts feed it to `PresetControl::set_md3_time_rand`) instead of projectM's gaussian easter egg.
+    pub md3_preset_time_rand: bool,
+    /// MilkDrop 3 audio analysis (`AnalysisMode::Md3`): left channel only, 576-sample Hann FFT, 8-bit quantised input
+    /// scaled by `VolumeSensitivity`, silence -> 1.0 (`docs/md3.md`, shader inputs).
+    pub md3_audio_analysis: bool,
+    /// The MilkDrop 3 shader FFT texture (`sampler_fft`): a max-normalised, gated, smeared attack / decay recursion of
+    /// the left spectrum, run once per rendered frame and kept across presets; `FFTAttack` / `FFTDecay` are sticky
+    /// globals set by every preset load.
+    pub md3_shader_fft: bool,
+    /// MilkDrop 3's extended expression and shader variables: `q1..q64`, `t1..t16`, `monitor2` / `monitor3` and the
+    /// `_c14` / `_qi.._qp` shader constants (the mouse is a shader input only: `mouse.x` does not compile in preset code).
+    pub md3_extended_vars: bool,
+    /// The MilkDrop 3 shader prelude is part of every translated shader (`get_fft`, `get_fft_hz`, `mouse*`,
+    /// `q33..q64`, `sampler_fft`).
+    pub md3_shader_prelude: bool,
+    /// The shader constant `time` (`_c2.x`) is the time since *this state's* preset started, modulo 10000; otherwise
+    /// the absolute frame time.
+    pub md3_shader_time: bool,
+    /// The generated composite shader of presets without `comp_N` text uses the original MilkDrop 2 formulas:
+    /// brighten `sqrt(ret)`, solarize `ret * (1 - ret) * 4` (BeatDrop: `1 - (1 - ret)^2`, `* 2`).
+    pub md3_md2_comp_effects: bool,
+    /// Preset expressions run on ns-eel2 (`lactea_eel::Dialect::NsEel2`, MilkDrop 3's engine: unguarded `/`,
+    /// assignment filtering, integer `%`, `$PI` constants, 8M-entry `megabuf`, wrapping `gmegabuf`
+    /// and registers that outlive presets, ...) instead of projectm-eval. `docs/md3.md`, "Expression engine".
+    pub md3_ns_eel2: bool,
+    /// A code part that fails to compile is dropped (with a warning) and the preset still loads: a failed init part
+    /// zeroes the post-init `q` values, a failed per-frame / per-vertex / wave / shape part simply does not run.
+    /// Otherwise the first failing part rejects the preset (`EngineError::Compile`).
+    pub md3_drop_failed_code: bool,
+    /// MilkDrop 3 `.milk2` double presets: two presets in one file, played as a frozen MD2 soft cut with its own
+    /// progress modes (`docs/md3.md`). Loading a `.milk2` without this rule is an error.
+    pub md3_double_preset: bool,
+    /// Ordinary soft cuts draw their blend pattern from MilkDrop 3's 30 patterns (the enabled list) instead of
+    /// BeatDrop's 19. Needs `md2_preset_blend`.
+    pub md3_blend_patterns: bool,
+    /// MilkDrop 3: a preset's sprite block (`SpriteName` .. `SpriteRepeatY`, docs/md3.md) loads an image and draws
+    /// it every frame at the layer the preset names, with the 11 sprite blend modes. projectM and MilkDrop 2 never
+    /// draw preset sprites.
+    pub md3_preset_sprites: bool,
+    /// MilkDrop 3: shader textures (`sampler_<name>`) are also searched in the `sprites` and `gifs` folders, accept
+    /// `.gif` / `.jfif` files, and an animated GIF shows the frame picked by `fmod(time, total)` of its delays.
+    pub md3_gif_textures: bool,
+    /// MilkDrop 3: a burning sprite in layers 1..4 is drawn **twice** into the feedback image (it burns into the
+    /// image it is already drawn on), so additive and alpha modes are twice as strong with `SpriteBurn=1` as with 0.
+    /// Measured against MD3 under Wine (docs/md3.md, sprites).
+    pub md3_sprite_burn_twice: bool,
 }
 
 impl Compat {
@@ -207,6 +301,31 @@ impl Compat {
                 custom_slots: 4,
                 warp_main_sampler_from_wrap: true,
                 md2_preset_blend: false,
+                md2_code_join: false,
+                frame_vars_drive_post: false,
+                shared_shader_rand: false,
+                warp_anim_projectm: true,
+                custom_shape_image: true,
+                noshader_comp_wrap: false,
+                md3_wave_modes: false,
+                max_shape_sides: 100,
+                md3_warp_skip_tiny: false,
+                md3_border_gate: false,
+                md3_auto_hard_cut: false,
+                md3_preset_time_rand: false,
+                md3_audio_analysis: false,
+                md3_shader_fft: false,
+                md3_extended_vars: false,
+                md3_shader_prelude: false,
+                md3_shader_time: false,
+                md3_md2_comp_effects: false,
+                md3_ns_eel2: false,
+                md3_drop_failed_code: false,
+                md3_double_preset: false,
+                md3_blend_patterns: false,
+                md3_preset_sprites: false,
+                md3_gif_textures: false,
+                md3_sprite_burn_twice: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -247,8 +366,62 @@ impl Compat {
                 custom_slots: 16,
                 warp_main_sampler_from_wrap: false,
                 md2_preset_blend: true,
+                md2_code_join: true,
+                frame_vars_drive_post: true,
+                shared_shader_rand: true,
+                warp_anim_projectm: false,
+                custom_shape_image: false,
+                noshader_comp_wrap: true,
+                md3_wave_modes: false,
+                max_shape_sides: 100,
+                md3_warp_skip_tiny: false,
+                md3_border_gate: false,
+                md3_auto_hard_cut: false,
+                md3_preset_time_rand: false,
+                md3_audio_analysis: false,
+                md3_shader_fft: false,
+                md3_extended_vars: false,
+                md3_shader_prelude: false,
+                md3_shader_time: false,
+                md3_md2_comp_effects: false,
+                md3_ns_eel2: false,
+                md3_drop_failed_code: false,
+                md3_double_preset: false,
+                md3_blend_patterns: false,
+                md3_preset_sprites: false,
+                md3_gif_textures: false,
+                md3_sprite_burn_twice: false,
+            },
+            // The MilkDrop 3 deltas go here, one `CompatRules` field each.
+            Compat::MilkDrop3 => CompatRules {
+                md3_wave_modes: true,
+                max_shape_sides: 500,
+                md3_warp_skip_tiny: true,
+                md3_border_gate: true,
+                md3_auto_hard_cut: true,
+                md3_preset_time_rand: true,
+                md3_audio_analysis: true,
+                md3_shader_fft: true,
+                md3_extended_vars: true,
+                md3_shader_prelude: true,
+                md3_shader_time: true,
+                md3_md2_comp_effects: true,
+                md3_ns_eel2: true,
+                md3_drop_failed_code: true,
+                md3_double_preset: true,
+                md3_blend_patterns: true,
+                md3_preset_sprites: true,
+                md3_gif_textures: true,
+                md3_sprite_burn_twice: true,
+                ..Compat::MilkDrop2.rules()
             },
         }
+    }
+
+    /// MilkDrop 2 or MilkDrop 3: the modes that run the whole MilkDrop 2 code path (preset importer, shader
+    /// translation, soft-cut machinery). Individual behaviours are [`CompatRules`] fields, not this.
+    pub fn md2_family(self) -> bool {
+        matches!(self, Compat::MilkDrop2 | Compat::MilkDrop3)
     }
 }
 

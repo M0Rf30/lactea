@@ -36,13 +36,23 @@ pub enum AudioBackend {
     Cpal,
 }
 
-/// Which renderer a difference between projectM and MilkDrop 2 resolves to (engine only).
+/// Which renderer a difference between projectM, MilkDrop 2 and MilkDrop 3 resolves to (engine only).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CompatArg {
     /// projectM behaviour (the measurement oracle; default).
     Projectm,
     /// MilkDrop 2 behaviour.
     Milkdrop2,
+    /// MilkDrop 3 behaviour (MilkDrop 2 plus the MD3 deltas, `docs/md3.md`).
+    Milkdrop3,
+}
+
+impl CompatArg {
+    /// Whether this mode follows MilkDrop 3 (`CompatRules::md3_auto_hard_cut` /
+    /// `md3_preset_time_rand`); usable without the `engine` feature.
+    pub fn md3(self) -> bool {
+        self == CompatArg::Milkdrop3
+    }
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32), String> {
@@ -57,10 +67,11 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
-/// lactea: MilkDrop 2 / projectM-compatible music visualizer.
+/// lactea: MilkDrop 2/3 and projectM-compatible music visualizer.
 ///
 /// Keys: N/Right/Space next preset, P/Left previous, R random, L lock/unlock auto-advance,
 /// F/F11 (or double-click) fullscreen, Esc/Q quit.
+/// F8 cycles the MD3 auto hard cut mode (`--compat milkdrop3` only).
 #[derive(Parser, Debug, Clone)]
 #[command(name = "lactea", version)]
 pub struct Args {
@@ -68,9 +79,10 @@ pub struct Args {
     #[arg(short, long, value_name = "FILE")]
     pub preset: Option<PathBuf>,
 
-    /// Preset directory, scanned recursively for *.milk (repeatable). Default (when no --preset
-    /// was given): the first existing of /usr/share/projectM/presets,
-    /// /usr/local/share/projectM/presets and /opt/homebrew/share/projectM/presets; none on Windows.
+    /// Preset directory, scanned recursively for *.milk (and, with --compat milkdrop3, *.milk2 double
+    /// presets; repeatable). Default (when no --preset was given): the first existing of
+    /// /usr/share/projectM/presets, /usr/local/share/projectM/presets and
+    /// /opt/homebrew/share/projectM/presets; none on Windows.
     #[arg(short, long, value_name = "DIR")]
     pub dir: Vec<PathBuf>,
 
@@ -198,6 +210,22 @@ pub struct Args {
     /// Testing: scripted key presses, e.g. "30:n,60:p,90:l,120:esc" (frame:key).
     #[arg(long, value_name = "FRAME:KEY,...", hide = true)]
     pub inject_keys: Option<String>,
+
+    /// Engine, `--compat milkdrop3` only: initial MilkDrop 3 AutoHardCutMode, 0 = off. 1..=6 change the
+    /// preset instantly (a hard cut, whatever --transition-duration) on beat/loudness triggers; 7 injects a
+    /// random effect into the composite shader without changing the preset. F8 cycles it at runtime.
+    #[arg(
+        long,
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u8).range(0..=7),
+        value_name = "N"
+    )]
+    pub auto_hard_cut: u8,
+
+    /// `--compat milkdrop3` only: MD3 TimeBetweenPresetsRand. A preset stays for --transition-duration +
+    /// --duration + a random 0..SECONDS (negative = 0) instead of --duration alone.
+    #[arg(long, default_value_t = 10.0, value_name = "SECONDS")]
+    pub duration_rand: f64,
 }
 
 #[cfg(test)]
@@ -258,5 +286,18 @@ mod tests {
         assert_eq!(a.dir.len(), 2);
         assert!(parse(&["--size", "0x5"]).is_err());
         assert!(parse(&["--size", "640"]).is_err());
+    }
+
+    #[test]
+    fn auto_hard_cut_and_duration_rand() {
+        let a = parse(&[]).unwrap();
+        assert_eq!(a.auto_hard_cut, 0);
+        assert_eq!(a.duration_rand, 10.0);
+        let a = parse(&["--auto-hard-cut", "7", "--duration-rand", "2.5"]).unwrap();
+        assert_eq!((a.auto_hard_cut, a.duration_rand), (7, 2.5));
+        assert_eq!(parse(&["--auto-hard-cut", "0"]).unwrap().auto_hard_cut, 0);
+        assert!(parse(&["--auto-hard-cut", "8"]).is_err());
+        assert!(parse(&["--auto-hard-cut", "-1"]).is_err());
+        assert!(parse(&["--auto-hard-cut", "x"]).is_err());
     }
 }

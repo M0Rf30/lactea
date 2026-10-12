@@ -4,7 +4,8 @@
 
 use crate::context::{CompileError, Context, Program};
 use crate::lexer::{Tok, Token, lex};
-use crate::tree::{BITAND_DEF, BITOR_DEF, FuncDef, FuncKind, Loc, Node, lookup_func};
+use crate::ns::Dialect;
+use crate::tree::{BITAND_DEF, BITOR_DEF, FuncDef, FuncKind, Loc, Node, lookup_func, to_ns};
 
 /// Default maximum tree depth accepted (the interpreter is recursive).
 pub(crate) const DEFAULT_MAX_DEPTH: u32 = 1000;
@@ -31,6 +32,8 @@ struct Parser<'a> {
     pos: usize,
     next_slot: u32,
     rdepth: u32,
+    /// Compile for `Dialect::NsEel2`.
+    ns: bool,
 }
 
 type PResult<T> = Result<T, CompileError>;
@@ -63,7 +66,7 @@ fn tok_desc(t: &Tok) -> String {
 
 /// (precedence, right-assoc, function name) of an infix token.  Levels follow the `%left` /
 /// `%right` declaration order in Compiler.y, lowest first.
-fn infix(t: &Tok) -> Option<(u8, bool, &'static str)> {
+fn infix(t: &Tok, ns: bool) -> Option<(u8, bool, &'static str)> {
     Some(match t {
         Tok::Ch(b'=') => (2, true, "_set"),
         Tok::AddOp => (3, true, "_addop"),
@@ -89,8 +92,9 @@ fn infix(t: &Tok) -> Option<(u8, bool, &'static str)> {
         Tok::Ch(b'-') => (14, false, "_sub"),
         Tok::Ch(b'*') => (15, false, "_mul"),
         Tok::Ch(b'/') => (15, false, "_div"),
+        // ns-eel2 (measured on MD3 3.37): `%` and `^` share one left-associative level above `*`.
         Tok::Ch(b'%') => (16, false, "_mod"),
-        Tok::Ch(b'^') => (18, false, "pow"),
+        Tok::Ch(b'^') => (if ns { 16 } else { 18 }, false, "pow"),
         _ => return None,
     })
 }
@@ -134,6 +138,13 @@ impl<'a> Parser<'a> {
             self.pos,
             format!("syntax error, unexpected {}", tok_desc(self.peek())),
         )
+    }
+
+    /// Minimum binding level of a unary `-` / `+` operand.  projectm-eval binds the sign tighter
+    /// than everything (`-2^2` is `(-2)^2`); in ns-eel2 it applies to a whole `%` / `^` chain
+    /// (`-2^2` is -4, `-7%3` is -1; measured on MD3 3.37).
+    fn unary_level(&self) -> u8 {
+        if self.ns { 16 } else { 20 }
     }
 
     fn expect(&mut self, c: u8) -> PResult<()> {
@@ -186,6 +197,7 @@ impl<'a> Parser<'a> {
             "/*and*/" => BITAND_DEF,
             _ => lookup_func(name).expect("operator/function names passed here are in the table"),
         };
+        let def = if self.ns { to_ns(def) } else { def };
         self.func(def, name, args, at)
     }
 
@@ -211,6 +223,7 @@ impl<'a> Parser<'a> {
         let hazard_args = args.iter().any(|a| a.hazard);
         let b_hazard = args.get(1).map(|a| a.hazard).unwrap_or(false);
         let a_place = args.first().map(|a| a.node.is_place()).unwrap_or(false);
+        let ns = self.ns;
 
         let mut it = args.into_iter().map(|a| a.node);
         let mut next = || {
@@ -223,15 +236,17 @@ impl<'a> Parser<'a> {
                 Node::If {
                     s,
                     args: Box::new([next(), next(), next()]),
+                    ns,
                 }
             }
-            FuncKind::And => Node::And(Box::new([next(), next()])),
-            FuncKind::Or => Node::Or(Box::new([next(), next()])),
+            FuncKind::And => Node::And(Box::new([next(), next()]), ns),
+            FuncKind::Or => Node::Or(Box::new([next(), next()]), ns),
             FuncKind::Loop => {
                 let s = self.alloc();
                 Node::Loop {
                     s,
                     args: Box::new([next(), next()]),
+                    ns,
                 }
             }
             FuncKind::While => {
@@ -239,6 +254,7 @@ impl<'a> Parser<'a> {
                 Node::While {
                     s,
                     arg: Box::new(next()),
+                    ns,
                 }
             }
             FuncKind::Un(op) => Node::Un(op, Box::new(next())),
@@ -260,6 +276,7 @@ impl<'a> Parser<'a> {
                 Node::Set {
                     s,
                     args: Box::new([next(), next()]),
+                    filter: ns,
                 }
             }
             FuncKind::Exec2 => {
@@ -280,6 +297,7 @@ impl<'a> Parser<'a> {
                 let s = self.alloc();
                 Node::Mem {
                     global,
+                    ns,
                     s,
                     arg: Box::new(next()),
                 }
@@ -292,6 +310,7 @@ impl<'a> Parser<'a> {
                 Node::Memcpy {
                     s,
                     args: Box::new([next(), next(), next()]),
+                    ns,
                 }
             }
             FuncKind::Memset => {
@@ -299,6 +318,7 @@ impl<'a> Parser<'a> {
                 Node::Memset {
                     s,
                     args: Box::new([next(), next(), next()]),
+                    ns,
                 }
             }
         };
@@ -426,7 +446,7 @@ impl<'a> Parser<'a> {
                 lhs = self.named("_mem", vec![idx], at)?;
                 continue;
             }
-            let Some((prec, right, name)) = infix(&t) else {
+            let Some((prec, right, name)) = infix(&t, self.ns) else {
                 break;
             };
             if prec < min {
@@ -435,8 +455,13 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             if name == "?" {
                 let tv = self.parse_expr(0)?;
-                self.expect(b':')?;
-                let fv = self.parse_expr(6)?;
+                // ns-eel2 lets the false branch default to 0: `c ? x` is `c ? x : 0`.
+                let fv = if self.ns && *self.peek() != Tok::Ch(b':') {
+                    self.constant(0.0)
+                } else {
+                    self.expect(b':')?;
+                    self.parse_expr(6)?
+                };
                 lhs = self.named("_if", vec![lhs, tv, fv], at)?;
             } else {
                 let rhs = self.parse_expr(if right { prec } else { prec + 1 })?;
@@ -468,6 +493,7 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(b')')?;
                 let def = lookup_func(&name).expect("lexer only emits Tok::Func for known names");
+                let def = if self.ns { to_ns(def) } else { def };
                 self.func(def, &name, args, at)
             }
             Tok::Gmem => {
@@ -489,12 +515,12 @@ impl<'a> Parser<'a> {
             }
             Tok::Ch(b'-') => {
                 self.pos += 1;
-                let v = self.parse_expr(20)?;
+                let v = self.parse_expr(self.unary_level())?;
                 self.named("_neg", vec![v], at)
             }
             Tok::Ch(b'+') => {
                 self.pos += 1;
-                self.parse_expr(20)
+                self.parse_expr(self.unary_level())
             }
             Tok::Ch(b'!') => {
                 self.pos += 1;
@@ -507,7 +533,8 @@ impl<'a> Parser<'a> {
 }
 
 pub(crate) fn compile(ctx: &mut Context, src: &str) -> Result<Program, CompileError> {
-    let toks = lex(src);
+    let ns = ctx.dialect() == Dialect::NsEel2;
+    let toks = lex(src, ns);
     // Undefined characters are scanner errors regardless of where the parser stands.
     let mut p = Parser {
         ctx,
@@ -515,6 +542,7 @@ pub(crate) fn compile(ctx: &mut Context, src: &str) -> Result<Program, CompileEr
         pos: 0,
         next_slot: 4,
         rdepth: 0,
+        ns,
     };
     if *p.peek() == Tok::Eof {
         return Ok(Program::new(None, 4, p.ctx.id()));

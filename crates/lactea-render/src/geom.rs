@@ -793,14 +793,29 @@ pub struct ShapeGeom {
     pub sides: usize,
 }
 
+/// [`shape_geometry_tex_max`] with the projectM / MD2 limit of 100 sides, same aspect for the texture coordinates
+/// (the renderer passes `CompatRules::max_shape_sides` itself).
+#[cfg(test)]
 pub fn shape_geometry(s: &ShapeInstance, aspect_y: f32) -> ShapeGeom {
     shape_geometry_tex(s, aspect_y, aspect_y)
 }
 
 /// [`shape_geometry`] with a separate aspect for the texture coordinates: projectM samples a shape's
 /// `image=` texture with `textureAspectY = 1` while the outline keeps `renderContext.aspectY`.
+#[cfg(test)]
 pub fn shape_geometry_tex(s: &ShapeInstance, aspect_y: f32, tex_aspect_y: f32) -> ShapeGeom {
-    let sides = s.sides.clamp(3, 100) as usize;
+    shape_geometry_tex_max(s, aspect_y, tex_aspect_y, 100)
+}
+
+/// [`shape_geometry_tex`] with the compat mode's side limit (`CompatRules::max_shape_sides`: 100, 500 under
+/// MilkDrop 3, whose vertex buffers hold the `sides + 2` fan vertices).
+pub fn shape_geometry_tex_max(
+    s: &ShapeInstance,
+    aspect_y: f32,
+    tex_aspect_y: f32,
+    max_sides: i32,
+) -> ShapeGeom {
+    let sides = s.sides.clamp(3, max_sides.max(3)) as usize;
     let pi = 3.1415927f32;
     // clip (fixed-function y is the negation): `static_cast<float>(x * 2.0 - 1.0)` with the VM's double `x`
     let c0 = [(s.x * 2.0 - 1.0) as f32, (s.y * 2.0 - 1.0) as f32];
@@ -1154,7 +1169,7 @@ mod tests {
             l: 0.9,
             rgba: [1.0; 4],
         };
-        for compat in [Compat::MilkDrop2, Compat::ProjectM] {
+        for compat in [Compat::MilkDrop2, Compat::MilkDrop3, Compat::ProjectM] {
             let rules = compat.rules();
             let l = motion_vector_lines(&mv, &g, &uv, 640, 360, &rules);
             assert_eq!(l.len() % 2, 0);
@@ -1188,7 +1203,7 @@ mod tests {
             l: 1.0,
             rgba: [1.0; 4],
         };
-        for compat in [Compat::MilkDrop2, Compat::ProjectM] {
+        for compat in [Compat::MilkDrop2, Compat::MilkDrop3, Compat::ProjectM] {
             let l = motion_vector_lines(&mv, &g, &uv, 640, 360, &compat.rules());
             for p in l.chunks(2) {
                 let d0 = (p[0][0].powi(2) + p[0][1].powi(2)).sqrt();
@@ -1220,6 +1235,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(shape_geometry(&s2, 1.0).sides, 100);
+    }
+
+    /// MilkDrop 3 (`max_shape_sides` 500): `sides` is `clamp(int(sides), 3, 500)`, the fan has `sides + 2` vertices.
+    #[test]
+    fn shape_sides_limit_follows_the_rule() {
+        let sides = |n: i32, max: i32| {
+            let s = ShapeInstance {
+                sides: n,
+                ..Default::default()
+            };
+            shape_geometry_tex_max(&s, 1.0, 1.0, max)
+        };
+        let md3 = 500;
+        for (n, want) in [
+            (2, 3),
+            (3, 3),
+            (100, 100),
+            (250, 250),
+            (500, 500),
+            (600, 500),
+            (-3, 3),
+        ] {
+            assert_eq!(sides(n, md3).sides, want, "sides {n}");
+        }
+        // 500 sides: centre + 500 ring vertices + the closing vertex
+        let g = sides(500, md3);
+        assert_eq!((g.pts.len(), g.uv.len()), (502, 502));
+        assert_eq!(g.pts[501], g.pts[1]);
+        // the same shape under the MD2 limit stops at 100
+        assert_eq!(sides(500, 100).pts.len(), 102);
     }
 
     /// `shapecode_N_image` (projectM `CustomShape.cpp:155-167`): the texture coordinates use `textureAspectY = 1`

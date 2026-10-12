@@ -11,15 +11,18 @@ use crate::geom::{self, WarpVertex, WfVertex};
 use crate::motion::MotionVectorState;
 use crate::noise;
 use crate::rng::Rng;
+use crate::shader_ext::ShaderExt;
 use crate::shaders;
+use crate::sprite::{SpriteDraw, SpriteImage, SpritePipes};
 use crate::stroke::{self, LineRule};
 use crate::uniforms::{self, MilkUniformInputs, RotParams};
 use crate::warp_mesh::{self, MeshGeometry, VertexVars, WarpAnim};
 use crate::wavegen;
+use crate::wavegen_md3;
 use lactea_abi::dump::Stage;
 use lactea_abi::{
-    Address, FRAGMENT_ENTRY, Filter, MeshVertex, MilkUniforms, NoiseTex, PassUniforms,
-    ShaderInterface, TexDim, TexSource,
+    Address, BINDING_MILK_EXT, FFT_BINS, FRAGMENT_ENTRY, Filter, MeshVertex, MilkUniforms,
+    NoiseTex, PassUniforms, ShaderInterface, TexDim, TexSource,
 };
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -89,6 +92,52 @@ fn create_sink(device: &wgpu::Device, w: u32, h: u32) -> Tex {
         view,
         w,
         h,
+    }
+}
+
+/// The MilkDrop 3 shader FFT texture ([`TexSource::Fft`]): [`FFT_BINS`] x 1 `R32Float`, zero until the first upload.
+/// `R32Float` is not filterable without `FLOAT32_FILTERABLE`; the translated shaders `textureLoad` it and blend the
+/// two neighbouring bins by hand.
+fn create_fft_tex(device: &wgpu::Device, queue: &wgpu::Queue) -> Tex {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fft"),
+        size: wgpu::Extent3d {
+            width: FFT_BINS as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&[0.0f32; FFT_BINS]),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(FFT_BINS as u32 * 4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: FFT_BINS as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Tex {
+        texture,
+        view,
+        w: FFT_BINS as u32,
+        h: 1,
     }
 }
 
@@ -221,6 +270,18 @@ fn upload_3d(device: &wgpu::Device, queue: &wgpu::Queue, n: u32, rgba: &[u8], la
     }
 }
 
+/// `frames` must be a non-empty list of `w * h * 4` byte images of a non-empty size.
+fn check_frames(what: &str, w: u32, h: u32, frames: &[&[u8]]) -> Result<(), RenderError> {
+    let need = w as usize * h as usize * 4;
+    if w == 0 || h == 0 || frames.is_empty() || frames.iter().any(|f| f.len() != need) {
+        return Err(RenderError::Invalid(format!(
+            "{what}: {} frame(s) of {w}x{h} need {need} bytes each",
+            frames.len()
+        )));
+    }
+    Ok(())
+}
+
 fn buffer_init<T: bytemuck::Pod>(
     device: &wgpu::Device,
     label: &str,
@@ -321,6 +382,10 @@ struct Batch {
     cmds: Vec<(Kind, Blend, Prim, u32, u32)>,
     /// Textures of [`Kind::TexImage`] commands (one entry per command).
     images: Vec<ShapeImage>,
+    /// Command indices after the custom shapes / after the custom waves: where sprite layers 2 and 3 go.
+    marks: [usize; 2],
+    /// Commands before this index never merge with later ones (a sprite layer may be drawn in between).
+    barrier: usize,
 }
 
 impl Batch {
@@ -333,7 +398,8 @@ impl Batch {
         }
         let start = self.wf.len() as u32;
         self.wf.extend_from_slice(verts);
-        if let Some(last) = self.cmds.last_mut()
+        if self.cmds.len() > self.barrier
+            && let Some(last) = self.cmds.last_mut()
             && last.0 == Kind::Flat
             && last.1 == blend
             && last.2 == prim
@@ -351,7 +417,8 @@ impl Batch {
         }
         let start = self.mesh.len() as u32;
         self.mesh.extend_from_slice(verts);
-        if let Some(last) = self.cmds.last_mut()
+        if self.cmds.len() > self.barrier
+            && let Some(last) = self.cmds.last_mut()
             && last.0 == Kind::Tex
             && last.1 == blend
             && last.3 + last.4 == start
@@ -400,7 +467,8 @@ impl Batch {
         if count == 0 {
             return;
         }
-        if let Some(last) = self.cmds.last_mut()
+        if self.cmds.len() > self.barrier
+            && let Some(last) = self.cmds.last_mut()
             && last.0 == Kind::Flat
             && last.1 == blend
             && last.2 == prim
@@ -456,6 +524,12 @@ impl Batch {
             }),
         }
     }
+    /// Remember the current end of the command list as sprite split `which` (0 = after the custom shapes, 1 = after
+    /// the custom waves).
+    fn mark(&mut self, which: usize) {
+        self.marks[which] = self.cmds.len();
+        self.barrier = self.cmds.len();
+    }
     fn is_empty(&self) -> bool {
         self.cmds.is_empty()
     }
@@ -479,6 +553,8 @@ struct Pipelines {
     mesh_vs: wgpu::ShaderModule,
     /// `[linear wrap, linear clamp, point wrap, point clamp]` with mips, then the same four limited to level 0
     samplers: [wgpu::Sampler; 8],
+    /// MD3 sprite pipelines, built on first use.
+    sprite: std::sync::OnceLock<SpritePipes>,
 }
 
 const MESH_ATTRS: [wgpu::VertexAttribute; 4] =
@@ -617,7 +693,12 @@ impl Pipelines {
         });
         let bgl_mu = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mu"),
-            entries: &[ubo_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+            // `mu` (frozen MD2 block) and `mx` (MilkDrop 3 extension block) are always both bound; a shader that does
+            // not declare `mx` is unaffected because the layout is a superset of what it uses
+            entries: &[
+                ubo_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                ubo_entry(BINDING_MILK_EXT, wgpu::ShaderStages::FRAGMENT),
+            ],
         });
         let bgl_warp_vs = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("warp_vs"),
@@ -903,6 +984,7 @@ impl Pipelines {
             blit,
             mesh_vs,
             samplers,
+            sprite: Default::default(),
         }
     }
 
@@ -914,6 +996,11 @@ impl Pipelines {
             (Filter::Point, Address::Clamp) => 3,
         };
         &self.samplers[i + if level0_only { 4 } else { 0 }]
+    }
+
+    fn sprites(&self, device: &wgpu::Device) -> &SpritePipes {
+        self.sprite
+            .get_or_init(|| SpritePipes::new(device, &self.bgl_tex, INTERNAL_FORMAT))
     }
 }
 
@@ -955,7 +1042,26 @@ enum PassVerts<'a> {
 }
 
 struct UserTex {
+    /// The texture (the first frame of an animation).
     tex: Tex,
+    anim: Option<UserAnim>,
+}
+
+/// An animated GIF used as a shader texture (MD3): the frame shown is picked by the time of the frame.
+struct UserAnim {
+    /// Never empty.
+    frames: Vec<Tex>,
+    /// Seconds per frame, same length as `frames`.
+    delays: Vec<f64>,
+}
+
+impl UserTex {
+    fn view_at(&self, time: f64) -> &wgpu::TextureView {
+        match &self.anim {
+            Some(a) => &a.frames[crate::sprite::gif_frame_index(&a.delays, time)].view,
+            None => &self.tex.view,
+        }
+    }
 }
 
 /// The shader-side state of one preset: its warp / composite pass and the user textures their samplers read (MD2's
@@ -1021,8 +1127,15 @@ pub struct Renderer {
     blur: Vec<Tex>,
     noise: Vec<Tex>,
     user_tex: HashMap<String, UserTex>,
+    /// MD3 sprite images by id ([`Renderer::set_sprite_image`]).
+    sprite_images: HashMap<u32, SpriteImage>,
+    /// Time of the frame being recorded: animated textures pick their frame from it.
+    anim_time: f64,
     dummy_2d: Tex,
     dummy_3d: Tex,
+    /// `sampler_fft` ([`TexSource::Fft`]): the smoothed MilkDrop 3 shader FFT. Owned per renderer (a
+    /// [`Renderer::sibling`] has its own) and replaced whenever a frame carries `FrameInput::ext.fft`.
+    fft: Tex,
     /// Scratch attachment for the user warp shader's second output ([`with_uv_output`]); never read.
     warp_sink: Tex,
     warp_shader: Option<ShaderPass>,
@@ -1233,6 +1346,7 @@ impl Renderer {
         let rot = RotParams::randomize(&mut rng.fork(0x7072_6573));
         let dummy_2d = upload_2d(device, queue, 1, 1, &[0, 0, 0, 255], false, "dummy2d");
         let dummy_3d = upload_3d(device, queue, 1, &[0, 0, 0, 255], "dummy3d");
+        let fft = create_fft_tex(device, queue);
 
         let r = Renderer {
             device: device.clone(),
@@ -1249,8 +1363,11 @@ impl Renderer {
             blur,
             noise: noise_tex,
             user_tex: HashMap::new(),
+            sprite_images: HashMap::new(),
+            anim_time: 0.0,
             dummy_2d,
             dummy_3d,
+            fft,
             warp_sink: create_sink(device, w, h),
             warp_shader: None,
             comp_shader: None,
@@ -1288,7 +1405,7 @@ impl Renderer {
     }
 
     /// The rasteriser actually used for lines and points: the configured one, except that
-    /// `Compat::MilkDrop2` always draws D3D9-style thin quads.
+    /// `Compat::MilkDrop2` / `Compat::MilkDrop3` always draw D3D9-style thin quads.
     pub fn stroke_raster(&self) -> StrokeRaster {
         self.stroke_mode()
     }
@@ -1371,6 +1488,7 @@ impl Renderer {
         self.main_wave_tail = Default::default();
         self.frames_since_resize = 0;
         self.user_tex.clear();
+        self.sprite_images.clear();
         self.old_shaders = None;
         self.clear_all();
     }
@@ -1496,7 +1614,14 @@ impl Renderer {
                 TexDim::D2 => wgpu::TextureViewDimension::D2,
                 TexDim::D3 => wgpu::TextureViewDimension::D3,
             };
-            entries.push(tex_entry(lactea_abi::texture_binding(i as u32), dim, true));
+            // R32Float is not filterable: the translated shader only `textureLoad`s the FFT texture (its sampler
+            // entry stays `Filtering` and is never paired with it in a `textureSample`)
+            let filterable = !matches!(t.source, TexSource::Fft);
+            entries.push(tex_entry(
+                lactea_abi::texture_binding(i as u32),
+                dim,
+                filterable,
+            ));
             entries.push(samp_entry(lactea_abi::sampler_binding(i as u32)));
         }
 
@@ -1628,8 +1753,81 @@ impl Renderer {
         }
         let tex = upload_2d(&self.device, &self.queue, w, h, rgba8, true, name);
         self.user_tex
-            .insert(name.to_ascii_lowercase(), UserTex { tex });
+            .insert(name.to_ascii_lowercase(), UserTex { tex, anim: None });
         Ok(())
+    }
+
+    /// Register an animated user texture (an animated GIF as `sampler_<name>`, `Compat::MilkDrop3`): `frames` are
+    /// `w * h * 4` RGBA8 images (row 0 = top), `delays` their durations in seconds. Every draw shows the frame
+    /// [`gif_frame_index`](crate::gif_frame_index) picks for the time of the frame being rendered. No mip chain.
+    pub fn set_user_animation(
+        &mut self,
+        name: &str,
+        w: u32,
+        h: u32,
+        frames: &[&[u8]],
+        delays: &[f64],
+    ) -> Result<(), RenderError> {
+        check_frames(name, w, h, frames)?;
+        if delays.len() != frames.len() {
+            return Err(RenderError::Invalid(format!(
+                "animated texture {name}: {} frames but {} delays",
+                frames.len(),
+                delays.len()
+            )));
+        }
+        let tex: Vec<Tex> = frames
+            .iter()
+            .map(|f| upload_2d(&self.device, &self.queue, w, h, f, false, name))
+            .collect();
+        self.user_tex.insert(
+            name.to_ascii_lowercase(),
+            UserTex {
+                tex: tex[0].clone(),
+                anim: Some(UserAnim {
+                    frames: tex,
+                    delays: delays.to_vec(),
+                }),
+            },
+        );
+        Ok(())
+    }
+
+    /// Register the image of an MD3 sprite under `id` ([`SpriteDraw::image`](crate::SpriteDraw::image)), replacing
+    /// any image with that id. `frames` are `w * h * 4` RGBA8 images (row 0 = top, straight alpha, colour key already
+    /// applied); a static image has one frame and `mips` (full chain, trilinear sampling), a GIF has no mips.
+    pub fn set_sprite_image(
+        &mut self,
+        id: u32,
+        w: u32,
+        h: u32,
+        frames: &[&[u8]],
+        mips: bool,
+    ) -> Result<(), RenderError> {
+        check_frames("sprite", w, h, frames)?;
+        let views = frames
+            .iter()
+            .map(|f| upload_2d(&self.device, &self.queue, w, h, f, mips, "sprite").view)
+            .collect();
+        self.sprite_images.insert(id, SpriteImage { frames: views });
+        Ok(())
+    }
+
+    /// Forget every sprite image.
+    pub fn clear_sprite_images(&mut self) {
+        self.sprite_images.clear();
+    }
+
+    /// Draw sprites (any layer value) onto `target`, an `Rgba8Unorm` view: the sprite pass on its own, for hosts
+    /// that composite themselves and for tests. Draws whose image or frame is not registered are skipped.
+    pub fn draw_sprites(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        draws: &[SpriteDraw],
+    ) {
+        let refs: Vec<&SpriteDraw> = draws.iter().collect();
+        self.sprite_pass(encoder, target, &refs);
     }
 
     /// Read a stage back as `(width, height, RGBA8)` (row 0 = top). The command buffers of the
@@ -1884,7 +2082,7 @@ impl Renderer {
     /// `target` must be a view of a `cfg.width x cfg.height` texture of `cfg.output_format`.
     ///
     /// Fails with [`RenderError::Invalid`] (recording nothing) if `input.warp_uv` does not match the mesh or
-    /// `input.md2_blend` is set without `Compat::MilkDrop2`.
+    /// `input.md2_blend` is set without `Compat::MilkDrop2` / `Compat::MilkDrop3`.
     pub fn render_frame(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1965,7 +2163,7 @@ impl Renderer {
         }
         if input.md2_blend.is_some() && !self.rules.md2_preset_blend {
             return Err(RenderError::Invalid(
-                "FrameInput.md2_blend needs Compat::MilkDrop2".to_owned(),
+                "FrameInput.md2_blend needs Compat::MilkDrop2 or Compat::MilkDrop3".to_owned(),
             ));
         }
         Ok(())
@@ -1978,6 +2176,11 @@ impl Renderer {
         target: Option<&wgpu::TextureView>,
     ) -> Result<(), RenderError> {
         self.check_input(input)?;
+        // before any pass is recorded: every shader of this frame (and of the old state of a blend) reads the new FFT
+        if let Some(fft) = &input.ext.fft {
+            self.record_fft_upload(encoder, fft);
+        }
+        self.anim_time = input.time;
         let rules = self.rules;
         let (w, h) = (self.cfg.width, self.cfg.height);
         let prev_i = self.main_idx;
@@ -2155,6 +2358,7 @@ impl Renderer {
                             encoder,
                             pass,
                             &mu,
+                            &input.ext,
                             main_view,
                             PassVerts::Warp(&verts, &vu),
                             &self.main[next_i].view,
@@ -2175,6 +2379,7 @@ impl Renderer {
                             encoder,
                             pass,
                             &mu,
+                            &input.ext,
                             main_view,
                             PassVerts::Mesh(&verts),
                             &self.main[next_i].view,
@@ -2218,6 +2423,9 @@ impl Renderer {
             self.run_blur(encoder, input, &self.main[prev_i].view, levels);
         }
 
+        // ---- 4b. MD3 sprites, layer 1 ("deepest"): into the feedback image after warp and blur -------
+        self.draw_sprite_layer(encoder, input, 1, &self.main[next_i].view);
+
         // ---- 5. shapes, waves, main wave, darken center, borders on `next` -------------
         {
             let mut b = Batch::default();
@@ -2236,7 +2444,8 @@ impl Renderer {
             if !overlays_lost {
                 self.build_overlay(&mut b, input, aspect, pm_wave);
             }
-            if !b.is_empty() {
+            let sprite_split = input.sprites.iter().any(|s| matches!(s.layer, 2 | 3));
+            if !b.is_empty() || sprite_split {
                 let bg = self.tex_bind_group(
                     &self.main[prev_i].view,
                     self.pipes.sampler(
@@ -2253,17 +2462,12 @@ impl Renderer {
                     &self.main[prev_i].view,
                     self.pipes.sampler(Filter::Linear, Address::Clamp, false),
                 );
-                self.run_batch(
-                    encoder,
-                    &b,
-                    &self.main[next_i].view,
-                    wgpu::LoadOp::Load,
-                    Some(&bg),
-                    Some(&leak),
-                    "shapes+waves+borders",
-                );
+                self.run_overlay(encoder, input, &b, next_i, &bg, &leak);
             }
         }
+
+        // ---- 5b. MD3 sprites, layer 4 ("after waveform") --------------------------------------------
+        self.draw_sprite_layer(encoder, input, 4, &self.main[next_i].view);
 
         // ---- 6. composite --------------------------------------------------------------
         if let Some(bl) = input.md2_blend.as_ref() {
@@ -2299,6 +2503,7 @@ impl Renderer {
                         encoder,
                         pass,
                         &mu,
+                        &input.ext,
                         main_view,
                         PassVerts::Mesh(&verts),
                         &self.final_tex.view,
@@ -2308,7 +2513,7 @@ impl Renderer {
                 }
                 None => {
                     let b = self.build_noshader_comp(input);
-                    let wrap = if self.cfg.compat == Compat::MilkDrop2 {
+                    let wrap = if self.rules.noshader_comp_wrap {
                         Address::Wrap
                     } else {
                         Address::Clamp
@@ -2328,6 +2533,14 @@ impl Renderer {
                 }
             }
         }
+
+        // ---- 6b. MD3 sprites, layer 0: on the composited image; burn also feeds the next frame --------
+        self.draw_top_sprites(
+            encoder,
+            input,
+            &self.final_tex.view,
+            &self.main[next_i].view,
+        );
 
         // ---- 7. blit to the host target ------------------------------------------------
         if let Some(target) = target {
@@ -2361,6 +2574,39 @@ impl Renderer {
         Ok(())
     }
 
+    /// Replace the FFT texture's contents ([`TexSource::Fft`]). Recorded as a buffer copy in `encoder` rather than
+    /// `queue.write_texture`: a queue write lands at the next submit, ahead of everything already recorded, so two
+    /// frames of one renderer recorded into one encoder would both see the last spectrum.
+    fn record_fft_upload(&self, encoder: &mut wgpu::CommandEncoder, fft: &[f32; FFT_BINS]) {
+        let staging = buffer_init(
+            &self.device,
+            "fft",
+            fft.as_slice(),
+            wgpu::BufferUsages::COPY_SRC,
+        );
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(FFT_BINS as u32 * 4),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.fft.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: FFT_BINS as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     fn tex_bind_group(&self, view: &wgpu::TextureView, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
         self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("tex"),
@@ -2389,6 +2635,30 @@ impl Renderer {
         leak_bg: Option<&wgpu::BindGroup>,
         label: &str,
     ) {
+        self.run_batch_range(
+            encoder,
+            batch,
+            0..batch.cmds.len(),
+            view,
+            load,
+            tex_bg,
+            leak_bg,
+            label,
+        );
+    }
+
+    /// [`Renderer::run_batch`] for the commands `cmds` only.
+    fn run_batch_range(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        batch: &Batch,
+        cmds: std::ops::Range<usize>,
+        view: &wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+        tex_bg: Option<&wgpu::BindGroup>,
+        leak_bg: Option<&wgpu::BindGroup>,
+        label: &str,
+    ) {
         let wf_buf = buffer_init(&self.device, "wf", &batch.wf, wgpu::BufferUsages::VERTEX);
         let mesh_buf = buffer_init(
             &self.device,
@@ -2408,7 +2678,7 @@ impl Renderer {
                     None => self
                         .user_tex
                         .get(&im.name)
-                        .map_or(&self.dummy_2d.view, |u| &u.tex.view),
+                        .map_or(&self.dummy_2d.view, |u| u.view_at(self.anim_time)),
                 };
                 let filter = if im.linear {
                     Filter::Linear
@@ -2436,7 +2706,7 @@ impl Renderer {
             })],
             ..Default::default()
         });
-        for &(kind, blend, prim, start, count) in &batch.cmds {
+        for &(kind, blend, prim, start, count) in &batch.cmds[cmds] {
             match kind {
                 Kind::Flat => {
                     pass.set_pipeline(&self.pipes.flat[&(blend, prim, self.rules.main_alpha)]);
@@ -2485,6 +2755,7 @@ impl Renderer {
                 Some(u) => (u.tex.w, u.tex.h),
                 None => (1, 1),
             },
+            TexSource::Fft => (self.fft.w, self.fft.h),
         };
         [w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32]
     }
@@ -2566,6 +2837,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         pass: &ShaderPass,
         mu: &MilkUniforms,
+        ext: &ShaderExt,
         main_view: &wgpu::TextureView,
         verts: PassVerts<'_>,
         target: &wgpu::TextureView,
@@ -2578,6 +2850,7 @@ impl Renderer {
             &self.user_tex,
             PassBlend::Replace,
             mu,
+            ext,
             main_view,
             verts,
             target,
@@ -2596,6 +2869,7 @@ impl Renderer {
         user_tex: &HashMap<String, UserTex>,
         blend: PassBlend,
         mu: &MilkUniforms,
+        ext: &ShaderExt,
         main_view: &wgpu::TextureView,
         verts: PassVerts<'_>,
         target: &wgpu::TextureView,
@@ -2608,13 +2882,25 @@ impl Renderer {
             std::slice::from_ref(mu),
             wgpu::BufferUsages::UNIFORM,
         );
+        let mx_buf = buffer_init(
+            &self.device,
+            "mx",
+            std::slice::from_ref(&ext.uniforms()),
+            wgpu::BufferUsages::UNIFORM,
+        );
         let bg0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mu"),
             layout: &self.pipes.bgl_mu,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: mu_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: mu_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BINDING_MILK_EXT,
+                    resource: mx_buf.as_entire_binding(),
+                },
+            ],
         });
 
         let mut pu = PassUniforms::default();
@@ -2664,9 +2950,10 @@ impl Renderer {
                 TexSource::Blur(_) => &self.dummy_2d.view,
                 TexSource::Noise(n) => &self.noise[n.index()].view,
                 TexSource::User(name) => match user_tex.get(&name.to_ascii_lowercase()) {
-                    Some(u) => &u.tex.view,
+                    Some(u) => u.view_at(self.anim_time),
                     None => &self.dummy_2d.view,
                 },
+                TexSource::Fft => &self.fft.view,
             };
             // the bound view must match the declared dimensionality
             let is3d = matches!(
@@ -2802,7 +3089,7 @@ impl Renderer {
                 (true, true) => PassBlend::InvSrcAlpha,
             };
             if dp.shaders {
-                let (pass, user_tex, q, blur, rand) = match dp.which {
+                let (pass, user_tex, q, blur, ext, rand) = match dp.which {
                     Which::New => {
                         let Some(pass) = self.warp_shader.as_ref() else {
                             continue;
@@ -2812,6 +3099,7 @@ impl Renderer {
                             &self.user_tex,
                             &input.q,
                             &input.blur,
+                            &input.ext,
                             input.warp_random.as_ref(),
                         )
                     }
@@ -2824,6 +3112,7 @@ impl Renderer {
                             &o.user_tex,
                             &bl.old.q,
                             &bl.old.blur,
+                            &bl.old.ext,
                             bl.old.warp_random.as_ref(),
                         )
                     }
@@ -2838,6 +3127,7 @@ impl Renderer {
                     &MilkUniformInputs {
                         q,
                         blur,
+                        ext,
                         ..MilkUniformInputs::for_frame(w, h, input, &self.rot, &rules, rand)
                     },
                     &mut rng,
@@ -2859,6 +3149,7 @@ impl Renderer {
                     user_tex,
                     mode,
                     &mu,
+                    ext,
                     src,
                     PassVerts::Mesh(&verts),
                     target,
@@ -2962,7 +3253,7 @@ impl Renderer {
                     (true, false) => PassBlend::SrcAlpha,
                     (true, true) => PassBlend::InvSrcAlpha,
                 };
-                let (pass, user_tex, q, blur, rand) = match dp.which {
+                let (pass, user_tex, q, blur, ext, rand) = match dp.which {
                     Which::New => {
                         let Some(pass) = self.comp_shader.as_ref() else {
                             continue;
@@ -2972,6 +3263,7 @@ impl Renderer {
                             &self.user_tex,
                             &input.q,
                             &input.blur,
+                            &input.ext,
                             input.comp_random.as_ref(),
                         )
                     }
@@ -2984,6 +3276,7 @@ impl Renderer {
                             &o.user_tex,
                             &bl.old.q,
                             &bl.old.blur,
+                            &bl.old.ext,
                             bl.old.comp_random.as_ref(),
                         )
                     }
@@ -2993,6 +3286,7 @@ impl Renderer {
                     &MilkUniformInputs {
                         q,
                         blur,
+                        ext,
                         ..MilkUniformInputs::for_frame(w, h, input, &self.rot, &rules, rand)
                     },
                     &mut rng,
@@ -3009,6 +3303,7 @@ impl Renderer {
                     user_tex,
                     mode,
                     &mu,
+                    ext,
                     main_view,
                     PassVerts::Mesh(&verts),
                     &self.final_tex.view,
@@ -3017,7 +3312,7 @@ impl Renderer {
                 );
             } else {
                 let b = self.build_noshader_comp(input);
-                let wrap = if self.cfg.compat == Compat::MilkDrop2 {
+                let wrap = if self.rules.noshader_comp_wrap {
                     Address::Wrap
                 } else {
                     Address::Clamp
@@ -3189,6 +3484,116 @@ impl Renderer {
         rp.draw(0..3, 0..1);
     }
 
+    // ---- MD3 sprites -------------------------------------------------------------------------
+
+    fn sprite_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        draws: &[&SpriteDraw],
+    ) {
+        self.pipes.sprites(&self.device).draw(
+            &self.device,
+            encoder,
+            view,
+            &self.pipes.bgl_tex,
+            self.pipes.sampler(Filter::Linear, Address::Wrap, false),
+            &self.sprite_images,
+            draws,
+        );
+    }
+
+    /// The sprites of `layer` (1..=4) onto `view`, one after the other in the order of `FrameInput::sprites`. With
+    /// `CompatRules::md3_sprite_burn_twice` a burning sprite is drawn a second time right after the first (MD3 burns
+    /// into the very image it draws on).
+    fn draw_sprite_layer(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &FrameInput,
+        layer: u8,
+        view: &wgpu::TextureView,
+    ) {
+        let mut draws: Vec<&SpriteDraw> = Vec::new();
+        for s in input.sprites.iter().filter(|s| s.layer == layer) {
+            draws.push(s);
+            if s.burn && self.rules.md3_sprite_burn_twice {
+                draws.push(s);
+            }
+        }
+        if !draws.is_empty() {
+            self.sprite_pass(encoder, view, &draws);
+        }
+    }
+
+    /// Layer 0: the sprites onto the composited image; those that burn are also drawn into the feedback image,
+    /// which the composite has already read.
+    fn draw_top_sprites(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &FrameInput,
+        final_view: &wgpu::TextureView,
+        feedback_view: &wgpu::TextureView,
+    ) {
+        let draws: Vec<&SpriteDraw> = input.sprites.iter().filter(|s| s.layer == 0).collect();
+        if draws.is_empty() {
+            return;
+        }
+        self.sprite_pass(encoder, final_view, &draws);
+        let burn: Vec<&SpriteDraw> = draws.iter().copied().filter(|s| s.burn).collect();
+        if !burn.is_empty() {
+            self.sprite_pass(encoder, feedback_view, &burn);
+        }
+    }
+
+    /// Shapes, waves, main wave and borders into the feedback image `main[next_i]`. Sprite layers 2 (after the
+    /// shapes) and 3 (after the waves) split the batch into several passes; without them it is one pass.
+    fn run_overlay(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        input: &FrameInput,
+        b: &Batch,
+        next_i: usize,
+        bg: &wgpu::BindGroup,
+        leak: &wgpu::BindGroup,
+    ) {
+        const LABEL: &str = "shapes+waves+borders";
+        let view = &self.main[next_i].view;
+        if !input.sprites.iter().any(|s| matches!(s.layer, 2 | 3)) {
+            self.run_batch(
+                encoder,
+                b,
+                view,
+                wgpu::LoadOp::Load,
+                Some(bg),
+                Some(leak),
+                LABEL,
+            );
+            return;
+        }
+        let end = b.cmds.len();
+        for (range, layer) in [
+            (0..b.marks[0], Some(2)),
+            (b.marks[0]..b.marks[1], Some(3)),
+            (b.marks[1]..end, None),
+        ] {
+            if !range.is_empty() {
+                self.run_batch_range(
+                    encoder,
+                    b,
+                    range,
+                    view,
+                    wgpu::LoadOp::Load,
+                    Some(bg),
+                    Some(leak),
+                    LABEL,
+                );
+            }
+            if let Some(layer) = layer {
+                self.draw_sprite_layer(encoder, input, layer, view);
+            }
+        }
+    }
+
     // ---- fixed-function content ---------------------------------------------------------
 
     fn build_overlay(
@@ -3209,10 +3614,12 @@ impl Renderer {
         for (si, s) in f.shapes.iter().enumerate() {
             // a textured shape with an `image=` samples that user texture; its texture aspect is 1
             let image = s.image.as_ref().filter(|_| s.textured);
-            let g = match image {
-                Some(_) => geom::shape_geometry_tex(s, asp_y, 1.0),
-                None => geom::shape_geometry(s, asp_y),
-            };
+            let g = geom::shape_geometry_tex_max(
+                s,
+                asp_y,
+                if image.is_some() { 1.0 } else { asp_y },
+                rules.max_shape_sides,
+            );
             let am = f
                 .md2_blend
                 .as_ref()
@@ -3284,6 +3691,7 @@ impl Renderer {
                 }
             }
         }
+        b.mark(0);
 
         // ---- custom waves ----
         for (wave_i, cw) in f.waves.iter().enumerate() {
@@ -3351,6 +3759,7 @@ impl Renderer {
                 }
             }
         }
+        b.mark(1);
 
         // ---- main wave ----
         self.build_main_wave(b, f, aspect, pm_wave);
@@ -3370,7 +3779,7 @@ impl Renderer {
             } else {
                 (f.borders.ib_rgba, f.borders.ib_rgba[3])
             };
-            if label_a > 0.001 {
+            if label_a > 0.001 && !f.borders.hidden {
                 let c = geom::conv_color_raw(rules, size_rgba);
                 let (ob, ib) = (f.borders.ob_size, f.borders.ib_size);
                 let mut tris = if rules.pm_border_mesh {
@@ -3384,6 +3793,47 @@ impl Renderer {
                 b.flat(Blend::SrcAlpha, &tris);
             }
         }
+    }
+
+    /// One `DrawWave` pass of the MD2 family: the MD2 port, or MilkDrop 3's 17 modes (`md3_wave_modes`).
+    fn main_wave_raw(
+        &self,
+        m: &crate::frame::MainWave,
+        wl: &[f32],
+        wr: &[f32],
+        spec_l: &[f32],
+        spec_r: &[f32],
+        f: &FrameInput,
+        aspect: (f32, f32),
+        blending: bool,
+    ) -> Option<wavegen::WaveGeom> {
+        if self.rules.md3_wave_modes {
+            return wavegen_md3::main_wave_geometry_md3_raw(
+                m,
+                wl,
+                wr,
+                spec_l,
+                f.time as f32,
+                [f.bass, f.mid, f.treb],
+                f.imm_abs,
+                self.cfg.width,
+                aspect,
+                blending,
+            );
+        }
+        wavegen::main_wave_geometry_raw(
+            m,
+            wl,
+            wr,
+            spec_l,
+            spec_r,
+            f.time as f32,
+            [f.bass, f.mid, f.treb],
+            f.imm_abs,
+            self.cfg.width,
+            aspect,
+            blending,
+        )
     }
 
     /// `DrawWave` while MD2 blends two presets: the new wave (`it == 0`) and, if the wave mode changed, the old
@@ -3401,19 +3851,7 @@ impl Renderer {
     ) -> Option<wavegen::WaveGeom> {
         let mw = &f.main_wave;
         let call = |m: &crate::frame::MainWave| {
-            wavegen::main_wave_geometry_raw(
-                m,
-                wl,
-                wr,
-                &mw.spectrum[0],
-                &mw.spectrum[1],
-                f.time as f32,
-                [f.bass, f.mid, f.treb],
-                f.imm_abs,
-                self.cfg.width,
-                aspect,
-                true,
-            )
+            self.main_wave_raw(m, wl, wr, &mw.spectrum[0], &mw.spectrum[1], f, aspect, true)
         };
         let new = call(mw)?;
         let mut out = new.clone();
@@ -3460,18 +3898,18 @@ impl Renderer {
         }
         let (wl, wr) = wavegen::prepare_main_waveform(mw);
         let geometry = match f.md2_blend.as_ref() {
-            None => wavegen::main_wave_geometry(
-                mw,
-                &wl,
-                &wr,
-                &mw.spectrum[0],
-                &mw.spectrum[1],
-                f.time as f32,
-                [f.bass, f.mid, f.treb],
-                f.imm_abs,
-                self.cfg.width,
-                aspect,
-            ),
+            None => self
+                .main_wave_raw(
+                    mw,
+                    &wl,
+                    &wr,
+                    &mw.spectrum[0],
+                    &mw.spectrum[1],
+                    f,
+                    aspect,
+                    false,
+                )
+                .filter(|g| g.alpha >= 0.004),
             Some(bl) => self.main_wave_geometry_blend(f, bl, &wl, &wr, aspect),
         };
         let Some(g) = geometry else {

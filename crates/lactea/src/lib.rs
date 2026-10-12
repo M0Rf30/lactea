@@ -28,26 +28,35 @@
 
 #![warn(missing_docs)]
 
+pub mod auto_cut;
 mod callbacks;
 mod control;
 mod engine;
 mod idle;
+mod md3_inputs;
+mod media;
 mod playlist;
 mod rng;
 mod runtime;
+mod sprites;
 mod teacher;
 mod textures;
 mod vars;
 
 pub use callbacks::{Hook, SwitchFailure};
 pub use control::{HARD_CUT_MIN_FRAMES, PresetControl, SwitchRequest};
-pub use engine::{DebugImage, Engine, TouchType};
+pub use engine::{
+    DebugImage, DoubleMode, DoublePresetInfo, Engine, Md3Locks, Md3Pattern, Md3PatternInstance,
+    TouchType, default_enabled_patterns, md3_draw_progress, md3_fill_vertinfo, md3_random_instance,
+};
 pub use idle::{IDLE_PRESET, IDLE_PRESET_NAME};
 pub use lactea_abi::PassKind;
 pub use lactea_abi::dump::Stage;
 pub use lactea_audio::AudioFrame;
 pub use lactea_render::TransitionKind;
 pub use lactea_render::{Compat, Renderer};
+pub use md3_inputs::MouseState;
+pub use media::{AnimFrame, AnimatedImage, Media, MediaFiles, TEXTURE_EXTENSIONS, decode_gif};
 pub use playlist::{
     DEFAULT_RETRY_COUNT, FailedFn, Filter, INSERT_AT_END, LoadRequest, MAX_HISTORY, Playlist,
     SortOrder, SortPredicate, SwitchedFn,
@@ -67,7 +76,7 @@ pub struct EngineConfig {
     /// Seeds every random stream (shader `rand_*` / `rot_*`, hue phases, `rand()` of the
     /// expressions, random textures, noise textures). Same seed, same inputs: same frames.
     pub seed: u64,
-    /// projectM (default) or MilkDrop 2 behaviour where they differ.
+    /// projectM (default), MilkDrop 2 or MilkDrop 3 behaviour where they differ.
     pub compat: Compat,
     /// Added to warp UVs in texels (0 on modern APIs; MilkDrop 2 on D3D9 used 0.5).
     pub texel_offset: [f32; 2],
@@ -85,6 +94,26 @@ pub struct EngineConfig {
     /// (projectM's default) warps the new preset's first frame from the previous active preset's
     /// finished image. The very first preset always starts black.
     pub start_clean: bool,
+    /// MilkDrop 3's `DisableBox` setting (default on): under [`Compat::MilkDrop3`] the outer / inner borders
+    /// (`ob_*` / `ib_*`) are not drawn while a preset blend is running. Ignored by the other compat modes.
+    pub md3_disable_box: bool,
+    /// MilkDrop 3 `AutoHardCutMode` (0 = off, 1..=7, see [`auto_cut`]). Only honoured with
+    /// [`Compat::MilkDrop3`]; the other compat modes ignore it. [`Engine::set_auto_hard_cut_mode`] changes it
+    /// at runtime.
+    pub auto_hard_cut_mode: u8,
+    /// MilkDrop 3 `VolumeSensitivity` (`settings.ini`, default 1): a linear gain on the 8-bit quantised input of the
+    /// audio analysis. Only [`Compat::MilkDrop3`] uses it (the other modes ignore it). Change it live with
+    /// [`Engine::set_volume_sensitivity`].
+    pub volume_sensitivity: f32,
+    /// MilkDrop 3 `BlendMilk2` (default on): transitions into and out of a `.milk2` double preset are soft. Off, every
+    /// load of a `.milk2` and every change away from one is a hard cut. Only [`Compat::MilkDrop3`] reads it.
+    pub blend_milk2: bool,
+    /// MilkDrop 3 `BlendTimeUser` in seconds (default 1.7): the duration of the two legs of a soft transition into a
+    /// `.milk2` (the request's own time only has to be positive) and of the soft-out ramp's time base.
+    pub blend_time_user: f64,
+    /// The patterns random soft cuts of [`Compat::MilkDrop3`] may pick (MD3's `[transitions]` settings; empty = only
+    /// `zoom`). Default: the 13 patterns MD3 enables without a settings file.
+    pub md3_transition_patterns: Vec<Md3Pattern>,
 }
 
 impl Default for EngineConfig {
@@ -101,6 +130,12 @@ impl Default for EngineConfig {
             fps: 60,
             preset_duration: 1e9,
             start_clean: false,
+            md3_disable_box: true,
+            auto_hard_cut_mode: 0,
+            volume_sensitivity: 1.0,
+            blend_milk2: true,
+            blend_time_user: 1.7,
+            md3_transition_patterns: engine::default_enabled_patterns(),
         }
     }
 }
@@ -160,6 +195,17 @@ pub enum EngineError {
     /// The GPU backend rejected the preset's resources.
     #[error("render error: {0}")]
     Render(#[from] lactea_render::RenderError),
+    /// An operation on the loaded preset (e.g. [`Engine::import_custom_wave`]) was called with
+    /// no preset loaded.
+    #[error("no preset loaded")]
+    NoPreset,
+    /// The preset needs something the configured compatibility mode does not have (a `.milk2` double preset needs
+    /// [`Compat::MilkDrop3`]).
+    #[error("{0}")]
+    Unsupported(String),
+    /// A `.milk2` header value could not be read (a malformed number).
+    #[error("double preset: {0}")]
+    Milk2(#[from] lactea_preset::milk2::Milk2Error),
 }
 
 impl EngineError {
@@ -220,4 +266,7 @@ pub struct PresetReport {
     pub unresolved_textures: Vec<String>,
     /// `(name the shader uses, name loaded from the provider)`; differs for `randNN` samplers.
     pub resolved_textures: Vec<(String, String)>,
+    /// `Compat::MilkDrop3`: the `SpriteName` of the preset's sprite when its image was loaded (so the sprite is drawn);
+    /// a sprite that could not be loaded is a warning instead.
+    pub sprite: Option<String>,
 }

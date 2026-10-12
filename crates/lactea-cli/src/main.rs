@@ -23,7 +23,8 @@ mod wav;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lactea::{
-    Compat, Engine, EngineConfig, ForcedFrame, FrameClock, PresetReport, Transition, TransitionKind,
+    Compat, Engine, EngineConfig, ForcedFrame, FrameClock, MouseState, PresetReport, Transition,
+    TransitionKind,
 };
 use lactea_abi::dump::{DumpMeta, Stage};
 use lactea_abi::{NoiseTex, RunConfig, pcm_range};
@@ -89,12 +90,19 @@ struct Args {
     /// use the noise textures of an oracle dump directory (free run)
     #[arg(long)]
     inject_noise: Option<PathBuf>,
-    /// projectm (default) | md2
+    /// projectm (default) | md2 | md3
     #[arg(long, default_value = "projectm")]
     compat: String,
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
     #[arg(long)]
     stroke: Option<String>,
+    /// MilkDrop 3 (`--compat md3`): a fixed mouse for every frame, `X,Y[,down]` with X, Y the cursor as fractions of
+    /// the image (0..1, origin top left); `down` presses the left button. Default: the cursor is outside the window.
+    #[arg(long, value_name = "X,Y[,down]")]
+    mouse: Option<String>,
+    /// MilkDrop 3 `VolumeSensitivity` (`--compat md3` only): linear gain on the 8-bit quantised audio input.
+    #[arg(long, default_value_t = 1.0)]
+    volume_sensitivity: f32,
     /// second preset: replaced at --switch-frame by a soft cut of --soft-cut seconds
     #[arg(long)]
     preset2: Option<PathBuf>,
@@ -116,6 +124,33 @@ struct Args {
     /// pass (isolates the transition shader; per-preset stages stay ours)
     #[arg(long)]
     blend_teacher: Option<PathBuf>,
+    /// MilkDrop 3 AutoHardCutMode 0..=7 (0 = off; acts only with --compat md3). fdrender has no preset
+    /// switching, so the instant preset changes of modes 1..=6 are only counted ("auto_cuts" in
+    /// fdrender.json); mode 7 injects its effects into the composite shader, so the frames show them
+    #[arg(long, default_value_t = 0)]
+    auto_hard_cut: u8,
+}
+
+/// `--mouse X,Y[,down]`.
+fn parse_mouse(s: &str) -> Result<MouseState> {
+    let mut it = s.split(',');
+    let mut coord = |what: &str| -> Result<f32> {
+        it.next()
+            .ok_or_else(|| anyhow!("--mouse: expected X,Y[,down], got {s:?}"))?
+            .trim()
+            .parse::<f32>()
+            .map_err(|e| anyhow!("--mouse: {what}: {e}"))
+    };
+    let (x, y) = (coord("X")?, coord("Y")?);
+    let left_down = match it.next().map(str::trim) {
+        None => false,
+        Some("down") => true,
+        Some(o) => bail!("--mouse: the third field is `down`, got {o:?}"),
+    };
+    Ok(MouseState {
+        position: Some([x, y]),
+        left_down,
+    })
 }
 
 fn parse_pair<T: std::str::FromStr>(s: &str, sep: char, what: &str) -> Result<(T, T)> {
@@ -243,8 +278,16 @@ fn run(args: &Args) -> Result<i32> {
     let compat = match args.compat.as_str() {
         "projectm" => Compat::ProjectM,
         "md2" => Compat::MilkDrop2,
-        o => bail!("--compat: expected projectm|md2, got {o:?}"),
+        "md3" => Compat::MilkDrop3,
+        o => bail!("--compat: expected projectm|md2|md3, got {o:?}"),
     };
+    if args.auto_hard_cut > lactea::auto_cut::AUTO_HARD_CUT_MODES {
+        bail!(
+            "--auto-hard-cut: expected 0..={}, got {}",
+            lactea::auto_cut::AUTO_HARD_CUT_MODES,
+            args.auto_hard_cut
+        );
+    }
     if width == 0 || height == 0 || args.fps == 0 {
         bail!("size and fps must be positive");
     }
@@ -344,8 +387,14 @@ fn run(args: &Args) -> Result<i32> {
             fps: args.fps,
             preset_duration: 1e9,
             start_clean: args.start_clean != 0,
+            auto_hard_cut_mode: args.auto_hard_cut,
+            volume_sensitivity: args.volume_sensitivity,
+            ..EngineConfig::default()
         },
     );
+    if args.auto_hard_cut > 0 && !engine.auto_hard_cut_active() {
+        eprintln!("fdrender: --auto-hard-cut needs --compat md3, ignored");
+    }
     let tex_dir = args.texture_dir.clone().unwrap_or_else(default_texture_dir);
     let provider = textures::DirTextures::scan(&tex_dir);
     eprintln!(
@@ -372,6 +421,9 @@ fn run(args: &Args) -> Result<i32> {
             "quads" => lactea_render::StrokeRaster::Quads,
             o => bail!("--stroke: expected native|emulated|quads, got {o:?}"),
         });
+    }
+    if let Some(m) = &args.mouse {
+        engine.set_mouse(parse_mouse(m)?);
     }
 
     if let Some(r) = &reference {
@@ -437,6 +489,7 @@ fn run(args: &Args) -> Result<i32> {
     let sr = u64::from(audio.rate);
     let zero = vec![0.0f32; 4096 * 2];
     let t0 = Instant::now();
+    let mut auto_cuts = 0u64;
     let mut done = 0u32;
     for n in 0..args.frames {
         // audio: PCM frames [s0, e0), padded with silence once the file is exhausted
@@ -580,6 +633,7 @@ fn run(args: &Args) -> Result<i32> {
                 frame: n,
             },
         );
+        auto_cuts += u64::from(engine.take_auto_cuts());
         gpu.queue.submit(Some(enc.finish()));
         if let Some(e) = pollster::block_on(scope.pop())
             && validation_errors.len() < 20
@@ -668,39 +722,43 @@ fn run(args: &Args) -> Result<i32> {
     }
 
     let fallbacks2 = report2.as_ref().map_or(0, |r| r.shader_fallbacks.len());
-    write_info(
-        &args.out,
-        serde_json::json!({
-            "producer": PRODUCER,
-            "preset_loaded": true,
-            "preset_version": report.preset_version,
-            "warp_shader": format!("{:?}", report.warp),
-            "comp_shader": format!("{:?}", report.comp),
-            "shader_fallbacks": report.shader_fallbacks.iter().map(|f| serde_json::json!({
+    let mut info = serde_json::json!({
+        "producer": PRODUCER,
+        "preset_loaded": true,
+        "preset_version": report.preset_version,
+        "warp_shader": format!("{:?}", report.warp),
+        "comp_shader": format!("{:?}", report.comp),
+        "shader_fallbacks": report.shader_fallbacks.iter().map(|f| serde_json::json!({
+            "pass": format!("{:?}", f.pass), "reason": f.reason, "fallback": f.fallback,
+        })).collect::<Vec<_>>(),
+        "unresolved_textures": report.unresolved_textures,
+        "resolved_textures": report.resolved_textures,
+        "warnings": report.warnings,
+        "sprite": report.sprite,
+        "preset2": report2.as_ref().map(|r| serde_json::json!({
+            "preset_version": r.preset_version,
+            "warp_shader": format!("{:?}", r.warp),
+            "comp_shader": format!("{:?}", r.comp),
+            "shader_fallbacks": r.shader_fallbacks.iter().map(|f| serde_json::json!({
                 "pass": format!("{:?}", f.pass), "reason": f.reason, "fallback": f.fallback,
             })).collect::<Vec<_>>(),
-            "unresolved_textures": report.unresolved_textures,
-            "resolved_textures": report.resolved_textures,
-            "warnings": report.warnings,
-            "preset2": report2.as_ref().map(|r| serde_json::json!({
-                "preset_version": r.preset_version,
-                "warp_shader": format!("{:?}", r.warp),
-                "comp_shader": format!("{:?}", r.comp),
-                "shader_fallbacks": r.shader_fallbacks.iter().map(|f| serde_json::json!({
-                    "pass": format!("{:?}", f.pass), "reason": f.reason, "fallback": f.fallback,
-                })).collect::<Vec<_>>(),
-                "unresolved_textures": r.unresolved_textures,
-                "warnings": r.warnings,
-            })),
-            "transition": transition_json,
-            "validation_errors": validation_errors,
-            "frames_rendered": done,
-            "teacher": teacher,
-            "blend_teacher": args.blend_teacher.is_some(),
-            "adapter": gpu.adapter_name,
-            "seconds": secs,
-        }),
-    )?;
+            "unresolved_textures": r.unresolved_textures,
+            "warnings": r.warnings,
+        })),
+        "transition": transition_json,
+        "validation_errors": validation_errors,
+        "frames_rendered": done,
+        "teacher": teacher,
+        "blend_teacher": args.blend_teacher.is_some(),
+        "adapter": gpu.adapter_name,
+        "seconds": secs,
+    });
+    // Only with the mode on and supported by the compat mode; the tool has no preset switching, so
+    // this counts the cuts a host would have been asked for (mode 4 can ask twice in one frame).
+    if engine.auto_hard_cut_active() {
+        info["auto_cuts"] = serde_json::json!(auto_cuts);
+    }
+    write_info(&args.out, info)?;
     if !validation_errors.is_empty() {
         return Ok(4);
     }

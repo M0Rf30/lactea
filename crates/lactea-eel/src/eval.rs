@@ -3,6 +3,7 @@
 
 use crate::context::Context;
 use crate::memory::{BLOCK_MASK, BLOCKS};
+use crate::ns;
 use crate::tree::{AssignOp, BinOp, Loc, Node, UnOp};
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -40,6 +41,26 @@ pub(crate) fn mem_index(x: f64) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// Index of a megabuf / gmegabuf access in the given dialect; `None` if it maps to no cell
+/// (never for ns-eel2's wrapping gmegabuf).
+#[inline]
+pub(crate) fn resolve_mem(x: f64, global: bool, ns: bool) -> Option<u32> {
+    if !ns {
+        mem_index(x)
+    } else if global {
+        Some(ns::gmem_index(x))
+    } else {
+        ns::mem_index(x)
+    }
+}
+
+/// Index argument of `memcpy` / `memset`: projectm-eval adds 0.0001 before truncating, ns-eel2
+/// truncates as is.
+#[inline]
+pub(crate) fn range_arg(x: f64, ns: bool) -> i32 {
+    cvt_i32(if ns { x } else { x + 0.0001 })
 }
 
 #[inline(always)]
@@ -108,6 +129,13 @@ pub(crate) fn bin(op: BinOp, x: f64, y: f64) -> f64 {
         BinOp::Bor => b2f(x.abs() > CLOSE || y.abs() > CLOSE),
         BinOp::BitOr => (cvt_i64(x) | cvt_i64(y)) as f64,
         BinOp::BitAnd => (cvt_i64(x) & cvt_i64(y)) as f64,
+        BinOp::DivRaw => x / y,
+        BinOp::ModNs => ns::modulo(x, y),
+        BinOp::PowRaw => x.powf(y),
+        BinOp::EqualNs => b2f(ns::close(x, y)),
+        BinOp::NotEqNs => b2f(!ns::close(x, y)),
+        BinOp::BitOrNs => (ns::fistp64(x) | ns::fistp64(y)) as f64,
+        BinOp::BitAndNs => (ns::fistp64(x) & ns::fistp64(y)) as f64,
     }
 }
 
@@ -135,6 +163,11 @@ pub(crate) fn assign_op(op: AssignOp, cur: f64, r: f64) -> f64 {
         AssignOp::Pow => pow_checked(cur, r),
         AssignOp::Or => (cvt_i64(cur) | cvt_i64(r)) as f64,
         AssignOp::And => (cvt_i64(cur) & cvt_i64(r)) as f64,
+        AssignOp::DivRaw => cur / r,
+        AssignOp::ModNs => ns::modulo(cur, r),
+        AssignOp::PowRaw => cur.powf(r),
+        AssignOp::OrNs => (ns::fistp64(cur) | ns::fistp64(r)) as f64,
+        AssignOp::AndNs => (ns::fistp64(cur) & ns::fistp64(r)) as f64,
     }
 }
 
@@ -205,6 +238,13 @@ impl Context {
                 if y.is_nan() { 0.0 } else { y }
             }
             UnOp::Bnot => b2f(x.abs() < CLOSE),
+            UnOp::LogRaw => x.ln(),
+            UnOp::Log10Raw => x.log10(),
+            UnOp::AsinRaw => x.asin(),
+            UnOp::AcosRaw => x.acos(),
+            UnOp::SignNs => ns::sign(x),
+            UnOp::InvsqrtNs => ns::invsqrt(x),
+            UnOp::BnotNs => b2f(!ns::truthy(x)),
         }
     }
 
@@ -271,22 +311,35 @@ impl Context {
                 let (x, y) = self.pair(&args[0], &args[1], *defer);
                 bin(*op, x, y)
             }
-            Node::And(args) => {
-                if self.val(&args[0]).abs() > CLOSE {
+            Node::And(args, ns) => {
+                if *ns {
+                    if ns::truthy(self.val(&args[0])) {
+                        b2f(ns::truthy(self.val(&args[1])))
+                    } else {
+                        0.0
+                    }
+                } else if self.val(&args[0]).abs() > CLOSE {
                     b2f(self.val(&args[1]).abs() > CLOSE)
                 } else {
                     0.0
                 }
             }
-            Node::Or(args) => {
-                if self.val(&args[0]).abs() < CLOSE {
+            Node::Or(args, ns) => {
+                if *ns {
+                    if ns::truthy(self.val(&args[0])) {
+                        1.0
+                    } else {
+                        b2f(ns::truthy(self.val(&args[1])))
+                    }
+                } else if self.val(&args[0]).abs() < CLOSE {
                     b2f(self.val(&args[1]).abs() > CLOSE)
                 } else {
                     1.0
                 }
             }
-            Node::If { args, .. } => {
-                if self.val(&args[0]) != 0.0 {
+            Node::If { args, ns, .. } => {
+                let c = self.val(&args[0]);
+                if if *ns { ns::truthy(c) } else { c != 0.0 } {
                     self.val(&args[1])
                 } else {
                     self.val(&args[2])
@@ -316,8 +369,9 @@ impl Context {
     pub(crate) fn place(&mut self, n: &Node, out: Loc) -> Loc {
         match n {
             Node::Var(l) => *l,
-            Node::If { args, .. } => {
-                if self.val(&args[0]) != 0.0 {
+            Node::If { args, ns, .. } => {
+                let c = self.val(&args[0]);
+                if if *ns { ns::truthy(c) } else { c != 0.0 } {
                     self.place(&args[1], out)
                 } else {
                     self.place(&args[2], out)
@@ -342,10 +396,15 @@ impl Context {
                 }
                 self.place(last, Loc::Scratch(*s))
             }
-            Node::Loop { s, args } => {
+            Node::Loop { s, args, ns } => {
                 let mut vp = Loc::Scratch(*s);
                 vp = self.place(&args[0], vp);
-                let mut n = cvt_i64(self.read(vp));
+                let c = self.read(vp);
+                let mut n = if *ns {
+                    i64::from(ns::fistp32(c))
+                } else {
+                    cvt_i64(c)
+                };
                 if n > MAX_LOOP {
                     n = MAX_LOOP;
                 }
@@ -356,12 +415,13 @@ impl Context {
                 }
                 vp
             }
-            Node::While { s, arg } => {
+            Node::While { s, arg, ns } => {
                 let mut vp = Loc::Scratch(*s);
                 let mut left = MAX_LOOP;
                 loop {
                     vp = self.place(arg, vp);
-                    if self.read(vp).abs() > CLOSE {
+                    let v = self.read(vp);
+                    if if *ns { ns::truthy(v) } else { v.abs() > CLOSE } {
                         left -= 1;
                         if left != 0 {
                             continue;
@@ -371,10 +431,10 @@ impl Context {
                 }
                 vp
             }
-            Node::Set { args, .. } => {
+            Node::Set { args, filter, .. } => {
                 let lp = self.place(&args[0], out);
                 let v = self.val(&args[1]);
-                self.write(lp, v);
+                self.write(lp, if *filter { ns::assign_filter(v) } else { v });
                 lp
             }
             Node::OpAssign { op, args, .. } => {
@@ -385,15 +445,17 @@ impl Context {
                 self.write(lp, v);
                 lp
             }
-            Node::Mem { global, arg, .. } => {
-                let i = cvt_i32(self.val(arg) + 0.0001);
-                if i >= 0 && ((i as usize) >> 16) < BLOCKS {
+            Node::Mem {
+                global, ns, arg, ..
+            } => {
+                let x = self.val(arg);
+                if let Some(i) = resolve_mem(x, *global, *ns) {
                     if *global {
                         let _ = self.global.block((i as usize) >> 16);
-                        Loc::GMem(i as u32)
+                        Loc::GMem(i)
                     } else {
                         self.mem.ensure((i as usize) >> 16);
-                        Loc::Mem(i as u32)
+                        Loc::Mem(i)
                     }
                 } else {
                     self.write(out, 0.0);
@@ -401,28 +463,28 @@ impl Context {
                 }
             }
             Node::FreeMbuf { arg } => self.place(arg, out),
-            Node::Memcpy { s, args } => {
+            Node::Memcpy { s, args, ns } => {
                 let dp = self.place(&args[0], Loc::Scratch(*s));
                 let sp = self.place(&args[1], Loc::Scratch(*s + 1));
                 let cp = self.place(&args[2], Loc::Scratch(*s + 2));
-                let dest = cvt_i32(self.read(dp) + 0.0001);
-                let src = cvt_i32(self.read(sp) + 0.0001);
-                let count = cvt_i32(self.read(cp) + 0.0001);
+                let dest = range_arg(self.read(dp), *ns);
+                let src = range_arg(self.read(sp), *ns);
+                let count = range_arg(self.read(cp), *ns);
                 self.mem.copy(dest, src, count);
                 dp
             }
-            Node::Memset { s, args } => {
+            Node::Memset { s, args, ns } => {
                 let dp = self.place(&args[0], Loc::Scratch(*s));
                 let vp = self.place(&args[1], Loc::Scratch(*s + 1));
                 let cp = self.place(&args[2], Loc::Scratch(*s + 2));
-                let dest = cvt_i32(self.read(dp) + 0.0001);
-                let count = cvt_i32(self.read(cp) + 0.0001);
+                let dest = range_arg(self.read(dp), *ns);
+                let count = range_arg(self.read(cp), *ns);
                 let v = self.read(vp);
                 self.mem.fill(dest, count, v);
                 dp
             }
             // Plain value producers write into the caller-supplied cell.
-            Node::Const(_) | Node::Un(..) | Node::Bin { .. } | Node::And(_) | Node::Or(_) => {
+            Node::Const(_) | Node::Un(..) | Node::Bin { .. } | Node::And(..) | Node::Or(..) => {
                 let v = self.val(n);
                 self.write(out, v);
                 out

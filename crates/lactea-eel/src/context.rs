@@ -2,6 +2,7 @@
 
 use crate::fast::FNode;
 use crate::memory::{GlobalMemory, LocalMem};
+use crate::ns::Dialect;
 use crate::tree::Loc;
 use std::collections::HashMap;
 use std::fmt;
@@ -16,6 +17,9 @@ static NEXT_CTX_ID: AtomicU64 = AtomicU64::new(1);
 pub struct Var(u32);
 
 const REG_FLAG: u32 = 0x8000_0000;
+
+/// Significant length of an ns-eel2 variable name.
+const NS_NAME_LEN: usize = 128;
 
 /// `Some(NN)` if `name` is `regNN` (two decimal digits, ASCII case-insensitive).
 fn parse_reg(name: &str) -> Option<u32> {
@@ -95,6 +99,7 @@ impl fmt::Debug for Program {
 /// (per-frame, per-vertex, each custom wave / shape ...), all sharing one [`GlobalMemory`].
 pub struct Context {
     id: u64,
+    dialect: Dialect,
     pub(crate) global: Arc<GlobalMemory>,
     lookup: HashMap<String, u32>,
     names: Vec<String>,
@@ -109,6 +114,7 @@ impl Context {
     pub fn new(global: Arc<GlobalMemory>) -> Self {
         Context {
             id: NEXT_CTX_ID.fetch_add(1, Ordering::Relaxed),
+            dialect: global.dialect(),
             global,
             lookup: HashMap::new(),
             names: Vec::new(),
@@ -138,13 +144,18 @@ impl Context {
         &self.global
     }
 
+    /// The dialect this context compiles and runs (that of its [`GlobalMemory`]).
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
     /// Resolves (creating if needed) a variable by case-insensitive name.  `reg00..reg99`
     /// resolve to the shared global registers.
     pub fn var(&mut self, name: &str) -> Var {
         if let Some(idx) = parse_reg(name) {
             return Var(REG_FLAG | idx);
         }
-        let key = name.to_ascii_lowercase();
+        let key = self.key(name);
         if let Some(&i) = self.lookup.get(&key) {
             return Var(i);
         }
@@ -160,7 +171,20 @@ impl Context {
         if let Some(idx) = parse_reg(name) {
             return Some(Var(REG_FLAG | idx));
         }
-        self.lookup.get(&name.to_ascii_lowercase()).map(|&i| Var(i))
+        self.lookup.get(&self.key(name)).map(|&i| Var(i))
+    }
+
+    /// Table key of a variable name: lower-case; ns-eel2 only distinguishes the first 128 bytes.
+    fn key(&self, name: &str) -> String {
+        let mut key = name.to_ascii_lowercase();
+        if self.dialect == Dialect::NsEel2 && key.len() > NS_NAME_LEN {
+            let mut cut = NS_NAME_LEN;
+            while !key.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            key.truncate(cut);
+        }
+        key
     }
 
     pub(crate) fn loc_of(&self, v: Var) -> Loc {

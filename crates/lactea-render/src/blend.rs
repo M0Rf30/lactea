@@ -35,6 +35,8 @@ pub struct Md2OldPass {
     pub q: [f32; 32],
     /// The old state's own (unblended) `var_pf_blur*` (`GetSafeBlurMinMax(m_pOldState)`).
     pub blur: BlurParams,
+    /// MilkDrop 3: the old state's `_c14` / `_qi.._qp` / shader time (`ShaderExt::fft` is ignored here).
+    pub ext: crate::ShaderExt,
     /// Random state of the old warp / composite pass (`m_pOldState->m_rand_preset`, `m_rot_*`; `rand_frame` is the
     /// frame's one `m_rand_frame`).
     pub warp_random: Option<PassRandom>,

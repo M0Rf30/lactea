@@ -2,7 +2,7 @@
 
 # Lactea
 
-A pure-Rust MilkDrop 2 / projectM-compatible music visualizer built on wgpu (Vulkan, Metal, DX12,
+A pure-Rust MilkDrop 2/3 and projectM-compatible music visualizer built on wgpu (Vulkan, Metal, DX12,
 GL, WebGPU). It ships as:
 
 - **a library** (`lactea`) that renders into any wgpu texture the host provides. It opens no
@@ -14,8 +14,11 @@ GL, WebGPU). It ships as:
 ## Features
 
 - Reads the whole `.milk` format (versions 1 and 2, custom waves and shapes, per-frame and
-  per-vertex code, warp and composite shaders) with MilkDrop 2 or projectM semantics
-  (`Compat::{ProjectM, MilkDrop2}`).
+  per-vertex code, warp and composite shaders) with MilkDrop 2, MilkDrop 3 or projectM semantics
+  (`Compat::{ProjectM, MilkDrop2, MilkDrop3}`, see [`docs/md3.md`](docs/md3.md)).
+- MilkDrop 3 (3.37) support behind `Compat::MilkDrop3`: `.milk2` double presets with the 30 blend patterns, preset
+  sprites (11 blend modes, GIF), ns-eel2 expressions, `get_fft` / mouse / `q1..q64` shader inputs, wave modes 0..16
+  and auto hard cuts; the whole MD3 pack loads (details and gaps: [`docs/md3.md`](docs/md3.md)).
 - Native expression engine, HLSL-to-WGSL shader translator and JPEG decoder; no C dependencies.
 - Soft and hard preset transitions, playlist/shuffle/history logic, projectM-style runtime parameters.
 - Deterministic by construction: same preset, audio and seed give the same pixels.

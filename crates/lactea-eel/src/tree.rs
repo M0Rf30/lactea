@@ -38,6 +38,21 @@ pub(crate) enum UnOp {
     Ceil,
     Invsqrt,
     Bnot,
+    // ns-eel2 (`Dialect::NsEel2`) variants; the projectm-eval ones above are unchanged.
+    /// `log` without the `x <= 0 -> 0` guard.
+    LogRaw,
+    /// `log10` without the guard.
+    Log10Raw,
+    /// `asin` without the domain guard (NaN outside [-1, 1]).
+    AsinRaw,
+    /// `acos` without the domain guard.
+    AcosRaw,
+    /// `sign` that keeps `-0` and maps NaN by its sign bit.
+    SignNs,
+    /// float32 magic-number `invsqrt`.
+    InvsqrtNs,
+    /// `!x` with ns-eel2 truthiness.
+    BnotNs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +77,21 @@ pub(crate) enum BinOp {
     Bor,
     BitOr,
     BitAnd,
+    // ns-eel2 variants.
+    /// `/` without the epsilon guard.
+    DivRaw,
+    /// integer `%` on `|a|`, `|b|` (unsigned, zero divisor gives 0).
+    ModNs,
+    /// `pow` without the zero / NaN special cases.
+    PowRaw,
+    /// `|a-b| < 1e-5` with x87 NaN behaviour.
+    EqualNs,
+    /// `|a-b| >= 1e-5`.
+    NotEqNs,
+    /// `|` with round-to-nearest 64-bit conversion.
+    BitOrNs,
+    /// `&` with round-to-nearest 64-bit conversion.
+    BitAndNs,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +104,12 @@ pub(crate) enum AssignOp {
     Pow,
     Or,
     And,
+    // ns-eel2 variants (unfiltered, raw results).
+    DivRaw,
+    ModNs,
+    PowRaw,
+    OrNs,
+    AndNs,
 }
 
 #[derive(Debug)]
@@ -88,11 +124,13 @@ pub(crate) enum Node {
         args: Box<[Node; 2]>,
         defer: bool,
     },
-    And(Box<[Node; 2]>),
-    Or(Box<[Node; 2]>),
+    /// `ns`: ns-eel2 truthiness (`|x| >= 1e-5`) instead of projectm-eval's.
+    And(Box<[Node; 2]>, bool),
+    Or(Box<[Node; 2]>, bool),
     If {
         s: u32,
         args: Box<[Node; 3]>,
+        ns: bool,
     },
     Exec2 {
         s: u32,
@@ -106,38 +144,49 @@ pub(crate) enum Node {
         s: u32,
         items: Vec<Node>,
     },
+    /// `ns`: the count is rounded (x87 `fistp`) instead of truncated.
     Loop {
         s: u32,
         args: Box<[Node; 2]>,
+        ns: bool,
     },
+    /// `ns`: ns-eel2 truthiness.
     While {
         s: u32,
         arg: Box<Node>,
+        ns: bool,
     },
+    /// `filter`: store NaN / Inf / denormal / -0 as +0 (ns-eel2 `=`).
     Set {
         s: u32,
         args: Box<[Node; 2]>,
+        filter: bool,
     },
     OpAssign {
         op: AssignOp,
         s: u32,
         args: Box<[Node; 2]>,
     },
+    /// `ns`: ns-eel2 index rules (rounded index, 8M-entry megabuf, wrapping 1M-entry gmegabuf).
     Mem {
         global: bool,
+        ns: bool,
         s: u32,
         arg: Box<Node>,
     },
     FreeMbuf {
         arg: Box<Node>,
     },
+    /// `ns`: truncating indices without the `+ 0.0001` of projectm-eval.
     Memcpy {
         s: u32,
         args: Box<[Node; 3]>,
+        ns: bool,
     },
     Memset {
         s: u32,
         args: Box<[Node; 3]>,
+        ns: bool,
     },
 }
 
@@ -146,7 +195,7 @@ impl Node {
     pub(crate) fn is_place(&self) -> bool {
         !matches!(
             self,
-            Node::Const(_) | Node::Un(..) | Node::Bin { .. } | Node::And(_) | Node::Or(_)
+            Node::Const(_) | Node::Un(..) | Node::Bin { .. } | Node::And(..) | Node::Or(..)
         )
     }
 
@@ -311,4 +360,52 @@ pub(crate) fn lookup_func(name: &str) -> Option<FuncDef> {
         "memset" => f(K::Memset, 3, false, true),
         _ => return None,
     })
+}
+
+/// Operators the ns-eel2 compiler emits itself (JIT glue, not entries of its 53-function
+/// table): they cannot be called by name, so `_add(1, 2)` is a syntax error there.
+pub(crate) fn is_ns_operator_only(name: &str) -> bool {
+    ["_add", "_sub", "_mul", "_div", "_neg"]
+        .iter()
+        .any(|n| name.eq_ignore_ascii_case(n))
+}
+
+/// Looks up a name a program may call under `Dialect::NsEel2`: the projectm-eval table minus the
+/// operator-only entries, with the ns-eel2 operator kinds.
+pub(crate) fn lookup_func_ns(name: &str) -> Option<FuncDef> {
+    if is_ns_operator_only(name) {
+        return None;
+    }
+    lookup_func(name).map(to_ns)
+}
+
+/// The ns-eel2 flavour of a projectm-eval function definition (same arity and const-ness).
+/// Control-flow flags (`ns` fields of the nodes) are added where the node is built.
+pub(crate) fn to_ns(mut def: FuncDef) -> FuncDef {
+    use AssignOp as A;
+    use BinOp as B;
+    use UnOp as U;
+    def.kind = match def.kind {
+        FuncKind::Un(U::Log) => FuncKind::Un(U::LogRaw),
+        FuncKind::Un(U::Log10) => FuncKind::Un(U::Log10Raw),
+        FuncKind::Un(U::Asin) => FuncKind::Un(U::AsinRaw),
+        FuncKind::Un(U::Acos) => FuncKind::Un(U::AcosRaw),
+        FuncKind::Un(U::Sign) => FuncKind::Un(U::SignNs),
+        FuncKind::Un(U::Invsqrt) => FuncKind::Un(U::InvsqrtNs),
+        FuncKind::Un(U::Bnot) => FuncKind::Un(U::BnotNs),
+        FuncKind::Bin(B::Div) => FuncKind::Bin(B::DivRaw),
+        FuncKind::Bin(B::Mod) => FuncKind::Bin(B::ModNs),
+        FuncKind::Bin(B::Pow) => FuncKind::Bin(B::PowRaw),
+        FuncKind::Bin(B::Equal) => FuncKind::Bin(B::EqualNs),
+        FuncKind::Bin(B::NotEq) => FuncKind::Bin(B::NotEqNs),
+        FuncKind::Bin(B::BitOr) => FuncKind::Bin(B::BitOrNs),
+        FuncKind::Bin(B::BitAnd) => FuncKind::Bin(B::BitAndNs),
+        FuncKind::Assign(A::Div) => FuncKind::Assign(A::DivRaw),
+        FuncKind::Assign(A::Mod) => FuncKind::Assign(A::ModNs),
+        FuncKind::Assign(A::Pow) => FuncKind::Assign(A::PowRaw),
+        FuncKind::Assign(A::Or) => FuncKind::Assign(A::OrNs),
+        FuncKind::Assign(A::And) => FuncKind::Assign(A::AndNs),
+        k => k,
+    };
+    def
 }

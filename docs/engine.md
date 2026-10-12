@@ -3,7 +3,7 @@
 `crates/lactea` is the CPU side of MilkDrop 2's `RenderFrame` (`milkdropfs.cpp` + `state.cpp`):
 preset → expression contexts → per-frame / per-vertex / waves / shapes → `lactea-render`.
 It behaves like **projectM** (the measurement oracle) where projectM and MD2 differ
-(`Compat::ProjectM`, default); `Compat::MilkDrop2` keeps MD2's behaviour. Source read for
+(`Compat::ProjectM`, default); `Compat::MilkDrop2` keeps MD2's behaviour and `Compat::MilkDrop3` is MD2 plus the MilkDrop 3 deltas (`docs/md3.md`). Source read for
 behaviour, not transliterated: projectM `MilkdropPreset/*` (`PerFrameContext`, `PerPixelMesh`,
 `CustomWaveform`, `CustomShape`, `MilkdropShader`, `FinalComposite`, ...).
 
@@ -32,6 +32,10 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
 * `TextureProvider { fn load(&mut self, name) -> Option<Image{width,height,rgba8}>; fn random_pool(&self) -> Vec<String> }`.
   Names are lowercase, without `sampler_`/`fw_`-style prefixes and file extension. The pool must be
   sorted by name (it is part of the determinism contract). The engine never touches the filesystem.
+  `Compat::MilkDrop3` adds two provided methods: `load_md3_texture(name) -> Option<Media>` (shader textures, MD3 folder
+  order, GIFs) and `load_sprite(path) -> Option<Media>` (a preset sprite's path relative to the MD3 data root);
+  `Media` is a still `Image` or an `AnimatedImage` (full-canvas frames + delays, `lactea::decode_gif`). Hosts index their
+  files with `lactea::MediaFiles` (path arithmetic and search order only, no I/O). See `md3.md`, Sprites.
 * `PresetReport`: `warp`/`comp` `ShaderOutcome {NotUsed, User, Default, Fallback}`, `warnings`,
   `shader_fallbacks`, `unresolved_textures`, `resolved_textures`.
 * `EngineError {Parse, Compile{what,error}, Render}`. On error the previous preset stays active.
@@ -240,7 +244,8 @@ injects the previous `main` image. Frames 0..n-1 still run so megabuf and expres
 ```
 fdrender --preset P --audio WAV --out DIR [--size 640x360] [--mesh 48x36] [--fps 60] [--frames 300]
          [--seed 1] [--texel-offset 0,0] [--stages final,main,warped,blur1,blur2,blur3|all|none]
-         [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2]
+         [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2|md3]
+         [--auto-hard-cut 0..7]
 ```
 
 Same flags and output layout as `oracle/refrender` (`lactea_abi::dump`, producer
@@ -257,6 +262,11 @@ Soft cuts (mirror of `refrender`'s transition flags): `--preset2 P --switch-fram
 feeds the reference's `old_out` / `new_out` to the transition pass. Extra dump stages (not ABI, written like `warpsrc`):
 `old_out`, `new_out` (the two images before the blend), `new_main`, `new_warped`, `new_blur1..3`, `new_warpsrc`,
 `new_vars/` (the incoming preset's, on the frames the blend is drawn). `oracle/transition_pairs.txt` lists the pair set.
+
+`--auto-hard-cut N` sets MilkDrop 3's `AutoHardCutMode` (0 = off, 1..=6 beat-driven instant preset changes, 7 composite-shader
+effects; only with `--compat md3`, ignored with a note otherwise; N > 7 is a usage error). The tool has no preset switching, so the
+cuts of modes 1..=6 are only counted (`"auto_cuts"` in `fdrender.json`, present when the mode is active); mode 7's effects show in
+the rendered frames.
 
 `scripts/fidelity.sh SET [FILTER]` runs free + teacher runs for a whole oracle set and `fdcompare corpus`
 (see the script header); `scripts/fdq.py` (quick PSNR probe)

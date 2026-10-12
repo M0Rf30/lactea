@@ -385,6 +385,49 @@ fn sprite_code_runs_and_done_kills() {
     );
 }
 
+/// Sprite code runs on the engine's MD3 dialect (ns-eel2: `k % 3` of `k = -7` is 1, MilkDrop 2 gives -1), and code
+/// that does not compile is dropped while the sprite keeps drawing (MD3 is silent about it).
+#[test]
+fn sprite_code_runs_on_ns_eel2_and_a_failing_part_is_dropped() {
+    let rig = rig_or_skip!();
+    let (p, _) = provider(Some(red()), None);
+    let mut e = rig.engine(Compat::MilkDrop3, p);
+    e.load_preset(
+        preset("SpriteBurn=0\n", "k = -7;\ndone = k % 3 == 1;").as_bytes(),
+        "ns",
+        Transition::Cut,
+    )
+    .unwrap();
+    assert!(near(rig.centre_at(&mut e, 0.0, 0), [255, 0, 0]));
+    assert!(
+        near(rig.centre_at(&mut e, 0.1, 1), [0, 0, 0]),
+        "done = 1 killed the sprite: ns-eel2 `%`"
+    );
+
+    let (p, _) = provider(Some(red()), None);
+    let mut e = rig.engine(Compat::MilkDrop3, p);
+    let report = e
+        .load_preset(
+            preset("SpriteBurn=0\n", "done = (;").as_bytes(),
+            "bad",
+            Transition::Cut,
+        )
+        .unwrap();
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("sprite code dropped: ")),
+        "{:?}",
+        report.warnings
+    );
+    assert!(near(rig.centre_at(&mut e, 0.0, 0), [255, 0, 0]));
+    assert!(
+        near(rig.centre_at(&mut e, 0.5, 1), [255, 0, 0]),
+        "the sprite stays"
+    );
+}
+
 /// A hand-made `.milk2` whose halves draw nothing. `sprite_header` is the optional `sprite=1` line, `half1` / `half2`
 /// extra lines of the halves, `block` the sprite block after `[PRESET2_END]`.
 fn milk2(sprite_header: &str, half1: &str, half2: &str, block: &str) -> String {

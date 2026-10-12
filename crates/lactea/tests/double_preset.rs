@@ -287,6 +287,30 @@ fn progress_selects_the_roles() {
     }
 }
 
+/// Both halves of a double preset run their equations on ns-eel2, the engine's MD3 dialect: `a % 3` of `a = -7` is
+/// `1` there (MilkDrop 2 gives `-1`), which the warp shader shows as red through `q1`.
+#[test]
+fn both_halves_run_on_ns_eel2() {
+    let half = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=2\nPSVERSION_COMP=0\nfDecay=1\nfWaveAlpha=0\nfGammaAdj=1\n\
+                per_frame_1=a = -7;\nper_frame_2=q1 = a % 3 == 1;\n\
+                warp_1=`shader_body\nwarp_2=`{\nwarp_3=`  ret = float3(q1, 0, 0);\nwarp_4=`}\n";
+    for progress in ["0", "1"] {
+        let mut rig = rig!(Compat::MilkDrop3);
+        let text = milk2(half, half, &side_header(progress));
+        rig.load(&text, "pair.milk2", Transition::Cut).unwrap();
+        let img = rig.run_to(5);
+        assert!(
+            mostly(&img, RED, 0, 64),
+            "progress {progress}: the half shown ran on ns-eel2"
+        );
+    }
+    // the same preset on MilkDrop 2's expression engine stays black
+    let mut rig = rig!(Compat::MilkDrop2);
+    rig.load(half, "plain.milk", Transition::Cut).unwrap();
+    let img = rig.run_to(5);
+    assert!(mostly(&img, [0, 0, 0], 0, 64));
+}
+
 /// Only MilkDrop 3 plays a double preset; the other modes refuse it. A file that is not a double preset loads as the
 /// ordinary `.milk` it is, malformed header numbers and unusable halves are errors, and a failed load leaves the
 /// previous preset alone.

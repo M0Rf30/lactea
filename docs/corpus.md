@@ -78,6 +78,16 @@ scripts/corpus_report.py corpus-s400 --md                    # buckets.md / inde
 scripts/fdregress.py out/report/corpus-s400-before out/report/corpus-s400          # per-stage PSNR regressions > 0.5 dB
 ```
 
+30 frames hide slow drift: a free run needs time to trip the gate. The same 400 presets at 120 frames (`s400-f120`,
+9 GB of references) also give the 30-frame numbers: `scripts/corpus_run.py --keep-cand` keeps the candidate dumps and
+`fdcompare corpus ... --frames 1..30` gates the first 30 frames of them.
+
+```sh
+oracle/run_corpus.sh s400-f120 oracle/corpus_s400_set.txt -j 6 -n 120 -t 300 --resume --share-textures -- \
+    --size 320x180 --stages final,main,warped --vars --textures --texture-dir oracle/build/texpack/textures
+FD_TARGET=target-engine scripts/corpus_run.py s400-f120 --jobs 6 --no-build --fresh
+```
+
 ## Robustness
 
 A panic, signal, hang, wgpu validation error (exit 4) or any `fdrender` exit code other than 0 (ok), 3 (shader fallback)
@@ -88,10 +98,10 @@ Exit code 2 is expected for the 22 presets projectM also rejects with eel syntax
 
 ## Shader translation fallbacks
 
-`fdrender.json` `shader_fallbacks` lists presets whose shader fell back to the default one. Exactly one corpus preset does:
-`m0rf30/M0Rf30 - Nebula Forge.milk` uses `sampler_pw_noise_lq` without declaring it, which projectM accepts; the
-`pw_`/`fw_`/`fc_`/`pc_` built-in samplers should resolve without a declaration (open, listed in `fidelity.md`). No
-wgpu/naga validation error occurs on any translated shader of the corpus (716 comp and 695 warp shader presets).
+`fdrender.json` `shader_fallbacks` lists presets whose shader fell back to the default one. No corpus preset does:
+`m0rf30/M0Rf30 - Nebula Forge.milk` uses `sampler_pw_noise_lq` without declaring it, which projectM accepts, and
+`lactea-hlsl` declares such names implicitly (`wrap.rs::implicit_declarations`). No wgpu/naga validation error occurs on any
+translated shader of the corpus (716 comp and 695 warp shader presets).
 
 ## Tools
 

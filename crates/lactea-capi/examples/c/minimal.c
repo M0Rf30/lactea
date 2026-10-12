@@ -1,10 +1,12 @@
 /* Minimal lactea C API host: renders 10 frames of a preset into a CPU RGBA8 buffer and checks
- * the last frame is not black.
+ * the last frame is not black. It also registers a switch-requested callback (short display time)
+ * that loads the preset again from inside the callback, and checks the callback ran through
+ * lactea_render_to_buffer.
  *
  *   cc minimal.c -I../../include -L<dir with liblactea_capi> -llactea_capi -lm -o minimal
  *   ./minimal [preset.milk [out.ppm]]
  *
- * Exit status: 0 = rendered non-black output, 1 = failure. */
+ * Exit status: 0 = rendered non-black output and the callback ran, 1 = failure. */
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,6 +26,24 @@ static const char *BUILTIN_PRESET =
 static int die(const char *what) {
     fprintf(stderr, "%s: %s\n", what, lactea_last_error());
     return 1;
+}
+
+/* State of the switch-requested callback. */
+typedef struct {
+    LacteaEngine *engine;
+    const char *preset;
+    size_t preset_len;
+    unsigned requests;
+    LacteaStatus reload; /* status of the load made inside the callback */
+} Host;
+
+/* "Pick the next preset": the callback may call back into the handle that fired it. */
+static void on_request(bool is_hard_cut, void *user) {
+    Host *host = user;
+    (void)is_hard_cut;
+    host->requests++;
+    host->reload = lactea_load_preset_ex(host->engine, (const uint8_t *)host->preset,
+                                         host->preset_len, "minimal (reloaded)", 0.0);
 }
 
 int main(int argc, char **argv) {
@@ -51,6 +71,18 @@ int main(int argc, char **argv) {
         preset = file_data;
         preset_len = (size_t)n;
     }
+    LacteaSwitchSettings settings;
+    if (lactea_get_switch_settings(engine, &settings) != LACTEA_STATUS_OK)
+        return die("lactea_get_switch_settings");
+    settings.preset_duration = 0.05; /* a request after about 3 frames */
+    settings.easter_egg = 0.0f;      /* no random part: the request time is exact */
+    if (lactea_set_switch_settings(engine, &settings) != LACTEA_STATUS_OK)
+        return die("lactea_set_switch_settings");
+
+    Host host = {engine, preset, preset_len, 0, LACTEA_STATUS_OK};
+    if (lactea_set_switch_requested_callback(engine, on_request, &host) != LACTEA_STATUS_OK)
+        return die("lactea_set_switch_requested_callback");
+
     if (lactea_load_preset(engine, (const uint8_t *)preset, preset_len, "minimal") != LACTEA_STATUS_OK)
         return die("lactea_load_preset");
 
@@ -77,6 +109,7 @@ int main(int argc, char **argv) {
     unsigned long long sum = 0;
     for (size_t i = 0; i < bytes; i += 4) sum += pixels[i] + pixels[i + 1] + pixels[i + 2];
     printf("sum of RGB over the last frame: %llu\n", sum);
+    printf("switch requests seen by the callback: %u\n", host.requests);
 
     if (argc > 2) {
         FILE *f = fopen(argv[2], "wb");
@@ -93,6 +126,14 @@ int main(int argc, char **argv) {
     lactea_destroy(engine);
     if (sum == 0) {
         fprintf(stderr, "output is black\n");
+        return 1;
+    }
+    if (host.requests == 0) {
+        fprintf(stderr, "the switch-requested callback never ran under lactea_render_to_buffer\n");
+        return 1;
+    }
+    if (host.reload != LACTEA_STATUS_OK) {
+        fprintf(stderr, "lactea_load_preset_ex inside the callback failed (%d)\n", (int)host.reload);
         return 1;
     }
     return 0;

@@ -1286,10 +1286,19 @@ impl Renderer {
     /// engine needs to run two presets at once while they transition. Cheaper than
     /// [`Renderer::new`] (no pipeline compilation, no noise generation), but it still allocates the render targets.
     pub fn sibling(&self) -> Self {
+        self.sibling_with_compat(self.cfg.compat)
+    }
+
+    /// [`Renderer::sibling`] that follows another compatibility mode: same size, mesh, stroke setting, shared
+    /// pipelines and noise (neither depends on the mode), but its own images, shaders and textures, and the rules of
+    /// `compat`. What the engine builds into when an automatically selected mode changes.
+    pub fn sibling_with_compat(&self, compat: Compat) -> Self {
+        let mut cfg = self.cfg.clone();
+        cfg.compat = compat;
         let mut r = Self::assemble(
             &self.device,
             &self.queue,
-            self.cfg.clone(),
+            cfg,
             self.geom.clone(),
             std::sync::Arc::clone(&self.pipes),
             Some(self.noise.clone()),

@@ -90,30 +90,31 @@ struct Args {
     /// use the noise textures of an oracle dump directory (free run)
     #[arg(long)]
     inject_noise: Option<PathBuf>,
-    /// projectm (default) | md2 | md3
-    #[arg(long, default_value = "projectm")]
-    compat: String,
+    /// projectm (default) | md2 | md3 (aliases milkdrop2, milkdrop3)
+    #[arg(long, default_value = "projectm", value_parser = parse_compat)]
+    compat: Compat,
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
-    #[arg(long)]
-    stroke: Option<String>,
+    #[arg(long, value_parser = parse_stroke)]
+    stroke: Option<lactea_render::StrokeRaster>,
     /// MilkDrop 3 (`--compat md3`): a fixed mouse for every frame, `X,Y[,down]` with X, Y the cursor as fractions of
     /// the image (0..1, origin top left); `down` presses the left button. Default: the cursor is outside the window.
-    #[arg(long, value_name = "X,Y[,down]")]
-    mouse: Option<String>,
+    #[arg(long, value_name = "X,Y[,down]", value_parser = parse_mouse)]
+    mouse: Option<MouseState>,
     /// MilkDrop 3 `VolumeSensitivity` (`--compat md3` only): linear gain on the 8-bit quantised audio input.
     #[arg(long, default_value_t = 1.0)]
     volume_sensitivity: f32,
     /// second preset: replaced at --switch-frame by a soft cut of --soft-cut seconds
     #[arg(long)]
     preset2: Option<PathBuf>,
-    #[arg(long, default_value_t = 0)]
-    switch_frame: u32,
-    /// soft cut duration in seconds (projectM's default is 3)
-    #[arg(long, default_value_t = 3.0)]
-    soft_cut: f64,
-    /// 1 = the second preset starts from black, 0 = from the first preset's image (projectM default)
-    #[arg(long, default_value_t = 0)]
-    start_clean: u8,
+    /// frame at which --preset2 replaces the first preset (default 0; needs --preset2)
+    #[arg(long)]
+    switch_frame: Option<u32>,
+    /// soft cut duration in seconds (default 3 like projectM; needs --preset2)
+    #[arg(long)]
+    soft_cut: Option<f64>,
+    /// 1 = the second preset starts from black, 0 = from the first preset's image (projectM default; needs --preset2)
+    #[arg(long)]
+    start_clean: Option<u8>,
     /// force the transition shader (0 circle, 1 plasma, 2 simple blend, 3 sweep, 4 warp, 5 zoom blur)
     #[arg(long)]
     transition_shader: Option<u32>,
@@ -132,25 +133,48 @@ struct Args {
 }
 
 /// `--mouse X,Y[,down]`.
-fn parse_mouse(s: &str) -> Result<MouseState> {
+fn parse_mouse(s: &str) -> Result<MouseState, String> {
     let mut it = s.split(',');
-    let mut coord = |what: &str| -> Result<f32> {
+    let mut coord = |what: &str| -> Result<f32, String> {
         it.next()
-            .ok_or_else(|| anyhow!("--mouse: expected X,Y[,down], got {s:?}"))?
+            .ok_or_else(|| format!("expected X,Y[,down], got {s:?}"))?
             .trim()
             .parse::<f32>()
-            .map_err(|e| anyhow!("--mouse: {what}: {e}"))
+            .map_err(|e| format!("{what}: {e}"))
     };
     let (x, y) = (coord("X")?, coord("Y")?);
     let left_down = match it.next().map(str::trim) {
         None => false,
         Some("down") => true,
-        Some(o) => bail!("--mouse: the third field is `down`, got {o:?}"),
+        Some(o) => return Err(format!("the third field is `down`, got {o:?}")),
     };
     Ok(MouseState {
         position: Some([x, y]),
         left_down,
     })
+}
+
+/// `--compat`: `projectm`, `md2`/`milkdrop2`, `md3`/`milkdrop3`.
+fn parse_compat(s: &str) -> Result<Compat, String> {
+    match s {
+        "projectm" => Ok(Compat::ProjectM),
+        "md2" | "milkdrop2" => Ok(Compat::MilkDrop2),
+        "md3" | "milkdrop3" => Ok(Compat::MilkDrop3),
+        o => Err(format!(
+            "expected projectm|md2|md3 (or milkdrop2|milkdrop3), got {o:?}"
+        )),
+    }
+}
+
+/// `--stroke`: `native`, `emulated` or `quads`.
+fn parse_stroke(s: &str) -> Result<lactea_render::StrokeRaster, String> {
+    use lactea_render::StrokeRaster as S;
+    match s {
+        "native" => Ok(S::Native),
+        "emulated" => Ok(S::Emulated),
+        "quads" => Ok(S::Quads),
+        o => Err(format!("expected native|emulated|quads, got {o:?}")),
+    }
 }
 
 fn parse_pair<T: std::str::FromStr>(s: &str, sep: char, what: &str) -> Result<(T, T)> {
@@ -261,9 +285,45 @@ fn write_extra(out: &Path, name: &str, n: u32, w: u32, h: u32, rgba: Vec<u8>) ->
     .save_png(dir.join(format!("{n:05}.png")))?;
     Ok(())
 }
+/// `--size WxH`; the `x` is case-insensitive like the app's `--size`.
+fn parse_size(s: &str) -> Result<(u32, u32)> {
+    parse_pair(&s.replace('X', "x"), 'x', "--size")
+}
+
+/// Cross-flag checks that must fail before `run` creates the output directory.
+fn validate(args: &Args) -> Result<()> {
+    if let Some(d) = &args.texture_dir
+        && !d.is_dir()
+    {
+        bail!("--texture-dir: {} is not a directory", d.display());
+    }
+    if args.preset2.is_some() {
+        let at = args.switch_frame.unwrap_or(0);
+        if at >= args.frames {
+            bail!(
+                "--switch-frame {at} is not below --frames {}: the second preset would never load",
+                args.frames
+            );
+        }
+    } else {
+        let orphan = [
+            ("--switch-frame", args.switch_frame.is_some()),
+            ("--soft-cut", args.soft_cut.is_some()),
+            ("--start-clean", args.start_clean.is_some()),
+            ("--transition-shader", args.transition_shader.is_some()),
+            ("--transition-static", args.transition_static.is_some()),
+        ]
+        .into_iter()
+        .find(|(_, given)| *given);
+        if let Some((flag, _)) = orphan {
+            bail!("{flag} needs --preset2");
+        }
+    }
+    Ok(())
+}
 
 fn run(args: &Args) -> Result<i32> {
-    let (width, height): (u32, u32) = parse_pair(&args.size, 'x', "--size")?;
+    let (width, height) = parse_size(&args.size)?;
     let (mx, my): (u32, u32) = parse_pair(&args.mesh, 'x', "--mesh")?;
     if width == 0 || height == 0 {
         anyhow::bail!("--size: width and height must be >= 1 (got {width}x{height})");
@@ -275,12 +335,7 @@ fn run(args: &Args) -> Result<i32> {
     let stages = parse_stages(&args.stages)?;
     // non-ABI extra stage of the oracle: previous main + this frame's motion vectors
     let want_warpsrc = args.stages.split(',').any(|t| t.trim() == "warpsrc");
-    let compat = match args.compat.as_str() {
-        "projectm" => Compat::ProjectM,
-        "md2" => Compat::MilkDrop2,
-        "md3" => Compat::MilkDrop3,
-        o => bail!("--compat: expected projectm|md2|md3, got {o:?}"),
-    };
+    let compat = args.compat;
     if args.auto_hard_cut > lactea::auto_cut::AUTO_HARD_CUT_MODES {
         bail!(
             "--auto-hard-cut: expected 0..={}, got {}",
@@ -386,7 +441,7 @@ fn run(args: &Args) -> Result<i32> {
             sample_rate: audio.rate,
             fps: args.fps,
             preset_duration: 1e9,
-            start_clean: args.start_clean != 0,
+            start_clean: args.start_clean.unwrap_or(0) != 0,
             auto_hard_cut_mode: args.auto_hard_cut,
             volume_sensitivity: args.volume_sensitivity,
             ..EngineConfig::default()
@@ -414,16 +469,17 @@ fn run(args: &Args) -> Result<i32> {
         .max()
         .unwrap_or(0);
     engine.renderer_mut().set_min_blur_levels(blur_needed);
-    if let Some(s) = &args.stroke {
-        engine.renderer_mut().set_stroke_raster(match s.as_str() {
-            "native" => lactea_render::StrokeRaster::Native,
-            "emulated" => lactea_render::StrokeRaster::Emulated,
-            "quads" => lactea_render::StrokeRaster::Quads,
-            o => bail!("--stroke: expected native|emulated|quads, got {o:?}"),
-        });
+    if let Some(s) = args.stroke {
+        engine.renderer_mut().set_stroke_raster(s);
     }
-    if let Some(m) = &args.mouse {
-        engine.set_mouse(parse_mouse(m)?);
+    if args.volume_sensitivity != 1.0 && compat != Compat::MilkDrop3 {
+        eprintln!("fdrender: --volume-sensitivity needs --compat md3, ignored");
+    }
+    if let Some(m) = args.mouse {
+        if compat != Compat::MilkDrop3 {
+            eprintln!("fdrender: --mouse needs --compat md3, ignored");
+        }
+        engine.set_mouse(m);
     }
 
     if let Some(r) = &reference {
@@ -510,16 +566,18 @@ fn run(args: &Args) -> Result<i32> {
         }
 
         // preset switch (refrender: top of the iteration, before PCM / frame time)
-        if let (Some(p2), Some(p2_path), true) =
-            (&preset2_bytes, &args.preset2, n == args.switch_frame)
-        {
+        if let (Some(p2), Some(p2_path), true) = (
+            &preset2_bytes,
+            &args.preset2,
+            n == args.switch_frame.unwrap_or(0),
+        ) {
             engine.force_next_transition(forced_shader, forced_static);
             let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let load2 = engine.load_preset(
                 p2,
                 &p2_path.display().to_string(),
                 Transition::Soft {
-                    seconds: args.soft_cut,
+                    seconds: args.soft_cut.unwrap_or(3.0),
                 },
             );
             if let Some(e) = pollster::block_on(scope.pop()) {
@@ -779,12 +837,111 @@ fn write_info(dir: &Path, v: serde_json::Value) -> Result<()> {
 }
 
 fn main() {
-    let args = Args::parse();
-    match run(&args) {
+    let args = match Args::try_parse() {
+        Ok(a) => a,
+        Err(e) => {
+            // Exit 2 is reserved for preset-load failure; usage errors are 1, `--help`/`--version` 0.
+            let code = if e.use_stderr() { 1 } else { 0 };
+            let _ = e.print();
+            std::process::exit(code);
+        }
+    };
+    match validate(&args).and_then(|()| run(&args)) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("fdrender: {e:#}");
             std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
+        let mut v = vec![
+            "fdrender", "--preset", "p.milk", "--audio", "a.wav", "--out", "o",
+        ];
+        v.extend_from_slice(extra);
+        Args::try_parse_from(v)
+    }
+
+    #[test]
+    fn bad_enum_flags_fail_in_clap() {
+        assert!(parse(&["--compat", "nope"]).is_err());
+        assert!(parse(&["--stroke", "nope"]).is_err());
+        assert!(parse(&["--mouse", "2,2,up"]).is_err());
+        assert!(parse(&["--mouse", "0.5,0.5,down"]).is_ok());
+    }
+
+    #[test]
+    fn clap_usage_error_uses_stderr_help_does_not() {
+        assert!(parse(&["--bogus"]).unwrap_err().use_stderr());
+        let help = Args::try_parse_from(["fdrender", "--help"]).unwrap_err();
+        assert!(!help.use_stderr());
+    }
+
+    #[test]
+    fn compat_aliases() {
+        for (s, c) in [
+            ("projectm", Compat::ProjectM),
+            ("md2", Compat::MilkDrop2),
+            ("milkdrop2", Compat::MilkDrop2),
+            ("md3", Compat::MilkDrop3),
+            ("milkdrop3", Compat::MilkDrop3),
+        ] {
+            assert_eq!(parse(&["--compat", s]).unwrap().compat, c);
+        }
+    }
+
+    #[test]
+    fn size_accepts_uppercase_x() {
+        assert_eq!(parse_size("640X360").unwrap(), (640, 360));
+        assert_eq!(parse_size("640x360").unwrap(), (640, 360));
+        assert!(parse_size("640").is_err());
+    }
+
+    #[test]
+    fn missing_texture_dir_is_an_error() {
+        let a = parse(&["--texture-dir", "/nonexistent/lactea-tex"]).unwrap();
+        assert!(validate(&a).is_err());
+    }
+
+    #[test]
+    fn switch_frame_must_be_inside_the_run() {
+        let a = parse(&[
+            "--preset2",
+            "q.milk",
+            "--switch-frame",
+            "10",
+            "--frames",
+            "2",
+        ])
+        .unwrap();
+        assert!(validate(&a).is_err());
+        let a = parse(&[
+            "--preset2",
+            "q.milk",
+            "--switch-frame",
+            "1",
+            "--frames",
+            "2",
+        ])
+        .unwrap();
+        assert!(validate(&a).is_ok());
+    }
+
+    #[test]
+    fn transition_flags_need_preset2() {
+        for flag in [
+            &["--switch-frame", "1"][..],
+            &["--soft-cut", "1"],
+            &["--start-clean", "1"],
+            &["--transition-shader", "1"],
+            &["--transition-static", "1,2,3,4"],
+        ] {
+            assert!(validate(&parse(flag).unwrap()).is_err(), "{flag:?}");
         }
     }
 }

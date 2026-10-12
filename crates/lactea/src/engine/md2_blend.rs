@@ -1055,8 +1055,10 @@ pub(super) fn build_blend_frame(
     let (uv, vert_alpha) = blend_mesh(&uv_new, &uv_old, &m.pattern, m.progress);
 
     let mut fi = frame_head(new, cx, &base_new, Vec::new(), uv, anim, false, Some(snap));
-    // MilkDrop 3 (`DisableBox`): no ob / ib borders while a blend is running
-    fi.borders.hidden |= cx.cfg.md3_disable_box && cx.cfg.compat.rules().md3_border_gate;
+    // MilkDrop 3: no ob / ib borders while a blend is running (`DisableBox`), and never while a `.milk2` is
+    // loaded (`fromMilk2`)
+    fi.borders.hidden |=
+        (cx.cfg.md3_disable_box && cx.cfg.compat.rules().md3_border_gate) || m.no_borders;
 
     // ShowToUser_NoShaders: the video echo flips its orientation / fades across the blend
     if base_new.video_echo_alpha > 0.01
@@ -1085,11 +1087,6 @@ pub(super) fn build_blend_frame(
     wave_alpha.resize(fi.waves.len(), am_old);
 
     finish_frame(new, cx, forced, new_last, &mut fi);
-    if m.no_borders {
-        // MD3 never draws the outer / inner borders while a `.milk2` is loaded (`fromMilk2`)
-        fi.borders.ob_rgba[3] = 0.0;
-        fi.borders.ib_rgba[3] = 0.0;
-    }
 
     // ---- the old state's shader-pass inputs: its own q / blur / random state; `m_rand_frame` is shared ----------
     let shared_rand_frame = fi

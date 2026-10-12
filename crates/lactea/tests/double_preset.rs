@@ -321,7 +321,8 @@ fn only_milk_drop_3_plays_double_presets() {
     assert_eq!(rig.engine.preset_name(), Some("g.milk"));
 }
 
-/// Borders (`ob_*` / `ib_*`) are never drawn while a `.milk2` is loaded; the same presets as plain presets draw them.
+/// Borders (`ob_*` / `ib_*`) are never drawn while a `.milk2` is loaded, even with `DisableBox` off (which only
+/// gates ordinary blends); the same presets as plain presets draw them.
 #[test]
 fn borders_are_never_drawn_for_a_double_preset() {
     let bordered = |r: f32| {
@@ -337,7 +338,7 @@ fn borders_are_never_drawn_for_a_double_preset() {
         pure_in(&plain, RED, 0, 64).0 > 1000,
         "the plain preset draws its outer border"
     );
-    let mut rig = rig!(Compat::MilkDrop3);
+    let mut rig = rig!(@ Rig::with(EngineConfig { md3_disable_box: false, ..cfg() }));
     let text = milk2(&bordered(1.0), &bordered(0.5), &side_header("0.5"));
     rig.load(&text, "pair.milk2", Transition::Cut).unwrap();
     let img = rig.run_to(10);

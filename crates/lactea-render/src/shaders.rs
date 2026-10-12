@@ -30,17 +30,98 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) diffuse: vec4<f32>,
 /// `pow` / `sin` / `cos` and its multiply-add fusion produce the same UVs as projectM's GL driver.
 /// `group` is the bind group of [`WarpVsUniforms`]. Output layout = [`MESH_VS`] (`VsOut`).
 pub fn warp_vs(group: u32) -> String {
-    warp_vs_src(group, false)
+    warp_vs_src(group, false, 0)
 }
 
 /// The same vertex stage, but every vertex is drawn as a point into texel `(i % (gx+1), i / (gx+1))` of a
 /// `(gx+1) x (gy+1)` target (`wu.diffuse.xy` = `(gx+1, gy+1)`), with the fragment stage `fs_probe` writing
 /// `uv.xy`: reads the GPU's own per-vertex UVs back (what projectM's `RG16F` UV map interpolates).
 pub fn warp_uv_readback(group: u32) -> String {
-    warp_vs_src(group, true)
+    warp_vs_src(group, true, 0)
 }
 
-fn warp_vs_src(group: u32, probe: bool) -> String {
+/// `lactea_abi::WGSL_COMMON` followed by every fold function: the declarations a fold vertex stage shares with the
+/// user fragment shader (`mu` / `mx` / `pu`, `fold_k`).
+fn fold_prelude(folds: &[String]) -> String {
+    let mut s = String::from(lactea_abi::WGSL_COMMON);
+    for f in folds {
+        s.push('\n');
+        s.push_str(f);
+    }
+    s.push('\n');
+    s
+}
+
+/// `@location(3 + j) fold{j}: vec4<f32>,` members of a vertex output struct, `ceil(n / 4)` of them.
+fn fold_members(n: usize) -> String {
+    (0..n.div_ceil(4))
+        .map(|j| format!("    @location({}) fold{j}: vec4<f32>,\n", 3 + j))
+        .collect()
+}
+
+/// Statements filling `o.fold{j}` from `o.uv`, `o.rad_ang`, `o.diffuse`: component `k % 4` of `fold{k / 4}` is
+/// `fold_k(..)`, the unused components of the last vec4 are 0.
+fn fold_stmts(n: usize) -> String {
+    let mut s = String::new();
+    for j in 0..n.div_ceil(4) {
+        let comps: Vec<String> = (0..4)
+            .map(|c| {
+                let k = 4 * j + c;
+                if k < n {
+                    format!("fold_{k}(o.uv, o.rad_ang, o.diffuse)")
+                } else {
+                    "0.0".into()
+                }
+            })
+            .collect();
+        s.push_str(&format!(
+            "    o.fold{j} = vec4<f32>({});\n",
+            comps.join(", ")
+        ));
+    }
+    s
+}
+
+/// [`MESH_VS`] plus the fold varyings: module text = `WGSL_COMMON`, the fold functions and a vertex stage with the
+/// same attributes, entry name and varyings 0..2 whose output also carries `fold{j}` (locations `3 + j`).
+pub fn mesh_vs_folds(folds: &[String]) -> String {
+    format!(
+        r#"{prelude}
+struct VOut {{
+    @builtin(position) position: vec4<f32>,
+    @location(0) diffuse: vec4<f32>,
+    @location(1) uv: vec4<f32>,
+    @location(2) rad_ang: vec2<f32>,
+{members}}};
+@vertex
+fn vs_main(@location(0) pos: vec2<f32>, @location(1) diffuse: vec4<f32>,
+           @location(2) uv: vec4<f32>, @location(3) rad_ang: vec2<f32>) -> VOut {{
+    var o: VOut;
+    o.position = vec4<f32>(pos, 0.0, 1.0);
+    o.diffuse = diffuse;
+    o.uv = uv;
+    o.rad_ang = rad_ang;
+{stmts}    return o;
+}}
+"#,
+        prelude = fold_prelude(folds),
+        members = fold_members(folds.len()),
+        stmts = fold_stmts(folds.len()),
+    )
+}
+
+/// [`warp_vs`] plus the fold varyings (see [`mesh_vs_folds`]); the warp math is the same text. `group` must not be
+/// 0 or 1, which `WGSL_COMMON` uses.
+pub fn warp_vs_folds(group: u32, folds: &[String]) -> String {
+    format!(
+        "{}{}",
+        fold_prelude(folds),
+        warp_vs_src(group, false, folds.len())
+    )
+}
+
+/// `n_folds` extra `fold{j}` outputs (see [`warp_vs_folds`]); the module must then declare the fold functions.
+fn warp_vs_src(group: u32, probe: bool, n_folds: usize) -> String {
     let (vid_param, position) = if probe {
         (
             ", @builtin(vertex_index) vid: u32",
@@ -79,7 +160,7 @@ struct VOut {{
     @location(0) diffuse: vec4<f32>,
     @location(1) uv: vec4<f32>,
     @location(2) rad_ang: vec2<f32>,
-}};
+{members}}};
 
 @vertex
 fn vs_main(@location(0) pos: vec2<f32>, @location(1) rad_ang: vec2<f32>, @location(2) transforms: vec4<f32>,
@@ -139,9 +220,11 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) rad_ang: vec2<f32>, @locati
     o.diffuse = wu.diffuse;
     o.uv = vec4<f32>(u, v, uv_original);
     o.rad_ang = rad_ang;
-    return o;
+{stmts}    return o;
 }}
-{fs}"#
+{fs}"#,
+        members = fold_members(n_folds),
+        stmts = fold_stmts(n_folds),
     )
 }
 

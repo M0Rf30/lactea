@@ -83,6 +83,12 @@ render_one() {
   t1=$(date +%s.%N)
   [ $rc -eq 0 ] || [ $rc -eq 3 ] && touch "$dir/.complete"
   printf '%s\t%s\t%s\t%s\n' "$stem" "$rc" "$(echo "$t1 - $t0" | bc -l | xargs printf '%.1f')" "$preset" > "$OUT/.result.$stem"
+  # 127 = the harness did not start (missing binary or shared library): every other preset would
+  # fail the same way. xargs stops launching jobs when a worker exits 255.
+  if [ "$rc" -eq 127 ]; then
+    echo "[run_corpus] refrender exited 127 (loader error?), aborting; see $OUT/$stem.log" >&2
+    return 255
+  fi
 }
 export -f render_one
 export OUT BIN AUDIO FRAMES RESUME TMO
@@ -96,6 +102,10 @@ render_wrapper() {
 export -f render_wrapper
 
 tr '\t' '\n' < "$JOBLIST" | xargs -d '\n' -n 2 -P "$JOBS" bash -c 'render_wrapper "$0" "$1"'
+if [ "${PIPESTATUS[1]}" -ne 0 ]; then
+  echo "[run_corpus] aborted: a render job failed to start" >&2
+  exit 1
+fi
 
 printf 'stem\texit\tshader_errors\tframes\tseconds\tpreset\n' > "$OUT/summary.tsv"
 while IFS=$'\t' read -r p stem; do

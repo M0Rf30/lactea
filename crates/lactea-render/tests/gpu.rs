@@ -385,6 +385,7 @@ fn first_frame_overlays_are_lost_only_with_native_blur() {
         CompiledShader {
             wgsl,
             interface: iface,
+            folds: Vec::new(),
         }
     };
 
@@ -590,6 +591,7 @@ fn user_warp_shader_and_blur_levels() {
     let bad = CompiledShader {
         wgsl: "this is not wgsl".into(),
         interface: ShaderInterface::default(),
+        folds: Vec::new(),
     };
     assert!(r.set_warp_shader(Some(bad)).is_err());
 
@@ -611,6 +613,7 @@ fn user_warp_shader_and_blur_levels() {
     r.set_warp_shader(Some(CompiledShader {
         wgsl,
         interface: iface,
+        folds: Vec::new(),
     }))
     .unwrap();
     let img = gradient(w, h);
@@ -661,6 +664,7 @@ fn user_warp_shader_and_blur_levels() {
     r.set_comp_shader(Some(CompiledShader {
         wgsl,
         interface: iface,
+        folds: Vec::new(),
     }))
     .unwrap();
     assert_eq!(r.blur_levels_required(), 3);
@@ -808,6 +812,7 @@ fn projectm_samplers_read_level_zero_only() {
         r.set_comp_shader(Some(CompiledShader {
             wgsl,
             interface: iface,
+            folds: Vec::new(),
         }))
         .unwrap();
         render(&mut r, &device, &queue, &quiet_input(), &view);
@@ -852,6 +857,7 @@ fn gpu_warp_vertex_stage_matches_cpu_uv() {
             r.set_warp_shader(Some(CompiledShader {
                 wgsl,
                 interface: iface,
+                folds: Vec::new(),
             }))
             .unwrap();
         }
@@ -949,4 +955,101 @@ fn gpu_warp_frames_do_not_need_the_cpu_grid() {
         r.read_stage(Stage::Main).unwrap().2
     };
     assert_eq!(run(true), run(false));
+}
+
+/// `CompiledShader::folds`: the vertex stage evaluates `fold_k` per vertex and the fragment stage reads the
+/// interpolated result as `in.fold0` (mesh pipeline = composite pass, GPU warp pipeline = warp pass). `fold_0` and
+/// `fold_1` are linear in the vertex varyings, so the interpolated value must equal the same expression evaluated
+/// from the interpolated varyings (up to 8-bit rounding), and it must actually vary (not be the zero fill).
+#[test]
+fn gl_varying_fold_reaches_fragment_stage() {
+    let (device, queue) = need_gpu!();
+    let (w, h) = (64, 48);
+    let folds = vec![
+        "fn fold_0(vs_uv: vec4<f32>, vs_rad_ang: vec2<f32>, vs_diffuse: vec4<f32>) -> f32 {\n\
+         return vs_uv.y + mu.q[0].x * 2.0;\n}"
+            .to_string(),
+        "fn fold_1(vs_uv: vec4<f32>, vs_rad_ang: vec2<f32>, vs_diffuse: vec4<f32>) -> f32 {\n\
+         return vs_uv.x * 3.0 - vs_rad_ang.x;\n}"
+            .to_string(),
+    ];
+    // `VsOut` of the fragment shader carries the fold varyings after `rad_ang`
+    let tail = "    @location(2) rad_ang: vec2<f32>,\n};";
+    assert!(WGSL_COMMON.contains(tail));
+    let common = WGSL_COMMON.replace(
+        tail,
+        "    @location(2) rad_ang: vec2<f32>,\n    @location(3) fold0: vec4<f32>,\n};",
+    );
+    // r = fold 0, g = fold 1, b = the expression of fold `which` evaluated on the interpolated varyings
+    let shader = |which: usize| {
+        let expect = ["in.uv.y + mu.q[0].x * 2.0", "in.uv.x * 3.0 - in.rad_ang.x"][which];
+        CompiledShader {
+            wgsl: format!(
+                "{common}\n@fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n\
+                 return vec4<f32>(in.fold0.x * 0.2 + 0.3, in.fold0.y * 0.2 + 0.3, \
+                 ({expect}) * 0.2 + 0.3, 1.0);\n}}\n"
+            ),
+            interface: ShaderInterface::default(),
+            folds: folds.clone(),
+        }
+    };
+    let run = |warp: bool, which: usize| -> Vec<u8> {
+        let mut r = Renderer::new(&device, &queue, cfg(w, h)).unwrap();
+        let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
+        let mut f = quiet_input();
+        f.q[0] = -0.2;
+        if warp {
+            r.set_warp_shader(Some(shader(which))).unwrap();
+            let g = r.mesh_geometry().clone();
+            let anim = lactea_render::warp_mesh::WarpAnim::projectm(0.7, 1.0, 1.0);
+            let vars: Vec<lactea_render::warp_mesh::VertexVars> = (0..g.vertex_count())
+                .map(|i| lactea_render::warp_mesh::VertexVars {
+                    zoom: 1.0 + 0.1 * (i % 5) as f32 / 5.0,
+                    zoomexp: 1.3,
+                    rot: 0.15,
+                    warp: 0.8,
+                    cx: 0.45,
+                    cy: 0.55,
+                    dx: 0.02,
+                    dy: -0.03,
+                    sx: 1.02,
+                    sy: 0.98,
+                })
+                .collect();
+            f.warp_uv = Some(
+                vars.iter()
+                    .enumerate()
+                    .map(|(i, v)| {
+                        lactea_render::warp_mesh::warp_vertex_uv(&g, i, v, &anim, [0.0; 2])
+                    })
+                    .collect(),
+            );
+            f.warp_gpu = Some(lactea_render::WarpGpu { vars, anim });
+        } else {
+            r.set_warp_shader(None).unwrap();
+            r.set_comp_shader(Some(shader(which))).unwrap();
+        }
+        render(&mut r, &device, &queue, &f, &view);
+        let stage = if warp { Stage::Warped } else { Stage::Final };
+        r.read_stage(stage).unwrap().2
+    };
+    for warp in [false, true] {
+        for which in 0..2 {
+            let px = run(warp, which);
+            let (mut lo, mut hi) = (255u8, 0u8);
+            for p in px.chunks_exact(4) {
+                let (fold, expect) = (p[which], p[2]);
+                assert!(
+                    fold.abs_diff(expect) <= 2,
+                    "warp={warp} fold {which}: interpolated {fold} vs {expect} from the varyings"
+                );
+                lo = lo.min(fold);
+                hi = hi.max(fold);
+            }
+            assert!(
+                hi - lo > 20,
+                "warp={warp} fold {which}: constant output {lo}..{hi}"
+            );
+        }
+    }
 }

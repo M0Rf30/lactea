@@ -19,8 +19,10 @@ by `gen_audio.py`), a fixed seed and frame time `n / fps`.
 | **stepc** | as step, but the composite only is fed the reference's `main` |
 | **free** | Lactea runs on its own (only the reference's noise textures are injected); shows accumulated drift |
 
-**Gate** per frame and stage: PSNR ≥ 40 dB and SSIM ≥ 0.98 (SSIM on Rec.601 luma). Frame 0 is
-included. A preset passes a mode if every stage of every frame passes.
+**Gate** per frame and stage: PSNR ≥ 40 dB and SSIM ≥ 0.98 (SSIM on Rec.601 luma). The corpus sets (`corpus-s400`,
+`s400-f120`, the full collection) gate frames 1.. and compare frame 0 separately (the oracle's frame 0 depends on its
+blur forcing, `docs/corpus.md`); `starter` gates frame 0 too. A preset passes a mode if every gated stage of every
+frame passes. Numbers below always carry their frame count: a free run needs time to trip the gate.
 
 ## Current numbers
 
@@ -30,9 +32,18 @@ projectM and 3 have HLSL that projectM cannot parse (it renders its default shad
 
 | set | step | free |
 |---|---|---|
-| starter (36 presets, 640x360, 120 frames) | 36/36 | 36/36 |
-| corpus-s400 (seeded random 400, 320x180, 30 frames) | 398/400 | 398/400 |
-| full collection (4169 comparable, 320x180, 30 frames) | 4162/4169 (99.8 %) | 4148/4169 (99.5 %) |
+| starter (36 presets, 640x360, 120 frames, frame 0 included) | 36/36 | 36/36 |
+| corpus-s400 (seeded random 400, 320x180, 30 frames) | 399/400 | 399/400 |
+| s400-f120 (the same 400, 120 frames) | 399/400 | 397/400 |
+| full collection (4169 comparable, 320x180, 30 frames; last run before the GL varying fold and shape fill ties) | 4162/4169 (99.8 %) | 4148/4169 (99.5 %) |
+
+The 30-frame gate hides drift: before the GL varying fold and shape fill ties `s400-f120` gave free 394/400 against
+398/400 at 30 frames (four presets tripped between frames 76 and 102: `Geiss - Cauldron - Tendrils`, `martin - baby one
+more time`, Fractopia, `had to cum that - jaben`). About 1 % of comparable presets fail free only after 30 frames, so the
+full-collection free figure (30 frames) overstates the long-run pass rate; the full collection has not been rerun at 120
+frames. Last change (`fix/fidelity`), corpus-s400 before -> after: step 120 frames 398 -> 399, free 120 frames 394 -> 397,
+step 30 frames 398 -> 399, free 30 frames 398 -> 399; presets with every stage minimum >= 90 dB (step / free, 120 frames)
+299 -> 303 / 283 -> 287; starter 22 -> 24 / 21 -> 23. No stage minimum fell by more than 0.5 dB in any set.
 
 Component checks:
 
@@ -52,13 +63,15 @@ Known and not reproduced, with the reason:
 
 | item | cause |
 |---|---|
-| `Flexi + Martin - dive` (two presets, step `final` ~29 dB at frame 7) | Mesa's `nir_opt_varyings` moves `uv.y + (h - 1)` into the vertex shader for projectM's GL pipeline; wgpu/ANV interpolates `uv.y` and adds in the fragment shader. The ~1e-7 difference is amplified by a division by ~0 on the horizon row |
-| `flexi + cope - i blew you a soap bubble now what...` | two to three isolated `main` pixels per frame differ by up to 226 (additive textured 100-gon fans); not root-caused (fan fill ties at snapped vertices or nearest texel boundaries) |
-| nine drift-only presets (step passes, free trips the gate after 10-60 dB for 10-20 frames) | one-ulp warp-shader differences growing in the feedback loop; likely the same Mesa compile difference as `dive` |
+| `flexi + cope - i blew you a soap bubble now what...` | two to three isolated `main` pixels per frame differ by up to 226 (additive textured 100-gon fans); not root-caused (nearest texel boundaries; the vertex nudge of flat fills is not applied to textured fills, it makes `Zylot - Star Ornament` worse) |
+| `Rovastar - Fractopia (Upspoken Mix)_Phat_Speak_When_Spoken_2` (free fails at frame 91 of 120) | one `main` pixel off at step frame 90 from shape 2, a flat hexagon without a horizontal edge: slanted-edge or vertex-snap tie, mechanism open |
+| `had to cum that - jaben` (free fails at frame 102 of 120) | warp-pass one-level ties amplified by the feedback loop; not isolated |
+| the other drift-only presets of the last full run | the 30-frame full run listed 7 step and 21 free failures; only dive ×2, the soap bubble and the three above are attributed, the names of the rest were not recorded: keep `buckets.md` of the next full run |
+| `mult(x, y) + c` and `x / literal + c` | the oracle's compiler contracts them into a multiply-add (`ffma`, the latter also moved into the vertex stage); not emulated (probes `hp_m04`, `hp_e22` differ with and without the fold) |
 | reads of undefined shader variables that are not float-ALU-only | the reference uses whatever the GPU register held |
 | three presets whose shaders projectM fails to parse (`mindblob`, `[dylan] cube in a room` ×2) | the reference renders its default shader; Lactea translates the real one |
 | slanted lines or dots on a 1/256-px rounding tie | validated against axis-aligned probes and random wobbling-wave probes; single-pixel `main` differences remain possible |
-| shader fallback `sampler_pw_noise_lq` on `m0rf30/M0Rf30 - Nebula Forge.milk` | known engine gap, the preset renders with the fallback shader |
+| `rot_*` shader matrices | projectM computes the angle in f32 with `glm::rotate` (diagonal `c + (1 - c)`), Lactea in f64 with D3DX matrices: 68 of 400 free runs have `rot_*` variables one ulp off (<= 1.2e-7), no gate failure attributed |
 
 ## Findings the implementation encodes
 
@@ -68,6 +81,9 @@ Root causes found against the reference, kept here because each one is a contrac
   (`CompatRules::wave_point_f64_aspect`); one ulp flips the 1/256-px vertex snap.
 - The GPU's clip unit truncates `fma(c, size/2, size/2)` toward zero before the snap
   (`stroke.rs::viewport_axis`).
+- Mesa's backward inter-shader code motion (`nir_opt_varyings`) moves `input ± uniform/const` and a few other linear
+  ops into the vertex stage; `lactea-hlsl/src/emit/fold.rs` mirrors the use-dominance decision (`docs/hlsl.md`), measured
+  with twin probes (`max(x, -10)` around the inputs) rendered by the oracle. `Flexi + Martin - dive` ×2 final 29 -> 83 dB.
 - Mesa replaces an undefined variable used only by float ALU ops with NaN, so `max(x, undef)` is `x`
   (`lactea-hlsl/src/emit/undef.rs`, projectM flavour only).
 - GL line tie rules: x-major rising lines go to the upper row, y-major to the left column;

@@ -994,36 +994,104 @@ const SUB_PIXEL: f32 = 256.0;
 ///
 /// wgpu / D3D9 (y down, top-left rule) give such a pixel to the polygon *below* the edge; projectM gives it to the
 /// polygon *above* (bottom edge inclusive, top edge exclusive, in image space). Both are the same as shifting the
-/// edge down by a hair, so every vertex of a horizontal edge whose snapped row is `k + 1/2` moves down by one
-/// sub-pixel step (`1/256` px, the smallest move that survives the GPU's own snapping). All vertices at the same
+/// edge down by a hair, so every vertex of a horizontal *boundary* edge whose snapped row is `k + 1/2` moves down by
+/// one sub-pixel step (`1/256` px, the smallest move that survives the GPU's own snapping). All vertices at the same
 /// snapped position move together, so polygons built from several triangles stay watertight. Vertical edges and
 /// every other position are untouched (the left-edge rule is the same in both).
+///
+/// An edge that two triangles of the list share (the spokes of a fan) is inside the polygon: its pixels are drawn
+/// once whichever side owns them, so it never triggers a move. The colour of a moved vertex is moved along the
+/// triangle's own colour plane, so the interpolated colour at every pixel centre stays what it was: only the
+/// coverage changes (projectM's fills are exact there, a plain move would flip colour roundings by one level).
 pub fn gl_fill_ties(tris: &mut [WfVertex], w: f32, h: f32) {
+    gl_fill_ties_by(tris, w, h, |v| &mut v.pos, 4, |v, i| &mut v.color[i]);
+}
+
+/// [`gl_fill_ties`] for any vertex type: `pos` projects a vertex onto its clip-space position and `attr(v, i)` for
+/// `i < n_attr` onto the vertex attributes that are interpolated linearly in screen space.
+pub fn gl_fill_ties_by<T>(
+    tris: &mut [T],
+    w: f32,
+    h: f32,
+    mut pos: impl FnMut(&mut T) -> &mut [f32; 2],
+    n_attr: usize,
+    mut attr: impl FnMut(&mut T, usize) -> &mut f32,
+) {
     let snap = |v: f32| (v * SUB_PIXEL).round_ties_even() as i64;
-    let key = |p: [f32; 2]| {
-        let q = to_px(p, w, h);
+    let key = |pos: &mut dyn FnMut(&mut T) -> &mut [f32; 2], v: &mut T| {
+        let q = to_px(*pos(v), w, h);
         (snap(q[0]), snap(q[1]))
     };
     let half = SUB_PIXEL as i64 / 2;
-    let mut moved: Vec<(i64, i64)> = Vec::new();
-    for t in tris.as_chunks::<3>().0 {
+    let mut edges: Vec<[(i64, i64); 2]> = Vec::new();
+    for t in tris.as_chunks_mut::<3>().0 {
+        let k = [
+            key(&mut pos, &mut t[0]),
+            key(&mut pos, &mut t[1]),
+            key(&mut pos, &mut t[2]),
+        ];
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
-            let (ka, kb) = (key(t[a].pos), key(t[b].pos));
+            let (ka, kb) = (k[a], k[b]);
             if ka.1 == kb.1 && ka.0 != kb.0 && ka.1.rem_euclid(SUB_PIXEL as i64) == half {
-                moved.push(ka);
-                moved.push(kb);
+                edges.push(if ka < kb { [ka, kb] } else { [kb, ka] });
             }
         }
+    }
+    edges.sort_unstable();
+    let mut moved: Vec<(i64, i64)> = Vec::new();
+    let mut i = 0;
+    while i < edges.len() {
+        let n = edges[i..].iter().take_while(|e| **e == edges[i]).count();
+        if n == 1 {
+            moved.extend(edges[i]);
+        }
+        i += n;
     }
     if moved.is_empty() {
         return;
     }
     moved.sort_unstable();
     moved.dedup();
-    for v in tris.iter_mut() {
-        let k = key(v.pos);
-        if moved.binary_search(&k).is_ok() {
-            v.pos[1] = from_px([0.0, (k.1 + 1) as f32 / SUB_PIXEL], w, h)[1];
+    for t in tris.as_chunks_mut::<3>().0 {
+        let k = [
+            key(&mut pos, &mut t[0]),
+            key(&mut pos, &mut t[1]),
+            key(&mut pos, &mut t[2]),
+        ];
+        let hit = k.map(|k| moved.binary_search(&k).is_ok());
+        if !hit.contains(&true) {
+            continue;
+        }
+        let p = [
+            to_px(*pos(&mut t[0]), w, h),
+            to_px(*pos(&mut t[1]), w, h),
+            to_px(*pos(&mut t[2]), w, h),
+        ];
+        let (e1, e2) = (
+            [p[1][0] - p[0][0], p[1][1] - p[0][1]],
+            [p[2][0] - p[0][0], p[2][1] - p[0][1]],
+        );
+        let area = e1[0] * e2[1] - e2[0] * e1[1];
+        for j in 0..n_attr {
+            let a = [
+                *attr(&mut t[0], j),
+                *attr(&mut t[1], j),
+                *attr(&mut t[2], j),
+            ];
+            // d attr / d y of the triangle's plane
+            let gy = (e1[0] * (a[2] - a[0]) - e2[0] * (a[1] - a[0])) / area;
+            if gy.is_finite() {
+                for i in 0..3 {
+                    if hit[i] {
+                        *attr(&mut t[i], j) = a[i] + gy / SUB_PIXEL;
+                    }
+                }
+            }
+        }
+        for i in 0..3 {
+            if hit[i] {
+                pos(&mut t[i])[1] = from_px([0.0, (k[i].1 + 1) as f32 / SUB_PIXEL], w, h)[1];
+            }
         }
     }
 }
@@ -1520,6 +1588,86 @@ mod tests {
             gl_fill_ties(&mut u, ww, h);
             assert_eq!(u, b, "size {size}");
         }
+    }
+
+    /// A fan `centre + closed rim` in pixel coordinates, centre colour 1, rim colour 0.2.
+    fn px_fan(centre: [f32; 2], rim: &[[f32; 2]], (w, h): (f32, f32)) -> Vec<WfVertex> {
+        let mut pts = vec![from_px(centre, w, h)];
+        pts.extend(rim.iter().map(|p| from_px(*p, w, h)));
+        let colors: Vec<[f32; 4]> = (0..pts.len())
+            .map(|k| if k == 0 { [1.0; 4] } else { [0.2; 4] })
+            .collect();
+        fan_to_list(&pts, &colors)
+    }
+
+    /// Linear interpolation of the vertex colours of a triangle at pixel position `p`.
+    fn plane_colour(t: &[WfVertex], p: [f32; 2], (w, h): (f32, f32)) -> f32 {
+        let q: Vec<[f32; 2]> = t.iter().map(|v| to_px(v.pos, w, h)).collect();
+        let d =
+            (q[1][0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (q[1][1] - q[0][1]);
+        let l1 =
+            ((p[0] - q[0][0]) * (q[2][1] - q[0][1]) - (q[2][0] - q[0][0]) * (p[1] - q[0][1])) / d;
+        let l2 =
+            ((q[1][0] - q[0][0]) * (p[1] - q[0][1]) - (p[0] - q[0][0]) * (q[1][1] - q[0][1])) / d;
+        t[0].color[0] * (1.0 - l1 - l2) + t[1].color[0] * l1 + t[2].color[0] * l2
+    }
+
+    /// A fan whose top and bottom edges lie on pixel centres: those edges move down a step, the centre does not, and
+    /// the colour plane of every triangle (so the colour at any pixel) is the one it had before.
+    #[test]
+    fn gl_fill_ties_keep_the_colour_plane_of_moved_vertices() {
+        let wh = (64.0f32, 64.0f32);
+        let rim = [
+            [20.0, 10.5],
+            [44.0, 10.5],
+            [44.0, 30.5],
+            [20.0, 30.5],
+            [20.0, 10.5],
+        ];
+        let before = px_fan([32.0, 20.5], &rim, wh);
+        let mut t = before.clone();
+        gl_fill_ties(&mut t, wh.0, wh.1);
+        let dy = |i: usize| to_px(t[i].pos, wh.0, wh.1)[1] - to_px(before[i].pos, wh.0, wh.1)[1];
+        // triangles (c, r0, r1) top edge, (c, r1, r2), (c, r2, r3) bottom edge, (c, r3, r0)
+        assert!(
+            (dy(1) - 1.0 / 256.0).abs() < 1e-4 && (dy(2) - 1.0 / 256.0).abs() < 1e-4,
+            "top edge"
+        );
+        assert!(
+            (dy(7) - 1.0 / 256.0).abs() < 1e-4 && (dy(8) - 1.0 / 256.0).abs() < 1e-4,
+            "bottom edge"
+        );
+        assert_eq!(
+            t[0].pos, before[0].pos,
+            "the centre is not on a boundary edge"
+        );
+        for tri in 0..4 {
+            let (a, b) = (&before[tri * 3..tri * 3 + 3], &t[tri * 3..tri * 3 + 3]);
+            for p in [[30.0, 20.0], [26.5, 14.25], [38.0, 25.75]] {
+                let (x, y) = (plane_colour(a, p, wh), plane_colour(b, p, wh));
+                assert!((x - y).abs() < 1e-5, "triangle {tri} at {p:?}: {x} vs {y}");
+            }
+        }
+    }
+
+    /// An edge that two triangles of a fan share (a spoke) is inside the polygon, so a spoke on a pixel centre moves
+    /// nothing.
+    #[test]
+    fn gl_fill_ties_ignore_spokes_inside_the_polygon() {
+        let wh = (64.0f32, 64.0f32);
+        let rim = [
+            [44.0, 20.5],
+            [38.0, 10.2],
+            [26.0, 10.2],
+            [20.0, 20.5],
+            [26.0, 30.8],
+            [38.0, 30.8],
+            [44.0, 20.5],
+        ];
+        let before = px_fan([32.0, 20.5], &rim, wh);
+        let mut t = before.clone();
+        gl_fill_ties(&mut t, wh.0, wh.1);
+        assert_eq!(t, before);
     }
 
     #[test]

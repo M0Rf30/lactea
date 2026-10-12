@@ -160,6 +160,12 @@ pub struct CompatRules {
     /// `size * H / 2` is a half integer) are nudged by one sub-pixel step (`geom::gl_fill_ties`). MD2 (D3D9) has
     /// the wgpu rule.
     pub gl_fill_ties: bool,
+    /// projectM's GL driver (Mesa) moves `interpolated input ± uniform/constant` (and a few other linear operations)
+    /// of the user warp / composite fragment shader into the vertex stage and interpolates the result, which differs
+    /// from interpolating the input and adding in the fragment stage by about 1 ulp. With this rule the HLSL
+    /// translator emits those per-vertex values (`CompiledShader::folds`) and the renderer delivers them as extra
+    /// varyings. MD2 (D3D9) and wgpu keep the fragment-stage arithmetic.
+    pub gl_varying_fold: bool,
     /// Borders are one 8-vertex / 8-triangle mesh in projectM (`Border.cpp`, mirrored vertically by its y-flipping
     /// projection), four rotated quads in MD2. Identical for sane sizes, different when `ob + ib > 1` or a size is
     /// negative (self-overlapping triangles).
@@ -297,6 +303,7 @@ impl Compat {
                 shape_main_nearest: true,
                 blur_alloc_drops_overlays: true,
                 gl_fill_ties: true,
+                gl_varying_fold: true,
                 pm_border_mesh: true,
                 custom_slots: 4,
                 warp_main_sampler_from_wrap: true,
@@ -362,6 +369,7 @@ impl Compat {
                 shape_main_nearest: false,
                 blur_alloc_drops_overlays: false,
                 gl_fill_ties: false,
+                gl_varying_fold: false,
                 pm_border_mesh: false,
                 custom_slots: 16,
                 warp_main_sampler_from_wrap: false,
@@ -498,6 +506,11 @@ pub struct CompiledShader {
     pub wgsl: String,
     /// Resource interface bound in group 1.
     pub interface: ShaderInterface,
+    /// Per-vertex values interpolated as extra varyings (`lactea_hlsl::Translated::folds`). Entry `k` is a complete
+    /// WGSL function `fn fold_k(vs_uv: vec4<f32>, vs_rad_ang: vec2<f32>, vs_diffuse: vec4<f32>) -> f32` that may read
+    /// the `WGSL_COMMON` uniforms and call earlier `fold_j`. The fragment shader's `VsOut` carries them as
+    /// `@location(3 + k / 4) fold{k / 4}: vec4<f32>`, component `k % 4`. Empty: no extra varyings.
+    pub folds: Vec<String>,
 }
 
 /// Errors reported by the renderer.

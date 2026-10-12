@@ -1003,12 +1003,15 @@ impl Engine {
         let mut opts = HlslOptions::default();
         opts.floor_mod = !md2;
         opts.projectm_flavor = !md2;
-        opts.md3 = self.cfg.compat.rules().md3_shader_prelude;
+        let rules = self.cfg.compat.rules();
+        opts.md3 = rules.md3_shader_prelude;
+        opts.gl_varying_fold = rules.gl_varying_fold;
         let to_compiled = |t: &lactea_hlsl::Translated, report: &mut PresetReport| {
             report.warnings.extend(t.warnings.iter().cloned());
             CompiledShader {
                 wgsl: t.wgsl.clone(),
                 interface: t.interface.clone(),
+                folds: t.folds.clone(),
             }
         };
 
@@ -1160,6 +1163,7 @@ impl Engine {
                     .map(|t| CompiledShader {
                         wgsl: t.wgsl,
                         interface: t.interface,
+                        folds: t.folds,
                     });
                     if let Some(p) = passthrough {
                         comp_ok = renderer.set_comp_shader(Some(p)).is_ok();

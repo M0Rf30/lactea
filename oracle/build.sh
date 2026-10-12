@@ -73,11 +73,14 @@ cmake --build "$BUILD/projectm" -j "$JOBS"
 cmake --install "$BUILD/projectm" >/dev/null
 
 # ---- 4. harness ----------------------------------------------------------------------------
+# The RUNPATH is $ORIGIN-relative: a logical $BUILD (e.g. a symlink into a worktree) must not be
+# baked into the binary, or it breaks as soon as that worktree is removed.
 LIBDIR=$(dirname "$(ls "$BUILD"/install/lib*/libprojectM-4.so | head -n1)")
+RELLIB=${LIBDIR#"$BUILD"/}
 cc -O2 -g -std=gnu11 -Wall -Wextra -Wno-unused-parameter \
   -DPROJECTM_SHA="\"$SHA\"" -I"$BUILD/install/include" \
   "$HERE/refrender.c" -o "$BUILD/refrender" \
-  -L"$LIBDIR" -lprojectM-4 -Wl,-rpath,"$LIBDIR" \
+  -L"$LIBDIR" -lprojectM-4 -Wl,-rpath,"\$ORIGIN/$RELLIB" \
   $(pkg-config --cflags --libs libpng) -lEGL -lGL -lm
 # ---- 5. optional texture pack (user textures such as clouds/worms); best effort -------------------
 if [ ! -d "$BUILD/texpack/textures" ]; then

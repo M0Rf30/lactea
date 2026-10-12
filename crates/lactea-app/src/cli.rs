@@ -40,7 +40,8 @@ pub enum AudioBackend {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CompatArg {
     /// Pick projectM or MilkDrop 3 behaviour per preset from the preset file (default); a change of
-    /// mode between two presets is a hard cut. MilkDrop 2 is never chosen automatically.
+    /// mode between two presets is a hard cut. MilkDrop 2 only as a fallback for a preset projectM
+    /// rejects because its code does not compile.
     Auto,
     /// projectM behaviour (the measurement oracle), for every preset.
     Projectm,

@@ -71,11 +71,18 @@ Each feature section below names the `CompatRules` fields it introduced.
 `EngineConfig::auto_compat` (`--compat auto` in the `lactea` app, where it is the default; `fdrender --compat auto`;
 `LACTEA_COMPAT_AUTO` = 3 in the C API) makes every `Engine::load_preset` choose the compatibility mode from the
 preset's bytes, so that a folder mixing projectM, MilkDrop 2 / BeatDrop and MilkDrop 3 presets plays without
-`--compat`. The choice is only ever **projectM** (the reference, and the answer whenever nothing says otherwise) or
-**MilkDrop 3**; `Compat::MilkDrop2` is never selected automatically, because a MilkDrop 2 / BeatDrop file has the same
-keys, code and shaders as a projectM file and nothing in it tells them apart. Ask for it explicitly (`--compat
-milkdrop2`). A fixed mode (`--compat projectm|milkdrop2|milkdrop3`, `auto_compat: false`) behaves exactly as
-before: the frames of `fdrender` in the three fixed modes are byte-identical with and without this feature.
+`--compat`. The detection only ever picks **projectM** (the reference, and the answer whenever nothing says otherwise)
+or **MilkDrop 3**: a MilkDrop 2 / BeatDrop file has the same keys, code and shaders as a projectM file and nothing in
+it tells them apart. `Compat::MilkDrop2` is reached only by the **compile fallback**: when a preset that resolved to
+projectM fails to load with an expression compile error (`EngineError::Compile`), the engine retries it once under
+MilkDrop 2 (a hard cut, like any mode change). MilkDrop 2's code-line glueing (`StripLinefeedCharsAndComments`) joins
+what projectM keeps apart, so a preset whose identifier is split over two `per_frame_N` lines (`is_` / `beat`) loads
+there; 3 presets of the MD3 pack and e.g. `martin - liquid gold` of the projectM corpus need it. A success carries the
+evidence in `PresetReport::warnings` (`fallback: projectM rejected: <error>`, `PresetReport::compat` =
+`MilkDrop2`); if MilkDrop 2 rejects the preset too, the projectM error is the one returned and the running preset and
+mode stay. Ask for MilkDrop 2 for every preset explicitly (`--compat milkdrop2`). A fixed mode (`--compat
+projectm|milkdrop2|milkdrop3`, `auto_compat: false`) behaves exactly as before, with no fallback: the frames of
+`fdrender` in the three fixed modes are byte-identical with and without this feature.
 
 ### Detection (`lactea_preset::detect_compat`)
 

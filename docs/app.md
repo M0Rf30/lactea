@@ -29,8 +29,9 @@ lactea --dir /usr/share/projectM/presets        # engine, PipeWire monitor captu
 
 `--compat auto` (the default) lets the engine resolve the mode per preset from the preset bytes
 (`lactea_preset::detect_compat`): MilkDrop 3 when the file uses an MD3-only feature (`.milk2`, `MD31=`/`MD32=` keys,
-sprites, `get_fft`/`mouse`/`q33..q64`, ...), projectM otherwise; MilkDrop 2 is never chosen automatically (its files
-cannot be told from projectM's). When the resolved mode changes between two presets the engine rebuilds its
+sprites, `get_fft`/`mouse`/`q33..q64`, ...), projectM otherwise; MilkDrop 2 is only a fallback: a preset projectM
+rejects because its code does not compile (the MD2 line glueing, `docs/md3.md`) is retried once under MilkDrop 2. When
+the resolved mode changes between two presets the engine rebuilds its
 mode-dependent state and does a **hard cut** whatever `--transition-duration` says. `.milk2` files are listed in
 `auto` as well as `milkdrop3`. `projectm`, `milkdrop2` and `milkdrop3` fix the mode for every preset (as before).
 The host follows the resolved mode after every successful load (`Visualizer::current_compat`): MD3 display-time

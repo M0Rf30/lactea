@@ -64,10 +64,10 @@ pub enum LacteaCompat {
     Milkdrop3 = 2,
     /// Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
     /// (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
-    /// names, ...; otherwise projectM). MilkDrop 2 is never selected automatically (its presets are
-    /// indistinguishable from projectM's). A load that changes the mode is a hard cut whatever the
-    /// requested transition; `lactea_get_compat` reports the mode in use. Before the first load the
-    /// mode is projectM.
+    /// names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
+    /// code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
+    /// changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
+    /// mode in use. Before the first load the mode is projectM.
     Auto = 3,
 }
 

@@ -1605,9 +1605,15 @@ impl Renderer {
         }
         let device = &self.device;
         // group(1) layout from the interface
+        // the fold functions read `pu` in the vertex stage
+        let pass_ubo_stages = if s.folds.is_empty() {
+            wgpu::ShaderStages::FRAGMENT
+        } else {
+            wgpu::ShaderStages::VERTEX_FRAGMENT
+        };
         let mut entries = vec![ubo_entry(
             lactea_abi::BINDING_PASS_UNIFORMS,
-            wgpu::ShaderStages::FRAGMENT,
+            pass_ubo_stages,
         )];
         for (i, t) in s.interface.textures.iter().enumerate() {
             let dim = match t.dim {
@@ -1643,6 +1649,13 @@ impl Renderer {
             label: Some(label),
             source: wgpu::ShaderSource::Wgsl(wgsl.as_str().into()),
         });
+        let fold_vs = (!s.folds.is_empty()).then(|| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(shaders::mesh_vs_folds(&s.folds).into()),
+            })
+        });
+        let mesh_vs = fold_vs.as_ref().unwrap_or(&self.pipes.mesh_vs);
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(label),
             bind_group_layouts: &[Some(&self.pipes.bgl_mu), Some(&pass_bgl)],
@@ -1684,22 +1697,23 @@ impl Renderer {
                 cache: None,
             })
         };
-        let pipeline = make_pipeline(&layout, &self.pipes.mesh_vs, &[Some(mesh_layout())], None);
+        let pipeline = make_pipeline(&layout, mesh_vs, &[Some(mesh_layout())], None);
         // MD2's preset blend draws the second pass of a shader pair alpha-blended over the first
         let alpha_pipelines = self.rules.md2_preset_blend.then(|| {
-            [Blend::SrcAlpha, Blend::InvSrcAlpha].map(|b| {
-                make_pipeline(
-                    &layout,
-                    &self.pipes.mesh_vs,
-                    &[Some(mesh_layout())],
-                    blend_state(b),
-                )
-            })
+            [Blend::SrcAlpha, Blend::InvSrcAlpha]
+                .map(|b| make_pipeline(&layout, mesh_vs, &[Some(mesh_layout())], blend_state(b)))
         });
         let warp_pipeline = if label == "warp" {
             let warp_vs_sm = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("warp_vs"),
-                source: wgpu::ShaderSource::Wgsl(shaders::warp_vs(2).into()),
+                source: wgpu::ShaderSource::Wgsl(
+                    if s.folds.is_empty() {
+                        shaders::warp_vs(2)
+                    } else {
+                        shaders::warp_vs_folds(2, &s.folds)
+                    }
+                    .into(),
+                ),
             });
             let warp_layout_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("warp gpu"),
@@ -3645,6 +3659,8 @@ impl Renderer {
                         });
                     }
                 }
+                // no `gl_fill_ties` here: the nearest-sampled UV of a moved vertex flips texel choices at pixel centres
+                // (`Zylot - Star Ornament` main 79.0 -> 72.2 dB)
                 let tex_blend = if s.additive {
                     Blend::SrcAlphaAdd
                 } else {
@@ -3659,8 +3675,6 @@ impl Renderer {
                     // `Sampler::Unbind(0)` follows, so every later textured draw falls back to the texture's own
                     // NEAREST/REPEAT parameters. `last_blur_levels` is the *native* level: a diagnostic blur chain
                     // must not trigger it (projectM restores the sampler after its own forced blur).
-                // no `gl_fill_ties` here: the nearest-sampled UV of a moved vertex flips texel choices at pixel centres
-                // (`Zylot - Star Ornament` main 79.0 -> 72.2 dB)
                     b.tex_leak(tex_blend, &tri);
                 } else {
                     b.tex(tex_blend, &tri);

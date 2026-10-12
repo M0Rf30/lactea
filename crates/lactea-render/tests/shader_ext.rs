@@ -148,6 +148,7 @@ fn shader(body: &str, bindings: &str, interface: ShaderInterface) -> CompiledSha
             "{WGSL_COMMON}\n{bindings}\n@fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n{body}\n}}\n"
         ),
         interface,
+        folds: Vec::new(),
     }
 }
 

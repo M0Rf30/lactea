@@ -9,6 +9,7 @@
 mod conv;
 mod expr;
 pub(crate) mod fft;
+mod fold;
 mod intrinsics;
 mod stmt;
 mod undef;
@@ -114,6 +115,11 @@ pub(crate) struct Tr<'a> {
     pub plain_mul: bool,
     /// Variables Mesa compiles as NaN instead of undefined (see `undef.rs`); only filled for `Options::projectm_flavor`.
     pub undef_nan: HashSet<String>,
+    /// Source expressions (by address) whose components read an extra varying: `fold` index per component
+    /// (`fold.rs`, `Options::gl_varying_fold`).
+    pub fold_roots: HashMap<usize, Vec<Option<usize>>>,
+    /// Vertex-stage functions of the extra varyings (`Translated::folds`).
+    pub folds: Vec<String>,
 }
 
 pub(crate) fn wgsl_ty(t: &Ty) -> String {
@@ -323,6 +329,8 @@ impl<'a> Tr<'a> {
             plain_mul: false,
             md3,
             undef_nan: HashSet::new(),
+            fold_roots: HashMap::new(),
+            folds: Vec::new(),
         }
     }
 
@@ -619,6 +627,9 @@ impl Tr<'_> {
         for l in &self.init_lines {
             body.push_str(l);
             body.push('\n');
+        }
+        for j in 0..self.folds.len().div_ceil(4) {
+            body.push_str(&format!("    g_fold{j} = in.fold{j};\n"));
         }
         body.push_str("    var rv: vec4<f32> = vec4<f32>();\n");
         let uv = if kind == lactea_abi::PassKind::Comp {

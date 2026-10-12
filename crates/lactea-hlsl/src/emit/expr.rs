@@ -81,6 +81,37 @@ impl Tr<'_> {
     }
 
     pub fn expr(&mut self, e: &Expr) -> R<V> {
+        let v = self.expr_value(e)?;
+        match self.fold_roots.get(&(e as *const Expr as usize)).cloned() {
+            Some(spec) => Ok(self.read_folds(v, &spec)),
+            None => Ok(v),
+        }
+    }
+
+    /// `v` with the components `spec` lists replaced by their interpolated fold (see `fold.rs`).
+    fn read_folds(&mut self, v: V, spec: &[Option<usize>]) -> V {
+        let n = v.ty.dim() as usize;
+        if v.ty.sc() != Some(Sc::F) || n == 0 || spec.len() > n {
+            return v;
+        }
+        let fold = |k: usize| format!("g_fold{}.{}", k / 4, SW[k % 4]);
+        if n == 1 {
+            return match spec[0] {
+                Some(k) => V::new(fold(k), v.ty),
+                None => v,
+            };
+        }
+        let base = self.bind(v.clone());
+        let comps: Vec<String> = (0..n)
+            .map(|i| match spec.get(i).copied().flatten() {
+                Some(k) => fold(k),
+                None => format!("{}.{}", mp(&base.s), SW[i]),
+            })
+            .collect();
+        V::new(format!("{}({})", wgsl_ty(&v.ty), comps.join(", ")), v.ty)
+    }
+
+    fn expr_value(&mut self, e: &Expr) -> R<V> {
         match e {
             Expr::Float(v) => {
                 let v = if self.pm_flavor {
@@ -113,7 +144,7 @@ impl Tr<'_> {
                 let vs = self.eval_args(&[a, b])?;
                 self.binary(*op, vs[0].clone(), vs[1].clone())
             }
-            Expr::Assign(op, l, r) => self.assign(*op, l, r),
+            Expr::Assign(op, l, r) => self.assign(e, *op, l, r),
             Expr::IncDec { inc, prefix, e } => {
                 let lv = self.lvalue(e)?;
                 let cur = self.lv_read(&lv);
@@ -717,7 +748,7 @@ impl Tr<'_> {
         Ok(())
     }
 
-    fn assign(&mut self, op: Option<BinOp>, l: &Expr, r: &Expr) -> R<V> {
+    fn assign(&mut self, e: &Expr, op: Option<BinOp>, l: &Expr, r: &Expr) -> R<V> {
         let lv = self.lvalue(l)?;
         let rv = self.expr(r)?;
         let val = match op {
@@ -736,6 +767,21 @@ impl Tr<'_> {
             _ => self.conv(&val, &lv.ty)?,
         };
         self.store(&lv, &s)?;
+        if op.is_some()
+            && lv.ty.sc() == Some(Sc::F)
+            && let Some(spec) = self.fold_roots.get(&(e as *const Expr as usize)).cloned()
+        {
+            // `x op= y` computed by a movable instruction: its stored components read the interpolated fold
+            for (i, k) in spec.iter().enumerate() {
+                let Some(k) = *k else { continue };
+                let dst = match &lv.kind {
+                    LvKind::Plain(s) if lv.ty.dim() == 1 => s.clone(),
+                    LvKind::Plain(s) => format!("{s}.{}", SW[i]),
+                    LvKind::Swz(b, idx) => format!("{b}.{}", SW[*idx.get(i).unwrap_or(&i)]),
+                };
+                self.line(format!("{dst} = g_fold{}.{};", k / 4, SW[k % 4]));
+            }
+        }
         Ok(self.lv_read(&lv))
     }
 
@@ -743,7 +789,7 @@ impl Tr<'_> {
     pub fn expr_stmt(&mut self, e: &Expr) -> R<()> {
         match e {
             Expr::Assign(op, l, r) => {
-                self.assign(*op, l, r)?;
+                self.assign(e, *op, l, r)?;
             }
             Expr::IncDec { inc, e, .. } => {
                 let lv = self.lvalue(e)?;

@@ -195,8 +195,8 @@ All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X]
   differential).
 * MD2 compiles with `D3DXSHADER_USE_LEGACY_D3DX9_31_DLL` (legacy compiler); constant folding of
   int literals (`7/2`) follows the integer rule above.
-* `sampler_pw_noise_lq` etc. must be declared by the user (`sampler sampler_pw_noise_lq;`); MD2
-  rejects an undeclared one ("undefined identifier") and falls back — `Nebula Forge` (comp) is such a shader.
+* `sampler_pw_noise_lq` etc. need no declaration: `translate` declares the `sampler_*` / `texsize_*` names a shader uses
+  without declaring them (projectM does; MD2 rejects such a shader as "undefined identifier" and falls back).
 * ABI note: `TexSource::Fft` is only produced with `Options::md3`; otherwise `fft` / `wave` are reported as
   `User("fft")` / `User("wave")` (BeatDrop extensions). `include.fx` here has no `_c14.._c16` (mouse / BeatDrop system
   time and date); with `md3` the prelude adds `_c14` (mouse, `MilkExtUniforms`), `_c15..` stay absent (MD3 never uploads them).
@@ -204,6 +204,18 @@ All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X]
   projectM's GLSL; Mesa's `nir_opt_undef` turns an undef whose every use is a float ALU operand into NaN (so
   `max(x, f(undef))` is `x`). `PS` locals / private globals with that property start as NaN, every other undef read keeps
   the WGSL default 0 (the oracle reads a register there; unreproducible). `martin - organic light`: comp final 33 -> 99 dB.
-* Mesa's backward inter-shader code motion (`nir_opt_varyings`) is not emulated: GL hoists single-input linear chains of
-  the fragment shader (`uv.y + (h - 1)`) into the vertex shader and interpolates the result, ANV interpolates the input
-  and adds in the fragment shader (`Flexi + Martin - dive`, horizon row of `3 / c.y`; see `docs/fidelity.md`).
+* Mesa's backward inter-shader code motion (`nir_opt_varyings`, `Options::gl_varying_fold`, `emit/fold.rs`, projectM
+  flavour only): the GL driver moves arithmetic on interpolated inputs into the vertex stage and interpolates the result
+  (`uv.y + (h - 1)` becomes `interp(uv.y + (h - 1))`), ANV interpolates the input and adds in the fragment stage, about
+  1 ulp apart (`Flexi + Martin - dive`: horizon row of `3 / c.y`; `Geiss - Cauldron - Tendrils`: drift through the
+  feedback loop). The translator mirrors Mesa's decision on the AST of `PS`: a scalar SSA use graph (value numbering as
+  NIR's CSE does, dead code removed), and for every input load the farthest *movable post-dominator* (all use paths of the
+  load end in it). Movable: constants / uniforms and any ALU op over them, `+` / `-` of interpolated values and
+  convergent ones, `/` by a non-literal uniform, plain products (`*=`, `mul()`) with a convergent factor, `lerp` with a
+  convergent weight. Not movable (measured on the oracle with `max(x, -10)` twins of 80 probe shaders): HLSL `a * b`
+  (`mult()`, a `select`), a lone `-x` (`fneg`), `x / literal`, anything non-linear; a load with such a use, or with uses
+  that meet only in an unmovable instruction, starts no motion. A warp shader's `uv.xy` also feeds the motion-vector
+  output, so only `uv_orig` and `rad` / `ang` start motions there (and bring `uv` along as a co-input). Each moved
+  value becomes a `fold_k` vertex function in `Translated::folds` and the fragment stage reads it as an extra varying
+  (`in.fold{k/4}`); `lactea-render` runs the functions in the vertex stage (`CompiledShader::folds`). Not modelled (left
+  as is): user functions, `?:`, vector `mul()`, `x / literal` fused into a multiply-add with a convergent addend.

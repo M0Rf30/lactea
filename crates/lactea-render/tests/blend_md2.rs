@@ -45,6 +45,7 @@ fn const_shader(r: f32, g: f32, b: f32, blur: u8) -> CompiledShader {
             texsize_slots: vec![],
             max_blur_level: blur,
         },
+        folds: Vec::new(),
     }
 }
 

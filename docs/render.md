@@ -77,7 +77,8 @@ and `GL_POINTS` (dots), width 1. On the oracle's GPU (Mesa iris) `GL_LINE_SMOOTH
   `RG16F` attachment (`layout(location = 1)`), so the interpolated `uv` has two uses in Mesa's NIR and the compiler cannot
   fold constants into its plane equation (`uv - 0.5` stays `plane(uv) - 0.5`). With a single use ANV folds it into
   `plane(uv - 0.5)`, which rounds differently: probe `sin((uv.x-0.5)*100)` showed 15 480 wrong pixels in 13 frames, 0
-  after `renderer::with_uv_output` appends the same second output (scratch `warp_sink`, never read). Remaining warp-shader
+  after `renderer::with_uv_output` appends the same second output (scratch `warp_sink`, never read). For the same reason
+  only `uv_orig`, `rad` and `ang` start the GL varying fold of `docs/hlsl.md` in a warp shader. Remaining warp-shader
   noise is on `rad`/`ang` (probe `sin(ang*20)`: 0.1-2 % of pixels), still open.
 
 ## Motion vectors (`motion.rs`)

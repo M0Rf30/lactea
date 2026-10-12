@@ -12,6 +12,7 @@ trait Visualizer {
     fn take_auto_cuts(&mut self) -> u32 { 0 }                       // default-implemented (MD3 auto hard cuts)
     fn set_auto_hard_cut_mode(&mut self, mode: u8) {}               // default-implemented
     fn auto_hard_cut_mode(&self) -> Option<u8> { None }             // None = no such feature / compat does not support it
+    fn current_compat(&self) -> Option<CompatArg> { None }          // resolved compat of the last load (never Auto); None = no compat modes
 }
 ```
 
@@ -23,6 +24,19 @@ cargo build -p lactea-app                      # PipeWire + engine (default feat
 cargo build -p lactea-app --no-default-features   # cpal capture only, scope only
 lactea --dir /usr/share/projectM/presets        # engine, PipeWire monitor capture
 ```
+
+### Compat selection (`--compat`)
+
+`--compat auto` (the default) lets the engine resolve the mode per preset from the preset bytes
+(`lactea_preset::detect_compat`): MilkDrop 3 when the file uses an MD3-only feature (`.milk2`, `MD31=`/`MD32=` keys,
+sprites, `get_fft`/`mouse`/`q33..q64`, ...), projectM otherwise; MilkDrop 2 is never chosen automatically (its files
+cannot be told from projectM's). When the resolved mode changes between two presets the engine rebuilds its
+mode-dependent state and does a **hard cut** whatever `--transition-duration` says. `.milk2` files are listed in
+`auto` as well as `milkdrop3`. `projectm`, `milkdrop2` and `milkdrop3` fix the mode for every preset (as before).
+The host follows the resolved mode after every successful load (`Visualizer::current_compat`): MD3 display-time
+randomisation, the F8 key, the window title and the log. `CompatArg::md3()` is true only for the fixed `milkdrop3`.
+
+### Build
 
 Build needs `libpipewire-0.3` headers + clang (bindgen) for the `pipewire` feature and ALSA headers
 for cpal. Version choices: winit 0.30.13 (0.31 is still beta), wgpu 30, cpal 0.18, pipewire 0.10,
@@ -40,7 +54,7 @@ depends on a pinned git fork of symphonia, which crates.io does not accept.
 | F, F11, double-click | fullscreen (cursor hidden while fullscreen) |
 | Esc, Q | quit |
 | D | write every pipeline stage of the last frame as PNG into `$LACTEA_DEBUG_DIR` (default `<temp dir>/lactea-debug`) |
-| F8 | cycle the MD3 auto hard cut mode off, 1 ... 7, off (`--compat milkdrop3` only; logs `auto hard cut needs --compat milkdrop3` otherwise) |
+| F8 | cycle the MD3 auto hard cut mode off, 1 ... 7, off (MilkDrop 3 mode only: `--compat milkdrop3`, or `auto` on a MilkDrop 3 preset; logs `auto hard cut needs a MilkDrop 3 preset ...` otherwise) |
 
 Auto-advance every `--duration S` (default 30, 0 = never) unless locked; `--shuffle` picks the next
 preset at random. Every preset change after the first (auto-advance, N / P / R / arrows) is a **soft cut**:
@@ -48,9 +62,9 @@ the engine blends the old and the new preset over `--transition-duration S` seco
 `m_softCutDuration`; 0 = hard cuts) while both keep running; the first preset appears at once. A preset that fails to
 load (parse/compile error, GPU validation error, engine
 panic) is logged and skipped in the direction of travel. The window title shows
-`preset [i/n] | LOCKED | hardcut<N> | audio status | fps` (`LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on).
+`preset [compat] [i/n] | LOCKED | hardcut<N> | audio status | fps` (`[compat]`, e.g. `[MilkDrop 3]`, only under `--compat auto`; `LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on). Every load also logs `preset <name>: compat <mode>` at info level.
 
-### MD3 auto hard cuts (`--compat milkdrop3`)
+### MD3 auto hard cuts (MilkDrop 3 mode)
 
 MD3's `AutoHardCutMode` (`--auto-hard-cut N`, F8 at runtime; `hardcut1` ... `hardcut7`, `off`; behaviour in
 `docs/md3.md` §Auto hard cuts) is ignored under projectM and MilkDrop 2. Modes 1..6 ask for an instant preset
@@ -60,9 +74,10 @@ change on beat/loudness triggers: after each rendered frame the shell asks the v
 effect into the composite shader. Auto cuts are independent of projectM's `hard_cut_*` settings.
 Deviation: MD3 ignores its preset lock, here a locked browser (L) also ignores auto cuts, and a single preset is not reloaded by one.
 
-With `--compat milkdrop3` the auto-advance time of a preset is MD3's `--transition-duration` + `--duration` + a
+In MilkDrop 3 mode (`--compat milkdrop3`, or a MilkDrop 3 preset under `--compat auto`) the auto-advance time of a preset is MD3's `--transition-duration` + `--duration` + a
 random `0 ... --duration-rand` seconds (`TimeBetweenPresetsRand`, default 10, negative = 0) drawn per preset from
-the `--seed`ed stream (`--duration 0` still never advances); the other compat modes use `--duration` alone.
+the `--seed`ed stream (`--duration 0` still never advances); the other modes use `--duration` alone. Under `auto` the
+host switches this on or off after each successful load, following the preset's resolved compat.
 
 ## Command line
 
@@ -73,13 +88,13 @@ the `--seed`ed stream (`--duration 0` still never advances); the other compat mo
                        /opt/homebrew/share/projectM/presets (none on Windows: pass --dir)
 --duration S           auto-advance period (30; 0 = never)      --shuffle
 --transition-duration S  soft cut length (3; 0 = hard cuts)
---auto-hard-cut N      MD3 AutoHardCutMode 0..7 (0 = off; 1..6 hard cuts, 7 composite effects; --compat milkdrop3 only; F8 cycles)
---duration-rand S      MD3 TimeBetweenPresetsRand (10; --compat milkdrop3 only)
+--auto-hard-cut N      MD3 AutoHardCutMode 0..7 (0 = off; 1..6 hard cuts, 7 composite effects; MilkDrop 3 mode only; F8 cycles)
+--duration-rand S      MD3 TimeBetweenPresetsRand (10; MilkDrop 3 mode only)
 --fps N                frame cap (default: vsync only; --deterministic: 60)
 --no-vsync             Mailbox/Immediate instead of Fifo
 --size WxH [--pixels]  initial window size, logical (HiDPI) units unless --pixels
 --fullscreen
---visualizer engine|scope   --seed N   --compat projectm|milkdrop2|milkdrop3   --mesh WxH
+--visualizer engine|scope   --seed N   --compat auto|projectm|milkdrop2|milkdrop3   --mesh WxH
 --texture-dir DIR      (repeatable; searched before the defaults)
 --capture-device NAME  cpal input (name, substring or id like alsa:default); implies cpal
 --audio-backend auto|pipewire|cpal     --pipewire-target NODE

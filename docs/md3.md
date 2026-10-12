@@ -9,7 +9,9 @@ HLSL translation, the soft-cut machinery); everything else reads a rule field. T
 `Compat::ProjectM`; `Compat::MilkDrop2` is unchanged by anything described here.
 
 Select it with `--compat md3` (`fdrender`), `--compat milkdrop3` (`lactea` app), `Compat::MilkDrop3`
-(library) or `LACTEA_COMPAT_MILKDROP3` (C API, value 2).
+(library) or `LACTEA_COMPAT_MILKDROP3` (C API, value 2), or let the host pick it per preset:
+[Automatic compatibility](#automatic-compatibility) (`--compat auto`, `EngineConfig::auto_compat`,
+`LACTEA_COMPAT_AUTO`).
 
 ## Provenance
 
@@ -63,6 +65,125 @@ Each feature section below names the `CompatRules` fields it introduced.
   is injected into the loaded (PRESET2) composite shader.
 - **Hosts.** `Engine::set_mouse`, `take_auto_cuts`, `double_preset_info`, `import_custom_wave` / `_shape` are the engine
   calls a host wires; `docs/app.md`, `docs/engine.md` and `docs/parity.md` list the host side.
+
+## Automatic compatibility
+
+`EngineConfig::auto_compat` (`--compat auto` in the `lactea` app, where it is the default; `fdrender --compat auto`;
+`LACTEA_COMPAT_AUTO` = 3 in the C API) makes every `Engine::load_preset` choose the compatibility mode from the
+preset's bytes, so that a folder mixing projectM, MilkDrop 2 / BeatDrop and MilkDrop 3 presets plays without
+`--compat`. The choice is only ever **projectM** (the reference, and the answer whenever nothing says otherwise) or
+**MilkDrop 3**; `Compat::MilkDrop2` is never selected automatically, because a MilkDrop 2 / BeatDrop file has the same
+keys, code and shaders as a projectM file and nothing in it tells them apart. Ask for it explicitly (`--compat
+milkdrop2`). A fixed mode (`--compat projectm|milkdrop2|milkdrop3`, `auto_compat: false`) behaves exactly as
+before: the frames of `fdrender` in the three fixed modes are byte-identical with and without this feature.
+
+### Detection (`lactea_preset::detect_compat`)
+
+`detect_compat(bytes) -> DetectedCompat { family: DetectedFamily::{ProjectM, MilkDrop3}, evidence: Vec<Evidence> }` is
+pure on the bytes (no I/O, no engine state). The family is MilkDrop 3 iff at least one heuristic below fires; the
+evidence list names each hit (`Evidence` implements `Display`; `fdrender --compat auto` and the app log it).
+`lactea::compat_for_preset(bytes) -> Compat` is the engine's mapping. Comments (`//`, `\\` in expressions, `/* */`)
+and number literals are skipped, identifiers are matched whole (`q330`, `q65`, `mouse_pos2`, `mousex` are not hits),
+and a shader that declares the name itself (`float2 mouse`, its own `get_fft`, a `#define`) uses its own, not the
+prelude's.
+
+| Heuristic (`Evidence`) | Fires on | MD3 pack hits | projectM corpus hits |
+|---|---|---|---|
+| `Milk2Container` | the four `.milk2` markers (`milk2::is_double_preset`); the `.milk2` name is not needed and not enough | 146 of 146 `.milk2` | 0 |
+| `LockedShaderKey` | a line starting `MD31=` / `MD32=` (MD3's locked shaders) | 36 / 26 `.milk` | 0 |
+| `SpriteBlock` | a `[SPRITE1_BEGIN]` line, or a non-empty `SpriteName=` | 73 `.milk` | 0 |
+| `PresetVersion(300)` | `MILKDROP_PRESET_VERSION=300` (what MD3 writes for a preset with a sprite) | 73 `.milk` | 0 |
+| `ShapeSides` | an enabled custom shape with `sides` > 100 (MD2 / projectM clamp at 100, MD3 allows 500) | 0 | 0 |
+| `ShaderName` | in `warp_` / `comp_` text: `get_fft`, `get_fft_hz`, `sampler_fft` (also `sampler_fw_fft` ..), `mouse`, `mouse_x/_y/_z/_w`, `mouse_pos`, `_c14`, `_qi`..`_qp`, `q33`..`q64` | `.milk`: `get_fft` 9 (8 warp, 1 comp), `mouse` 1 | 0 |
+| `ExpressionVariable` | `q33`..`q64` in any code part; `t9`..`t16` in custom wave / shape code | `.milk`: `q64` 1, `t10` 2 | 0 |
+
+The pack's 477 files (331 `.milk`, 146 `.milk2`) resolve to MilkDrop 3: 271 (146 `.milk2` + 125 `.milk`); to
+projectM: 206 `.milk` that use no MD3-only feature (ordinary MD2 presets). The 4194 projectM corpus presets
+(`/usr/share/projectM/presets`) all resolve to projectM. Of the 125 `.milk`, 15 have `MD31` as their only evidence, 7
+`MD32`, 8 `get_fft` in the warp shader, 2 `t10`; the sprite and `version=300` hits always come together.
+
+**Not evidence**, because MD2 / BeatDrop files have it too (and so would be sent to MD3 wrongly, or tell nothing):
+- `nWaveMode` 9..17 and `wavecode_N_*` / `shapecode_N_*` with N > 3: BeatDrop raised the modes and the custom
+  slots to 16 (projectM runs 4 slots, MD2-family compat 16). Pack presets that use them but nothing MD3-only
+  (16 with `nWaveMode` >= 9, 3 with wave slots > 3, 1 with a shape slot > 3) resolve to projectM. Force
+  `--compat milkdrop2` / `milkdrop3` for those.
+- `MILKDROP_PRESET_VERSION` 200 / 201, any `PSVERSION*`, the `FFTAttack` / `FFTDecay` keys, `mousex` / `mousey`
+  expression variables (BeatDrop's), `get_fft_peak*` / `get_wave*` shader helpers (BeatDrop's; MD3 has none), `_c15` /
+  `_c16`.
+- `.milk2` by extension alone: a file named `.milk2` without the markers is a plain preset (as `Engine` has always
+  loaded it).
+
+**Known limits.** (a) `get_fft`, `_c14` and `mouse` also exist in BeatDrop with other semantics; lactea has no
+BeatDrop prelude, so such a preset only translates under the MD3 prelude and is sent there. (b) `q33` / `t9` used as a
+plain user variable in a projectM preset would be taken for MD3 (none of the 4194 corpus presets does). (c) An MD3
+preset that uses nothing MD3-only is indistinguishable from a projectM one and renders as projectM; pass `--compat
+milkdrop3` to run it as MD3.
+
+### What the engine does
+
+`load_preset` calls `compat_for_preset` first (`Engine::load_preset_resolved`). If the result equals the current
+mode, nothing changes: the load, soft cuts and `.milk2` playback are the mode's own. If it differs, the engine
+switches (`enter_compat`) and loads with a **hard cut**; a failed load puts everything back (`leave_compat`).
+What a switch replaces:
+
+| State | Rebuilt as |
+|---|---|
+| `EngineConfig::compat` / `Engine::current_compat()` | the new mode (`PresetReport::compat` says which mode a load ran under) |
+| renderer | the next renderer is `Renderer::sibling_with_compat`: same size / mesh / stroke setting, the shared pipelines and noise (neither depends on the mode), new images and the new mode's `CompatRules` |
+| audio analysis | a new `Analyzer` of the mode (`Md3` or `ProjectM`, `VolumeSensitivity` from the config); the PCM ring is carried over (`Analyzer::take_pcm_from`), the long-term averages restart |
+| expression dialect | a new `GlobalMemory` of the mode's dialect on the same `rand()` stream (`GlobalMemory::sharing_rng_with_dialect`): `reg00..reg99` / `gmegabuf` start empty |
+| shader translation, importer flavour, EEL join rules, per-frame / per-vertex / wave / shape contexts, sprite, `q33..q64` | built by the load itself from the new rules (nothing is cached across loads) |
+| kept | MD3 input state (mouse, shader FFT smoothing), `.milk2` header carry-over, seeded streams, the clock, `EngineConfig` MD3 settings (they only act in MD3) |
+
+Transitions:
+
+| From -> to | What happens |
+|---|---|
+| projectM -> projectM | unchanged: projectM's image-space soft cut between two independently rendered presets |
+| MD3 -> MD3 (a `.milk`, a `.milk2`, either order) | unchanged: MD2-style blend with MD3's patterns, `.milk2` playback and deferral |
+| MD2 -> MD2 (a fixed engine) | unchanged: MD2's blend |
+| any change of mode | a hard cut, whatever transition was asked; the new preset still starts from the previous image unless `start_clean` |
+
+A mixed pair cannot use projectM's image-space blend: it needs both presets to keep rendering, but the running
+preset's contexts (dialect, `q33..q64`, `t9..t16`), its audio analysis, the renderer rules and the per-frame frame
+builder all follow the one engine-wide mode, and the audio analyser and the EEL memory are single objects. Making
+them per slot would touch every frame path for a transition that happens at most once per mode change. MD2 -> MD3
+would be the one pair a MD2-style blend could cover, but the old state's contexts have no `q33..q64` / `t9..t16`
+to blend, and detection never produces MD2, so it falls under the same rule (hard cut).
+
+**Determinism.** The mode is a function of the preset bytes and the current mode; every random stream is seeded
+from `EngineConfig::seed` and survives the switch (one `rand()` stream, one set of transition / blend streams), so the
+same inputs give the same frames (`tests/auto_compat.rs`: two engines fed the same mixed playlist produce identical
+frames; after a switch a flat preset renders like a fixed MD3 engine's).
+
+### Hosts
+
+`lactea` (app): `--compat auto` is the default, `.milk2` files are listed, the window title and the log show the mode
+of the current preset (`docs/app.md`); the MD3 display time and F8 follow the resolved mode. `fdrender --compat auto`
+logs `compat auto -> md3 (evidence: ...)`, writes `compat`, `compat_auto` and `compat_evidence` to `fdrender.json`
+and applies `--mouse` / `--volume-sensitivity` / `--auto-hard-cut` when the preset resolved to MD3 (`fdrender`'s
+default stays `projectm`: it is the fidelity tool). C API: `LACTEA_COMPAT_AUTO`, `lactea_get_compat` for the mode in
+use.
+
+### Verification
+
+- `crates/lactea-preset/src/detect.rs` unit tests: one per heuristic, and the false-positive guards (comments,
+  `q330` / `q65` / `q033` / `q32`, `t17`, members, number literals, declared names, `#define`, incomplete `.milk2`
+  markers, other versions).
+- `crates/lactea/tests/auto_compat.rs` (GPU): a playlist projectM -> MD3 `q40` preset -> MD3 sprite preset -> `.milk2` ->
+  projectM -> projectM through one engine (resolved mode, the hard cut on a mode change, the soft cuts that stay,
+  the double preset ending, no validation error), a failed load that keeps the mode, an engine configured as MD2
+  resolving its first preset, a fixed engine never switching, determinism.
+- Fixed-mode equivalence: `fdrender` frames 0..29 (160x90) of 4 presets (2 corpus, 2 pack) x `projectm` / `md2` /
+  `md3`: 12 SHA-256 digests of the PNG streams equal before and after.
+- Smoke, `fdrender --compat auto --frames 30` (160x90):
+  - MD3 pack, 477 files: all 271 files with MD3 evidence (146 `.milk2`, 125 `.milk`) resolve to MD3 and render with exit
+    code 0 (the resolved mode matches `detect_compat` for every file); 203 resolve to projectM and render (one with a
+    shader fallback, exit 3); 3 `.milk` resolve to projectM and fail to load (exit 2, `martin - liquid gold` and two
+    more: their per-frame code relies on MD2's glueing of split lines, `md2_code_join`, so they also fail with a fixed
+    `--compat projectm` and load with `md2` / `md3`: they carry no MD3 evidence, so auto keeps the reference).
+  - 400 corpus presets (seeded random sample of the 4194): 395 resolve to projectM and render; 5 fail to load, the same
+    ones projectM itself rejects (`docs/corpus.md`, "Robustness"). Detection alone over all 4194: 0 MD3.
 
 ## Expression engine (ns-eel2)
 

@@ -3807,14 +3807,21 @@ impl Renderer {
         let mode = self.stroke_mode();
 
         // ---- custom shapes ----
+        // scratch shared by every instance: a preset can have thousands
+        let mut g = geom::ShapeGeom::default();
+        let mut tri: Vec<MeshVertex> = Vec::new();
+        let mut edge: Vec<[f32; 2]> = Vec::new();
+        let mut segs: Vec<WfVertex> = Vec::new();
         for (si, s) in f.shapes.iter().enumerate() {
             // a textured shape with an `image=` samples that user texture; its texture aspect is 1
             let image = s.image.as_ref().filter(|_| s.textured);
-            let g = geom::shape_geometry_tex_max(
+            geom::shape_geometry_into(
+                &mut g,
                 s,
                 asp_y,
                 if image.is_some() { 1.0 } else { asp_y },
                 rules.max_shape_sides,
+                s.textured,
             );
             let am = f
                 .md2_blend
@@ -3830,7 +3837,8 @@ impl Renderer {
             };
             if s.textured {
                 // MD2 textures the fill with the previous frame; uv per vertex
-                let mut tri = Vec::with_capacity(3 * g.pts.len().saturating_sub(2));
+                tri.clear();
+                tri.reserve(3 * g.pts.len().saturating_sub(2));
                 for i in 1..g.pts.len() - 1 {
                     for k in [0, i, i + 1] {
                         tri.push(MeshVertex {
@@ -3860,10 +3868,9 @@ impl Renderer {
                     b.tex(tex_blend, &tri);
                 }
             } else {
-                let colors: Vec<[f32; 4]> = (0..g.pts.len())
-                    .map(|k| if k == 0 { c1 } else { c2 })
-                    .collect();
-                b.flat(blend, &geom::fan_to_list(&g.pts, &colors));
+                b.flat_extend(Prim::Tri, blend, |out| {
+                    geom::push_fan(out, &g.pts, c1, c2);
+                });
             }
             // projectM `CustomShape::Draw`: `border_a > 0.0001f`
             if s.border_rgba[3] > 0.0001 {
@@ -3874,16 +3881,17 @@ impl Renderer {
                 } else {
                     (1.0 / w, 1.0 / h)
                 };
-                let mut pts: Vec<[f32; 2]> = g.pts[1..].to_vec(); // sides + 1 points (closed)
+                edge.clear();
+                edge.extend_from_slice(&g.pts[1..]); // sides + 1 points (closed)
                 for it in 0..its {
                     match it {
-                        1 => pts.iter_mut().for_each(|p| p[0] += inc_x),
-                        2 => pts.iter_mut().for_each(|p| p[1] -= inc_y),
-                        3 => pts.iter_mut().for_each(|p| p[0] -= inc_x),
+                        1 => edge.iter_mut().for_each(|p| p[0] += inc_x),
+                        2 => edge.iter_mut().for_each(|p| p[1] -= inc_y),
+                        3 => edge.iter_mut().for_each(|p| p[0] -= inc_x),
                         _ => {}
                     }
-                    let v = geom::strip_segments(&pts, |_| bc);
-                    b.segments(mode, LineRule::Diamond, blend, w, h, &v);
+                    geom::strip_segments_into(&mut segs, &edge, |_| bc);
+                    b.segments(mode, LineRule::Diamond, blend, w, h, &segs);
                 }
             }
         }

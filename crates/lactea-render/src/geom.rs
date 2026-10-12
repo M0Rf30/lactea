@@ -185,7 +185,19 @@ pub fn push_line(
 /// A line strip as `LineList` vertex pairs (`GL_LINE_STRIP` semantics: every segment is rasterised on its own;
 /// vertex colours interpolate along each segment). `color_of(i)` is the colour of point `i`.
 pub fn strip_segments(pts: &[[f32; 2]], color_of: impl Fn(usize) -> [f32; 4]) -> Vec<WfVertex> {
-    let mut out = Vec::with_capacity(pts.len().saturating_sub(1) * 2);
+    let mut out = Vec::new();
+    strip_segments_into(&mut out, pts, color_of);
+    out
+}
+
+/// [`strip_segments`] into a reusable buffer (cleared first).
+pub fn strip_segments_into(
+    out: &mut Vec<WfVertex>,
+    pts: &[[f32; 2]],
+    color_of: impl Fn(usize) -> [f32; 4],
+) {
+    out.clear();
+    out.reserve(pts.len().saturating_sub(1) * 2);
     for i in 0..pts.len().saturating_sub(1) {
         out.push(WfVertex {
             pos: pts[i],
@@ -196,7 +208,6 @@ pub fn strip_segments(pts: &[[f32; 2]], color_of: impl Fn(usize) -> [f32; 4]) ->
             color: color_of(i + 1),
         });
     }
-    out
 }
 
 /// `D3DPT_POINTLIST` with `D3DRS_POINTSIZE = size`: an axis-aligned `size`x`size` pixel square
@@ -225,7 +236,7 @@ pub fn push_point(
 
 /// Triangle fan `v[0], v[1..]` -> triangle list. `colors` per vertex.
 pub fn fan_to_list(pts: &[[f32; 2]], colors: &[[f32; 4]]) -> Vec<WfVertex> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(3 * pts.len().saturating_sub(2));
     for i in 1..pts.len() - 1 {
         for k in [0, i, i + 1] {
             out.push(WfVertex {
@@ -235,6 +246,19 @@ pub fn fan_to_list(pts: &[[f32; 2]], colors: &[[f32; 4]]) -> Vec<WfVertex> {
         }
     }
     out
+}
+
+/// [`fan_to_list`] appended to `out` for a fan whose centre has colour `centre` and every other vertex `rim`.
+pub fn push_fan(out: &mut Vec<WfVertex>, pts: &[[f32; 2]], centre: [f32; 4], rim: [f32; 4]) {
+    out.reserve(3 * pts.len().saturating_sub(2));
+    for i in 1..pts.len() - 1 {
+        for k in [0, i, i + 1] {
+            out.push(WfVertex {
+                pos: pts[k],
+                color: if k == 0 { centre } else { rim },
+            });
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------------------
@@ -796,10 +820,11 @@ pub fn motion_vector_lines(
 // -----------------------------------------------------------------------------------------
 
 /// Geometry of one custom-shape instance (`DrawCustomShapes`).
+#[derive(Default)]
 pub struct ShapeGeom {
     /// Fan: centre + `sides` corners + closing corner (`sides + 2` points), clip space.
     pub pts: Vec<[f32; 2]>,
-    /// Texture coordinates for the textured variant (same indexing).
+    /// Texture coordinates for the textured variant (same indexing); empty unless asked for.
     pub uv: Vec<[f32; 2]>,
     #[allow(dead_code)]
     pub sides: usize,
@@ -821,33 +846,61 @@ pub fn shape_geometry_tex(s: &ShapeInstance, aspect_y: f32, tex_aspect_y: f32) -
 
 /// [`shape_geometry_tex`] with the compat mode's side limit (`CompatRules::max_shape_sides`: 100, 500 under
 /// MilkDrop 3, whose vertex buffers hold the `sides + 2` fan vertices).
+#[cfg(test)]
 pub fn shape_geometry_tex_max(
     s: &ShapeInstance,
     aspect_y: f32,
     tex_aspect_y: f32,
     max_sides: i32,
 ) -> ShapeGeom {
+    let mut g = ShapeGeom::default();
+    shape_geometry_into(&mut g, s, aspect_y, tex_aspect_y, max_sides, true);
+    g
+}
+
+/// The geometry of a shape instance into `g`, reusing its buffers. The texture coordinates (`g.uv`) are only
+/// computed with `with_uv`: an untextured shape never reads them.
+pub fn shape_geometry_into(
+    g: &mut ShapeGeom,
+    s: &ShapeInstance,
+    aspect_y: f32,
+    tex_aspect_y: f32,
+    max_sides: i32,
+    with_uv: bool,
+) {
     let sides = s.sides.clamp(3, max_sides.max(3)) as usize;
     let pi = 3.1415927f32;
     // clip (fixed-function y is the negation): `static_cast<float>(x * 2.0 - 1.0)` with the VM's double `x`
     let c0 = [(s.x * 2.0 - 1.0) as f32, (s.y * 2.0 - 1.0) as f32];
-    let mut pts = vec![c0];
-    let mut uv = vec![[0.5f32, 0.5f32]];
+    g.pts.clear();
+    g.uv.clear();
+    g.pts.reserve(sides + 2);
+    g.pts.push(c0);
+    if with_uv {
+        g.uv.reserve(sides + 2);
+        g.uv.push([0.5f32, 0.5f32]);
+    }
     for j in 1..sides + 1 {
         let t = (j - 1) as f32 / sides as f32;
         let a = t * pi * 2.0 + s.ang + pi * 0.25;
-        pts.push([c0[0] + s.rad * a.cos() * aspect_y, c0[1] - s.rad * a.sin()]);
-        let ta = t * pi * 2.0 + s.tex_ang + pi * 0.25;
-        // projectM: `1.0f - (0.5f - 0.5f * sinf(angle) / zoom)` (vertical flip); the same real number as
-        // `0.5 + 0.5 * sin / zoom` but the f32 rounding of the two differs by an ulp, which flips nearest-filtered ties
-        uv.push([
-            0.5 + 0.5 * ta.cos() / s.tex_zoom * tex_aspect_y,
-            1.0 - (0.5 - 0.5 * ta.sin() / s.tex_zoom),
-        ]);
+        g.pts
+            .push([c0[0] + s.rad * a.cos() * aspect_y, c0[1] - s.rad * a.sin()]);
+        if with_uv {
+            let ta = t * pi * 2.0 + s.tex_ang + pi * 0.25;
+            // projectM: `1.0f - (0.5f - 0.5f * sinf(angle) / zoom)` (vertical flip); the same real number as
+            // `0.5 + 0.5 * sin / zoom` but the f32 rounding of the two differs by an ulp, which flips
+            // nearest-filtered ties
+            g.uv.push([
+                0.5 + 0.5 * ta.cos() / s.tex_zoom * tex_aspect_y,
+                1.0 - (0.5 - 0.5 * ta.sin() / s.tex_zoom),
+            ]);
+        }
     }
-    pts.push(pts[1]);
-    uv.push(uv[1]);
-    ShapeGeom { pts, uv, sides }
+    g.pts.push(g.pts[1]);
+    if with_uv {
+        g.uv.push(g.uv[1]);
+    }
+    g.sides = sides;
 }
 
 /// Darken-center triangle fan (clip space), colours: centre alpha 3/32, rim 0.
@@ -1257,6 +1310,32 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(shape_geometry(&s2, 1.0).sides, 100);
+    }
+
+    /// An untextured shape skips the texture coordinates; the outline is the same, and a reused buffer carries nothing
+    /// over from the previous instance.
+    #[test]
+    fn untextured_shape_geometry_skips_uv_and_reuses_buffers() {
+        let big = ShapeInstance {
+            sides: 40,
+            rad: 0.3,
+            tex_zoom: 1.5,
+            tex_ang: 0.7,
+            ..Default::default()
+        };
+        let small = ShapeInstance {
+            sides: 5,
+            ..big.clone()
+        };
+        let mut g = ShapeGeom::default();
+        shape_geometry_into(&mut g, &big, 0.75, 0.75, 100, true);
+        shape_geometry_into(&mut g, &small, 0.75, 0.75, 100, false);
+        let want = shape_geometry_tex(&small, 0.75, 0.75);
+        assert_eq!(g.pts, want.pts);
+        assert_eq!(g.sides, 5);
+        assert!(g.uv.is_empty());
+        shape_geometry_into(&mut g, &small, 0.75, 0.75, 100, true);
+        assert_eq!(g.uv, want.uv);
     }
 
     /// MilkDrop 3 (`max_shape_sides` 500): `sides` is `clamp(int(sides), 3, 500)`, the fan has `sides + 2` vertices.

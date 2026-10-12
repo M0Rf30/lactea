@@ -1,6 +1,7 @@
 //! User textures: the host supplies pixels through [`TextureProvider`]; the engine never touches
 //! the filesystem.
 
+use crate::media::Media;
 use crate::rng::StreamRng;
 
 /// A decoded texture: RGBA8, row 0 = top.
@@ -27,6 +28,22 @@ pub trait TextureProvider {
     /// ascending (lowercase); duplicates are allowed and count as separate entries (projectM's
     /// texture scan keeps one entry per file).
     fn random_pool(&self) -> Vec<String>;
+
+    /// MilkDrop 3 (`Compat::MilkDrop3`): the shader texture `name` (same naming as [`TextureProvider::load`]),
+    /// looked up like MD3 does — `.gif` and `.jfif` files too, in the `textures`, `sprites` and `gifs` folders
+    /// ([`MediaFiles::find_texture`](crate::MediaFiles::find_texture)) — and an animated GIF returned as
+    /// [`Media::Animated`]. The default has no MD3 folders and no animation: it is [`TextureProvider::load`].
+    fn load_md3_texture(&mut self, name: &str) -> Option<Media> {
+        self.load(name).map(Media::Still)
+    }
+
+    /// MilkDrop 3: the image of a preset's `SpriteName`, a path relative to the MD3 data root with `\` or `/`
+    /// separators (`sprites\logo.png`); see [`MediaFiles::find_sprite`](crate::MediaFiles::find_sprite). Any format
+    /// the host can decode; a GIF comes back as [`Media::Animated`] (see [`decode_gif`](crate::decode_gif)).
+    /// The default finds nothing.
+    fn load_sprite(&mut self, _path: &str) -> Option<Media> {
+        None
+    }
 }
 
 /// projectM's `TextureManager::ExtractTextureSettings`: a name longer than 3 bytes whose third byte

@@ -1,8 +1,10 @@
 //! The engine: preset loading and the per-frame CPU pipeline (projectM `MilkdropPreset`).
 
+use crate::media::Media;
 use crate::rng::{ShaderStream, StreamRng, hue_offsets};
 use crate::runtime::{Env, NUM_Q, PerFrame, PerPixel, ShapeRt, WaveRt, compile_opt};
-use crate::textures::{Image, TextureProvider, pick_random, rand_slot};
+use crate::sprites::{SpriteInputs, SpriteRt};
+use crate::textures::{TextureProvider, pick_random, rand_slot};
 use crate::{
     EngineConfig, EngineError, ForcedFrame, FrameClock, PresetReport, ShaderFallback,
     ShaderOutcome, Transition, TransitionInfo,
@@ -77,6 +79,8 @@ struct Loaded {
     frames: u64,
     /// MilkDrop 2's `CBlendableFloat` blend state of this preset's base values (MD2-family soft cuts).
     floats: BlendBase,
+    /// MD3 preset sprite (`CompatRules::md3_preset_sprites`); gone when its `done` fires or the preset is replaced.
+    sprite: Option<SpriteRt>,
 }
 
 /// What the last rendered frame left behind for [`Engine::frame_vars`].
@@ -703,6 +707,23 @@ impl Engine {
             )
         };
 
+        // ---- MD3 preset sprite: killed with the previous preset, loaded with this one ------------------
+        let sprite = match preset.sprite.as_ref().filter(|_| rules.md3_preset_sprites) {
+            Some(cfg) => crate::sprites::load(
+                self.provider.as_mut(),
+                cfg,
+                renderer,
+                &gm,
+                join,
+                (self.last_time, self.last_frame_no),
+                &mut report,
+            ),
+            None => {
+                renderer.clear_sprite_images();
+                None
+            }
+        };
+
         let loaded = Loaded {
             name: name.to_string(),
             preset,
@@ -718,6 +739,7 @@ impl Engine {
             has_comp,
             frames: 0,
             floats: Default::default(),
+            sprite,
         };
         Ok((loaded, report))
     }
@@ -936,7 +958,8 @@ impl Engine {
         };
         let pool = provider.random_pool();
         let mut slot_pick: HashMap<usize, Option<String>> = HashMap::new();
-        let mut cache: HashMap<String, Option<Image>> = HashMap::new();
+        let mut cache: HashMap<String, Option<Media>> = HashMap::new();
+        let md3_gif = self.cfg.compat.rules().md3_gif_textures;
         for (name, pm_name) in wanted {
             let provider_name = match rand_slot(&name) {
                 Some(slot) => slot_pick
@@ -949,25 +972,40 @@ impl Engine {
                 report.unresolved_textures.push(name);
                 continue;
             };
-            let img = cache
-                .entry(pn.clone())
-                .or_insert_with(|| provider.load(&pn))
-                .clone();
-            match img {
-                Some(img)
+            let media = cache.entry(pn.clone()).or_insert_with(|| {
+                if md3_gif {
+                    provider.load_md3_texture(&pn)
+                } else {
+                    provider.load(&pn).map(Media::Still)
+                }
+            });
+            let set = match media {
+                Some(Media::Still(img))
                     if img.width > 0
                         && img.height > 0
                         && img.rgba8.len() == (img.width * img.height * 4) as usize =>
                 {
-                    match renderer.set_user_texture(&name, img.width, img.height, &img.rgba8) {
-                        Ok(()) => report.resolved_textures.push((name, pn)),
-                        Err(e) => {
-                            report.warnings.push(format!("texture {name}: {e}"));
-                            report.unresolved_textures.push(name);
-                        }
-                    }
+                    Some(renderer.set_user_texture(&name, img.width, img.height, &img.rgba8))
                 }
-                _ => report.unresolved_textures.push(name),
+                Some(Media::Animated(a)) => {
+                    let frames: Vec<&[u8]> = a.frames.iter().map(|f| f.rgba8.as_slice()).collect();
+                    Some(renderer.set_user_animation(
+                        &name,
+                        a.width,
+                        a.height,
+                        &frames,
+                        &a.delays(),
+                    ))
+                }
+                _ => None,
+            };
+            match set {
+                Some(Ok(())) => report.resolved_textures.push((name, pn)),
+                Some(Err(e)) => {
+                    report.warnings.push(format!("texture {name}: {e}"));
+                    report.unresolved_textures.push(name);
+                }
+                None => report.unresolved_textures.push(name),
             }
         }
     }
@@ -1251,7 +1289,7 @@ fn prepare_slot(
     md2: Option<&mut BlendState>,
 ) -> FrameInput {
     let g = slot.renderer.mesh_geometry();
-    let fi = match md2 {
+    let mut fi = match md2 {
         Some(m) => {
             let cx = FrameCtx {
                 cfg,
@@ -1273,6 +1311,23 @@ fn prepare_slot(
             &mut slot.last,
         ),
     };
+    if cfg.compat.rules().md3_preset_sprites
+        && let Some(sp) = slot.loaded.sprite.as_mut()
+    {
+        let inp = SpriteInputs {
+            time: clock.time,
+            frame: clock.frame,
+            fps: cfg.fps as f32,
+            progress,
+            bass: audio.bass,
+            mid: audio.mid,
+            treb: audio.treb,
+            bass_att: audio.bass_att,
+            mid_att: audio.mid_att,
+            treb_att: audio.treb_att,
+        };
+        fi.sprites.extend(sp.frame(&inp, (cfg.width, cfg.height)));
+    }
     slot.last.audio = Some(audio.clone());
     slot.last.time = clock.time as f32;
     slot.last.frame = clock.frame;

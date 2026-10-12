@@ -66,22 +66,46 @@ fn expo_len(b: &[u8], i: usize) -> usize {
     0
 }
 
-/// `strtoul(.., 16)`: saturates at `ULONG_MAX`.
-fn strtoul16(digits: &[u8]) -> f64 {
+/// Exponent suffix length at `i`: ns-eel2's scanner has no exponent notation (`1e3` is the number
+/// 1 followed by the variable `e3`, a syntax error).
+fn exponent(b: &[u8], i: usize, ns: bool) -> usize {
+    if ns { 0 } else { expo_len(b, i) }
+}
+
+/// `strtoul(.., 16)`: saturates at `ULONG_MAX` (32 bits wide for ns-eel2, built for Win64).
+fn strtoul16(digits: &[u8], ns: bool) -> f64 {
+    let max = if ns { u64::from(u32::MAX) } else { u64::MAX };
     let mut v: u64 = 0;
     for &d in digits {
         let n = (d as char)
             .to_digit(16)
             .expect("caller passes only ASCII hex digits") as u64;
         match v.checked_mul(16).and_then(|x| x.checked_add(n)) {
-            Some(x) => v = x,
-            None => return u64::MAX as f64,
+            Some(x) if x <= max => v = x,
+            _ => return max as f64,
         }
     }
     v as f64
 }
 
-pub(crate) fn lex(src: &str) -> Vec<Token> {
+/// Is the next non-blank byte at or after `i` a `[`?
+fn next_is_bracket(b: &[u8], i: usize) -> bool {
+    b[i..]
+        .iter()
+        .find(|c| !matches!(c, b' ' | b'\t' | b'\r' | b'\n' | 0x0b | 0x0c))
+        == Some(&b'[')
+}
+
+/// Is `name` a function the dialect lets programs call?
+fn known_func(name: &str, ns: bool) -> bool {
+    if ns {
+        crate::tree::lookup_func_ns(name).is_some()
+    } else {
+        crate::tree::lookup_func(name).is_some()
+    }
+}
+
+pub(crate) fn lex(src: &str, ns: bool) -> Vec<Token> {
     let mut b = src.as_bytes();
     // The C implementation scans a NUL terminated string.
     if let Some(p) = b.iter().position(|&c| c == 0) {
@@ -146,7 +170,7 @@ pub(crate) fn lex(src: &str) -> Vec<Token> {
                     while j < n && b[j].is_ascii_hexdigit() {
                         j += 1;
                     }
-                    push!(Tok::Num(strtoul16(&b[i + 2..j])), start, j - i);
+                    push!(Tok::Num(strtoul16(&b[i + 2..j], ns)), start, j - i);
                     i = j;
                 } else if rest.len() >= 3
                     && rest[0] == b'\''
@@ -160,17 +184,34 @@ pub(crate) fn lex(src: &str) -> Vec<Token> {
                     && rest[1].eq_ignore_ascii_case(&b'h')
                     && rest[2].eq_ignore_ascii_case(&b'i')
                 {
-                    // `1.61803399f`: a float literal widened to double.
-                    push!(Tok::Num(f64::from(f32::from_bits(0x3fcf_1bbd))), start, 4);
+                    // projectm-eval: `1.61803399f`, a float literal widened to double.
+                    // ns-eel2: the text `1.61803399` parsed as a double.
+                    let v = if ns {
+                        1.61803399_f64
+                    } else {
+                        f64::from(f32::from_bits(0x3fcf_1bbd))
+                    };
+                    push!(Tok::Num(v), start, 4);
                     i += 4;
                 } else if rest.len() >= 2
                     && rest[0].eq_ignore_ascii_case(&b'p')
                     && rest[1].eq_ignore_ascii_case(&b'i')
                 {
-                    push!(Tok::Num(f64::from(std::f32::consts::PI)), start, 3);
+                    let v = if ns {
+                        std::f64::consts::PI
+                    } else {
+                        f64::from(std::f32::consts::PI)
+                    };
+                    push!(Tok::Num(v), start, 3);
                     i += 3;
                 } else if !rest.is_empty() && rest[0].eq_ignore_ascii_case(&b'e') {
-                    push!(Tok::Num(f64::from(std::f32::consts::E)), start, 2);
+                    // ns-eel2 substitutes the 8-decimal text `2.71828183`.
+                    let v = if ns {
+                        2.71828183_f64
+                    } else {
+                        f64::from(std::f32::consts::E)
+                    };
+                    push!(Tok::Num(v), start, 2);
                     i += 2;
                 } else {
                     push!(Tok::Undef(b'$'), start, 1);
@@ -192,10 +233,10 @@ pub(crate) fn lex(src: &str) -> Vec<Token> {
                     }
                     let frac_digits = k - (j + 1);
                     if int_digits > 0 || frac_digits > 0 {
-                        end = k + expo_len(b, k);
+                        end = k + exponent(b, k, ns);
                     }
                 } else if int_digits > 0 {
-                    end = j + expo_len(b, j);
+                    end = j + exponent(b, j, ns);
                 }
                 if end == start {
                     // lone '.'
@@ -217,13 +258,18 @@ pub(crate) fn lex(src: &str) -> Vec<Token> {
             c if is_name_start(c) => {
                 let start = i;
                 let mut j = i + 1;
+                // '.' is not an identifier character in either dialect: MD3's compiler rejects
+                // `mouse.x` / `a.b` in preset code (docs/md3.md, measured), so the scanner ends the
+                // name there and the parser fails on the stray number or '.'.
                 while j < n && is_name_char(b[j]) {
                     j += 1;
                 }
                 let name = &src[start..j];
-                let tok = if name.eq_ignore_ascii_case("gmem") {
+                let tok = if name.eq_ignore_ascii_case("gmem") && (!ns || next_is_bracket(b, j)) {
+                    // ns-eel2 only treats `gmem` specially as the base of `gmem[..]`; a bare
+                    // `gmem` is an ordinary variable there.
                     Tok::Gmem
-                } else if crate::tree::lookup_func(name).is_some() {
+                } else if known_func(name, ns) {
                     Tok::Func(name.to_string())
                 } else {
                     Tok::Var(name.to_string())

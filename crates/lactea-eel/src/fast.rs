@@ -11,7 +11,8 @@
 //! exact interpreter, so semantics are preserved for the whole language.
 
 use crate::context::Context;
-use crate::eval::{CLOSE, MAX_LOOP, assign_op, b2f, bin, cvt_i64, mem_index};
+use crate::eval::{CLOSE, MAX_LOOP, assign_op, b2f, bin, cvt_i64, resolve_mem};
+use crate::ns;
 use crate::tree::{AssignOp, BinOp, Loc, Node, UnOp};
 
 /// Operand: constants and local variables are inlined (no recursive call).
@@ -47,17 +48,23 @@ pub(crate) enum FNode {
     /// `a op b` where `a` is a local variable and `b` may modify it: `a` is read after `b`.
     BinDeferVar(BinOp, u32, Opd),
     BinDeferReg(BinOp, u8, Opd),
-    And(Opd, Opd),
-    Or(Opd, Opd),
-    If(Opd, Opd, Opd),
+    /// The trailing `bool` of the control nodes is the ns-eel2 flag (see the matching `Node`).
+    And(Opd, Opd, bool),
+    Or(Opd, Opd, bool),
+    If(Opd, Opd, Opd, bool),
     Exec2(Opd, Opd),
     List(Box<[FNode]>, Opd),
-    Loop(Opd, Opd),
-    While(Opd),
+    Loop(Opd, Opd, bool),
+    While(Opd, bool),
     SetVar(u32, Opd),
-    SetReg(u8, Opd),
+    /// ns-eel2 `=` to a variable: the stored value is filtered.
+    SetVarF(u32, Opd),
+    /// `filter`: ns-eel2 `=`.
+    SetReg(u8, Opd, bool),
     SetMem {
         global: bool,
+        ns: bool,
+        filter: bool,
         idx: Opd,
         rhs: Opd,
     },
@@ -66,11 +73,13 @@ pub(crate) enum FNode {
     OpMem {
         op: AssignOp,
         global: bool,
+        ns: bool,
         idx: Opd,
         rhs: Opd,
     },
     MemGet {
         global: bool,
+        ns: bool,
         idx: Opd,
     },
     /// Exact-semantics subtree.
@@ -98,7 +107,7 @@ fn merge(a: Out, b: Out) -> Out {
 /// implementation keeps one out-pointer across iterations).
 fn out_kind(n: &Node) -> Out {
     match n {
-        Node::Const(_) | Node::Un(..) | Node::Bin { .. } | Node::And(_) | Node::Or(_) => {
+        Node::Const(_) | Node::Un(..) | Node::Bin { .. } | Node::And(..) | Node::Or(..) => {
             Out::Writer
         }
         Node::Var(_) | Node::List { .. } | Node::Loop { .. } | Node::While { .. } => Out::Keeper,
@@ -120,8 +129,8 @@ fn lowerable(n: &Node) -> bool {
     match n {
         Node::Const(_)
         | Node::Un(..)
-        | Node::And(_)
-        | Node::Or(_)
+        | Node::And(..)
+        | Node::Or(..)
         | Node::If { .. }
         | Node::Exec2 { .. }
         | Node::List { .. }
@@ -195,17 +204,17 @@ pub(crate) fn lower(n: Node) -> FNode {
                 op => FNode::Bin(op, a, b),
             }
         }
-        Node::And(args) => {
+        Node::And(args, ns) => {
             let [a, b] = *args;
-            FNode::And(opd(a), opd(b))
+            FNode::And(opd(a), opd(b), ns)
         }
-        Node::Or(args) => {
+        Node::Or(args, ns) => {
             let [a, b] = *args;
-            FNode::Or(opd(a), opd(b))
+            FNode::Or(opd(a), opd(b), ns)
         }
-        Node::If { args, .. } => {
+        Node::If { args, ns, .. } => {
             let [c, t, f] = *args;
-            FNode::If(opd(c), opd(t), opd(f))
+            FNode::If(opd(c), opd(t), opd(f), ns)
         }
         Node::Exec2 { args, .. } => {
             let [a, b] = *args;
@@ -216,19 +225,24 @@ pub(crate) fn lower(n: Node) -> FNode {
             let last = v.pop().expect("non-empty list");
             FNode::List(v.into_boxed_slice(), to_opd(last))
         }
-        Node::Loop { args, .. } => {
+        Node::Loop { args, ns, .. } => {
             let [c, b] = *args;
-            FNode::Loop(opd(c), opd(b))
+            FNode::Loop(opd(c), opd(b), ns)
         }
-        Node::While { arg, .. } => FNode::While(opd(*arg)),
-        Node::Set { args, .. } => {
+        Node::While { arg, ns, .. } => FNode::While(opd(*arg), ns),
+        Node::Set { args, filter, .. } => {
             let [l, r] = *args;
             let rhs = opd(r);
             match l {
+                Node::Var(Loc::Var(i)) if filter => FNode::SetVarF(i, rhs),
                 Node::Var(Loc::Var(i)) => FNode::SetVar(i, rhs),
-                Node::Var(Loc::Reg(i)) => FNode::SetReg(i, rhs),
-                Node::Mem { global, arg, .. } => FNode::SetMem {
+                Node::Var(Loc::Reg(i)) => FNode::SetReg(i, rhs, filter),
+                Node::Mem {
+                    global, ns, arg, ..
+                } => FNode::SetMem {
                     global,
+                    ns,
+                    filter,
                     idx: opd(*arg),
                     rhs,
                 },
@@ -241,17 +255,23 @@ pub(crate) fn lower(n: Node) -> FNode {
             match l {
                 Node::Var(Loc::Var(i)) => FNode::OpVar(op, i, rhs),
                 Node::Var(Loc::Reg(i)) => FNode::OpReg(op, i, rhs),
-                Node::Mem { global, arg, .. } => FNode::OpMem {
+                Node::Mem {
+                    global, ns, arg, ..
+                } => FNode::OpMem {
                     op,
                     global,
+                    ns,
                     idx: opd(*arg),
                     rhs,
                 },
                 _ => unreachable!("checked by lowerable"),
             }
         }
-        Node::Mem { global, arg, .. } => FNode::MemGet {
+        Node::Mem {
+            global, ns, arg, ..
+        } => FNode::MemGet {
             global,
+            ns,
             idx: opd(*arg),
         },
         Node::FreeMbuf { arg } => lower(*arg),
@@ -318,6 +338,11 @@ impl Context {
                 self.vars[*i as usize] = v;
                 v
             }
+            FNode::SetVarF(i, rhs) => {
+                let v = ns::assign_filter(self.opd(rhs));
+                self.vars[*i as usize] = v;
+                v
+            }
             _ => self.fval_cold(n),
         }
     }
@@ -370,22 +395,35 @@ impl Context {
                 let y = self.opd(b);
                 bin(*op, self.global.reg(*i as usize), y)
             }
-            FNode::And(a, b) => {
-                if self.opd(a).abs() > CLOSE {
+            FNode::And(a, b, ns) => {
+                if *ns {
+                    if ns::truthy(self.opd(a)) {
+                        b2f(ns::truthy(self.opd(b)))
+                    } else {
+                        0.0
+                    }
+                } else if self.opd(a).abs() > CLOSE {
                     b2f(self.opd(b).abs() > CLOSE)
                 } else {
                     0.0
                 }
             }
-            FNode::Or(a, b) => {
-                if self.opd(a).abs() < CLOSE {
+            FNode::Or(a, b, ns) => {
+                if *ns {
+                    if ns::truthy(self.opd(a)) {
+                        1.0
+                    } else {
+                        b2f(ns::truthy(self.opd(b)))
+                    }
+                } else if self.opd(a).abs() < CLOSE {
                     b2f(self.opd(b).abs() > CLOSE)
                 } else {
                     1.0
                 }
             }
-            FNode::If(c, t, f) => {
-                if self.opd(c) != 0.0 {
+            FNode::If(c, t, f, ns) => {
+                let x = self.opd(c);
+                if if *ns { ns::truthy(x) } else { x != 0.0 } {
                     self.opd(t)
                 } else {
                     self.opd(f)
@@ -401,9 +439,13 @@ impl Context {
                 }
                 self.opd(last)
             }
-            FNode::Loop(count, body) => {
+            FNode::Loop(count, body, ns) => {
                 let mut last = self.opd(count);
-                let mut n = cvt_i64(last);
+                let mut n = if *ns {
+                    i64::from(ns::fistp32(last))
+                } else {
+                    cvt_i64(last)
+                };
                 if n > MAX_LOOP {
                     n = MAX_LOOP;
                 }
@@ -414,11 +456,11 @@ impl Context {
                 }
                 last
             }
-            FNode::While(cond) => {
+            FNode::While(cond, ns) => {
                 let mut left = MAX_LOOP;
                 loop {
                     let v = self.opd(cond);
-                    if v.abs() > CLOSE {
+                    if if *ns { ns::truthy(v) } else { v.abs() > CLOSE } {
                         left -= 1;
                         if left != 0 {
                             continue;
@@ -427,14 +469,26 @@ impl Context {
                     return v;
                 }
             }
-            FNode::SetReg(i, rhs) => {
-                let v = self.opd(rhs);
+            FNode::SetReg(i, rhs, filter) => {
+                let mut v = self.opd(rhs);
+                if *filter {
+                    v = ns::assign_filter(v);
+                }
                 self.global.set_reg(*i as usize, v);
                 v
             }
-            FNode::SetMem { global, idx, rhs } => {
-                let k = mem_index(self.opd(idx));
-                let v = self.opd(rhs);
+            FNode::SetMem {
+                global,
+                ns,
+                filter,
+                idx,
+                rhs,
+            } => {
+                let k = resolve_mem(self.opd(idx), *global, *ns);
+                let mut v = self.opd(rhs);
+                if *filter {
+                    v = ns::assign_filter(v);
+                }
                 if let Some(k) = k {
                     self.mem_write(*global, k, v);
                 }
@@ -455,10 +509,11 @@ impl Context {
             FNode::OpMem {
                 op,
                 global,
+                ns,
                 idx,
                 rhs,
             } => {
-                let k = mem_index(self.opd(idx));
+                let k = resolve_mem(self.opd(idx), *global, *ns);
                 let r = self.opd(rhs);
                 match k {
                     Some(k) => {
@@ -470,7 +525,7 @@ impl Context {
                     None => assign_op(*op, 0.0, r),
                 }
             }
-            FNode::MemGet { global, idx } => match mem_index(self.opd(idx)) {
+            FNode::MemGet { global, ns, idx } => match resolve_mem(self.opd(idx), *global, *ns) {
                 Some(k) => self.mem_read(*global, k),
                 None => 0.0,
             },

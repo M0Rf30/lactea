@@ -1,5 +1,6 @@
 //! megabuf / gmegabuf / reg00..reg99 storage (MemoryBuffer.c, TreeVariables.c).
 
+use crate::ns::Dialect;
 use crate::rng::{Mt, PROJECTM_DEFAULT_SEED};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -11,15 +12,16 @@ pub(crate) const BLOCK_MASK: usize = BLOCK_LEN - 1;
 pub const MEM_ITEMS: usize = BLOCKS * BLOCK_LEN;
 
 /// State shared by every [`Context`](crate::Context) of one engine: `gmegabuf`, the
-/// `reg00..reg99` globals and the `rand()` generator.
+/// `reg00..reg99` globals and the `rand()` generator, plus the [`Dialect`] they all run.
 ///
 /// Registers and gmegabuf are relaxed atomics (no `unsafe`; a plain load/store on mainstream
 /// targets).  The exception is `rand()`: the generator is one `Mutex<Mt>` shared by all
 /// memories created with [`sharing_rng_with`](Self::sharing_rng_with), so each call takes a
 /// lock (uncontended in single-threaded use).  The type is `Send + Sync`.
 pub struct GlobalMemory {
-    regs: [AtomicU64; 100],
-    blocks: Vec<OnceLock<Box<[AtomicU64]>>>,
+    dialect: Dialect,
+    regs: Arc<[AtomicU64; 100]>,
+    blocks: Arc<Vec<OnceLock<Box<[AtomicU64]>>>>,
     rng: Arc<Mutex<Mt>>,
 }
 
@@ -29,25 +31,53 @@ impl Default for GlobalMemory {
     }
 }
 
+fn new_regs() -> Arc<[AtomicU64; 100]> {
+    Arc::new(std::array::from_fn(|_| AtomicU64::new(0)))
+}
+
+fn new_blocks() -> Arc<Vec<OnceLock<Box<[AtomicU64]>>>> {
+    Arc::new((0..BLOCKS).map(|_| OnceLock::new()).collect())
+}
+
 impl GlobalMemory {
-    /// Empty memory with its own `rand()` stream seeded with [`PROJECTM_DEFAULT_SEED`].
+    /// Empty memory with its own `rand()` stream seeded with [`PROJECTM_DEFAULT_SEED`],
+    /// for [`Dialect::ProjectMEval`].
     pub fn new() -> Self {
+        Self::with_dialect(Dialect::ProjectMEval)
+    }
+
+    /// Like [`new`](Self::new) for the given dialect.  Every [`Context`](crate::Context) created
+    /// on this memory compiles and runs that dialect.
+    pub fn with_dialect(dialect: Dialect) -> Self {
         GlobalMemory {
-            regs: std::array::from_fn(|_| AtomicU64::new(0)),
-            blocks: (0..BLOCKS).map(|_| OnceLock::new()).collect(),
+            dialect,
+            regs: new_regs(),
+            blocks: new_blocks(),
             rng: Arc::new(Mutex::new(Mt::new(PROJECTM_DEFAULT_SEED))),
         }
     }
 
-    /// Fresh `reg00..reg99` / gmegabuf that draw `rand()` from the **same** stream as `other`.
+    /// The dialect of the contexts built on this memory.
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    /// Memory that draws `rand()` from the **same** stream as `other` and runs its dialect.
     ///
     /// projectm-eval's generator is one process-wide static: every preset loaded in a process
-    /// (also two presets blending during a transition) advances the same sequence, while
-    /// registers and megabuffers are per preset.
+    /// (also two presets blending during a transition) advances the same sequence.  There
+    /// `reg00..reg99` and gmegabuf are per preset (fresh here).  ns-eel2 keeps them as
+    /// process-wide statics too, never cleared by a preset change, so for
+    /// [`Dialect::NsEel2`] they are shared with `other` as well.
     pub fn sharing_rng_with(other: &GlobalMemory) -> Self {
+        let (regs, blocks) = match other.dialect {
+            Dialect::ProjectMEval => (new_regs(), new_blocks()),
+            Dialect::NsEel2 => (Arc::clone(&other.regs), Arc::clone(&other.blocks)),
+        };
         GlobalMemory {
-            regs: std::array::from_fn(|_| AtomicU64::new(0)),
-            blocks: (0..BLOCKS).map(|_| OnceLock::new()).collect(),
+            dialect: other.dialect,
+            regs,
+            blocks,
             rng: Arc::clone(&other.rng),
         }
     }
@@ -86,10 +116,10 @@ impl GlobalMemory {
 
     /// Zeroes gmegabuf and reg00..reg99.
     pub fn reset(&self) {
-        for r in &self.regs {
+        for r in self.regs.iter() {
             r.store(0, Relaxed);
         }
-        for b in &self.blocks {
+        for b in self.blocks.iter() {
             if let Some(b) = b.get() {
                 for c in b.iter() {
                     c.store(0, Relaxed);

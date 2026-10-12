@@ -110,3 +110,28 @@ verification in [`md3.md`](md3.md).
 | Mouse (`md3_extended_vars`) | BeatDrop `mousex` ... | EEL `mouse.x/.y/.z/.w` (bottom-origin y) in the per-frame and per-vertex VMs, shader `_c14` (top-origin y); `mouse.x/.y` are blended in soft cuts, `.z/.w` are not |
 | Shader `time` (`md3_shader_time`, `_c2.x`) | absolute frame time | seconds since this state's preset started, modulo 10000 (the outgoing state of a blend uses its own start) |
 | Generated composite shader of presets without `comp_N` (`md3_md2_comp_effects`) | brighten `1-(1-ret)^2`, solarize `*2` | brighten `sqrt(ret)`, solarize `*4` |
+
+## MilkDrop 3
+
+Differences of `Compat::MilkDrop3` from MilkDrop 2 (see [`md3.md`](md3.md)); everything not listed is as in MilkDrop 2.
+
+| Item | projectM / MilkDrop 2 | MilkDrop 3 |
+|---|---|---|
+| Expression language (`md3_ns_eel2`) | projectm-eval (`Dialect::ProjectMEval`) | ns-eel2 (`Dialect::NsEel2`) |
+| `/` | `\|divisor\| < 1e-5` gives 0 | unguarded: ±Inf / NaN (`1/0.000001 = 1e6`) |
+| `=` and compound operators | all store the raw result | `=` stores 0 for NaN / Inf / denormal / `-0`; `+= -= *= /= %= ^= \|= &=` store the raw result |
+| `%`, `%=` | signed C remainder of the truncated 64-bit operands (`-7 % 3 = -1` through a variable) | `\|a\| mod \|b\|` of the rounded 32-bit operands, zero divisor 0 (`b=-7; b%3 = 1`) |
+| Conversions (`&`, `\|`, `%`, `loop`, memory index) | truncation | round to nearest even |
+| Operator levels | `%` below `^`; a unary `-` binds tighter than `^` and `%` | `%` and `^` one left-associative level above `*`; a unary `-` covers the whole `%` / `^` chain (`-7%3 = -1`, `-2^2 = -4`); `&` / `\|` below `+` as before |
+| Number literals | exponent notation (`1e-5`) | none: `1e-5` does not compile (`.5`, `5.` do) |
+| Identifiers | letters, digits, `_` | the same: `mouse.x`, `a.b` do not compile (the spec's `mouse.x` EEL access does not exist in MD3 3.37) |
+| `c ? x` without `:` | syntax error | `c ? x : 0` |
+| Truthiness (`if`, `&&`, `\|\|`, `!`, `while`) | `if`: `!= 0`; `&&` / `\|\|` / `while`: `\|x\| > 1e-5` | `\|x\| >= 1e-5` everywhere (NaN false); `==` / `!=` as `\|a-b\| < 1e-5` / `>= 1e-5` |
+| `pow`, `log`, `log10`, `asin`, `acos`, `invsqrt` | guarded to 0 / double magic number | raw IEEE results; `invsqrt` float32 magic number |
+| `sign`, `sqrt` | `sign(±0) = 0` | `sign(-0) = -0` until stored; `sqrt(\|x\|)` in both |
+| `$PI`, `$E`, `$PHI` | float32 values | `3.141592653589793`, `2.71828183`, `1.61803399` |
+| `megabuf` index | `trunc(i + 0.0001)` | `round(i + 1e-5)` |
+| `gmegabuf`, `reg00..reg99` | per preset, 8M entries, out of range reads 0 | one 1,048,576-entry array that wraps, shared by all presets and never cleared; registers shared by all presets |
+| `memcpy`, `memset` | `trunc(x + 0.0001)` | `trunc(x)` |
+| Callable functions | table plus `_add _sub _mul _div _neg`, bare `gmem` is a keyword | the 53-entry table only; a bare `gmem` is a variable |
+| Code that fails to compile (`md3_drop_failed_code`) | the preset is rejected (`EngineError::Compile`; BeatDrop itself drops the part) | the part is dropped with a warning and the preset loads; a failed init leaves `q` at 0 |

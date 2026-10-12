@@ -104,6 +104,11 @@ jobs:
       # bits are cfg-gated; see README "WebAssembly").
       - run: cargo check -p lactea --target wasm32-unknown-unknown
       # The wasm-bindgen demo (own workspace, own lock file): see README "WebAssembly".
+      # release-plz bumps the workspace version and refreshes only the root Cargo.lock, so first
+      # re-sync the lactea path crates (`-p` touches only them), then check locked.
+      - run: >-
+          cargo update --manifest-path examples/web/Cargo.toml
+          -p lactea -p lactea-abi -p lactea-audio -p lactea-eel -p lactea-hlsl -p lactea-preset -p lactea-render
       - run: cargo check --locked --manifest-path examples/web/Cargo.toml --target wasm32-unknown-unknown
 
   app-platforms:

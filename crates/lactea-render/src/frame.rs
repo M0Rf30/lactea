@@ -86,6 +86,9 @@ pub struct FrameInput {
     pub md2_blend: Option<crate::blend::Md2Blend>,
     /// MilkDrop 3 shader inputs (`_c14`, `_qi.._qp`, shader time, FFT); neutral outside MilkDrop 3.
     pub ext: crate::ShaderExt,
+    /// MilkDrop 3 preset sprites to draw this frame (see [`SpriteDraw::layer`] for where each goes); empty for
+    /// everything but `Compat::MilkDrop3` presets that carry a sprite.
+    pub sprites: Vec<crate::sprite::SpriteDraw>,
 }
 
 /// Decay, composite-pass controls.
@@ -434,6 +437,7 @@ impl Default for FrameInput {
             comp_random: None,
             hue_offsets: None,
             md2_blend: None,
+            sprites: Vec::new(),
         }
     }
 }

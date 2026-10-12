@@ -54,6 +54,7 @@ mod renderer;
 mod rng;
 mod shader_ext;
 mod shaders;
+mod sprite;
 mod stroke;
 mod transition;
 pub mod uniforms;
@@ -70,6 +71,10 @@ pub use frame::{
 pub use renderer::Renderer;
 pub use rng::Rng;
 pub use shader_ext::ShaderExt;
+pub use sprite::{
+    SPRITE_MODES, SpriteDraw, SpriteVertex, gif_frame_index, sprite_blend_reference, sprite_mode,
+    sprite_vertex_color,
+};
 pub use transition::{TransitionBlender, TransitionKind, TransitionParams};
 #[cfg(feature = "diagnostics")]
 pub use uniforms::RotParams;

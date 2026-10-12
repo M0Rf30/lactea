@@ -245,6 +245,17 @@ pub struct CompatRules {
     /// Ordinary soft cuts draw their blend pattern from MilkDrop 3's 30 patterns (the enabled list) instead of
     /// BeatDrop's 19. Needs `md2_preset_blend`.
     pub md3_blend_patterns: bool,
+    /// MilkDrop 3: a preset's sprite block (`SpriteName` .. `SpriteRepeatY`, docs/md3.md) loads an image and draws
+    /// it every frame at the layer the preset names, with the 11 sprite blend modes. projectM and MilkDrop 2 never
+    /// draw preset sprites.
+    pub md3_preset_sprites: bool,
+    /// MilkDrop 3: shader textures (`sampler_<name>`) are also searched in the `sprites` and `gifs` folders, accept
+    /// `.gif` / `.jfif` files, and an animated GIF shows the frame picked by `fmod(time, total)` of its delays.
+    pub md3_gif_textures: bool,
+    /// MilkDrop 3: a burning sprite in layers 1..4 is drawn **twice** into the feedback image (it burns into the
+    /// image it is already drawn on), so additive and alpha modes are twice as strong with `SpriteBurn=1` as with 0.
+    /// Measured against MD3 under Wine (docs/md3.md, sprites).
+    pub md3_sprite_burn_twice: bool,
 }
 
 impl Compat {
@@ -312,6 +323,9 @@ impl Compat {
                 md3_drop_failed_code: false,
                 md3_double_preset: false,
                 md3_blend_patterns: false,
+                md3_preset_sprites: false,
+                md3_gif_textures: false,
+                md3_sprite_burn_twice: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -374,6 +388,9 @@ impl Compat {
                 md3_drop_failed_code: false,
                 md3_double_preset: false,
                 md3_blend_patterns: false,
+                md3_preset_sprites: false,
+                md3_gif_textures: false,
+                md3_sprite_burn_twice: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
@@ -393,6 +410,9 @@ impl Compat {
                 md3_drop_failed_code: true,
                 md3_double_preset: true,
                 md3_blend_patterns: true,
+                md3_preset_sprites: true,
+                md3_gif_textures: true,
+                md3_sprite_burn_twice: true,
                 ..Compat::MilkDrop2.rules()
             },
         }
@@ -529,5 +549,25 @@ mod tests {
         }
         assert!(Compat::MilkDrop3.rules().md3_ns_eel2);
         assert!(Compat::MilkDrop3.rules().md3_drop_failed_code);
+    }
+
+    #[test]
+    fn sprite_rules_are_milkdrop_3_only() {
+        for (c, md3) in [
+            (Compat::ProjectM, false),
+            (Compat::MilkDrop2, false),
+            (Compat::MilkDrop3, true),
+        ] {
+            let r = c.rules();
+            assert_eq!(
+                (
+                    r.md3_preset_sprites,
+                    r.md3_gif_textures,
+                    r.md3_sprite_burn_twice
+                ),
+                (md3, md3, md3),
+                "{c:?}"
+            );
+        }
     }
 }

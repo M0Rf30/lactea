@@ -151,3 +151,12 @@ Differences of `Compat::MilkDrop3` from MilkDrop 2 (see [`md3.md`](md3.md)); eve
 | PRESET2 failing to build at the end of the first soft-in leg | n/a | MD3 reports the failed load; here the switch-failed callback runs and PRESET1 stays alone on screen |
 | `DoublePresetMode` (F9 random pairs), `AutoHardCutMode`'s first-six-patterns rule, the `p` / `P` / `o` / `U` / `u` live edits | n/a | not played / exposed; `md3_random_instance` implements the draws (including both) for hosts that build pairs |
 | MD3's `FFTAttack` / `FFTDecay` side effect of importing a half | n/a | not implemented (audio smoothing belongs to the audio slice) |
+
+## MilkDrop 3 (`Compat::MilkDrop3`, see [`md3.md`](md3.md))
+
+| Item | projectM / MilkDrop 2 | MilkDrop 3 |
+|---|---|---|
+| Preset sprite (`md3_preset_sprites`): `[SPRITE1_BEGIN]` block, one image, 11 blend modes, layers 0..4 | the block is ignored (projectM, MD2: no preset sprites) | the sprite is loaded with the preset and drawn every frame ([`md3.md`](md3.md#sprites)) |
+| Sprite burn in layers 1..4 (`md3_sprite_burn_twice`) | n/a | a burning sprite is drawn twice into the feedback image: `SpriteBurn=1` (every pack preset) makes additive / alpha sprites twice as strong as `SpriteBurn=0`. Measured against MD3 under Wine (spec open question 1) |
+| Shader textures from GIF / `sprites` / `gifs` (`md3_gif_textures`) | `sampler_<name>` searched in the texture folders with `jpg jpeg dds png tga bmp dib`; a still image | also `.jfif` / `.gif`, folders `textures`, `sprites`, `gifs`; an animated GIF shows frame `fmod(time, total)` of its delays |
+| Animated image provider API | `TextureProvider::load` returns one still image | `load_md3_texture` / `load_sprite` may return `Media::Animated` (frames + delays); hosts decode GIFs with `lactea::decode_gif` (GIF89a disposal) |

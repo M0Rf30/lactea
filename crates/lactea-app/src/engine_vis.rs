@@ -2,9 +2,10 @@
 //! and from [`FsTextureProvider`] to the engine's `TextureProvider`.
 
 use lactea::{
-    Compat, Engine, EngineConfig, FrameClock, Image, PresetReport, ShaderOutcome, TextureProvider,
-    Transition,
+    Compat, Engine, EngineConfig, FrameClock, Image, Media, MediaFiles, PresetReport,
+    ShaderOutcome, TEXTURE_EXTENSIONS, TextureProvider, Transition, decode_gif,
 };
+use std::path::{Path, PathBuf};
 
 use crate::cli::CompatArg;
 use crate::textures::FsTextureProvider;
@@ -22,11 +23,51 @@ pub struct EngineOptions {
     pub auto_hard_cut_mode: u8,
 }
 
-struct FsProvider(FsTextureProvider);
+/// The directories' textures for the engine: plain lookups through [`FsTextureProvider`], MilkDrop 3's sprites and
+/// GIFs through a [`MediaFiles`] index of the same directories.
+struct FsProvider {
+    fs: FsTextureProvider,
+    media: MediaFiles<PathBuf>,
+}
+
+impl FsProvider {
+    fn new(fs: FsTextureProvider) -> Self {
+        let mut media = MediaFiles::new();
+        for (rel, file) in crate::textures::media_listing(fs.dirs(), &TEXTURE_EXTENSIONS) {
+            media.add(&rel, file);
+        }
+        Self { fs, media }
+    }
+}
+
+/// A GIF (by content) as frames, anything else as a still image.
+fn decode_media(path: &Path) -> Option<Media> {
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.starts_with(b"GIF8") {
+        return match decode_gif(&bytes) {
+            Ok(a) => Some(Media::Animated(a)),
+            Err(e) => {
+                log::warn!("gif {}: {e}", path.display());
+                None
+            }
+        };
+    }
+    match crate::textures::decode_file(path) {
+        Ok(t) => Some(Media::Still(Image {
+            width: t.width,
+            height: t.height,
+            rgba8: t.rgba8,
+        })),
+        Err(e) => {
+            log::warn!("image {}: {e}", path.display());
+            None
+        }
+    }
+}
 
 impl TextureProvider for FsProvider {
     fn load(&mut self, name: &str) -> Option<Image> {
-        self.0.load(name).map(|t| Image {
+        self.fs.load(name).map(|t| Image {
             width: t.width,
             height: t.height,
             rgba8: t.rgba8,
@@ -34,7 +75,17 @@ impl TextureProvider for FsProvider {
     }
 
     fn random_pool(&self) -> Vec<String> {
-        self.0.random_pool()
+        self.fs.random_pool()
+    }
+
+    fn load_md3_texture(&mut self, name: &str) -> Option<Media> {
+        let path = self.media.find_texture(name)?.clone();
+        decode_media(&path)
+    }
+
+    fn load_sprite(&mut self, path: &str) -> Option<Media> {
+        let file = self.media.find_sprite(path)?.clone();
+        decode_media(&file)
     }
 }
 
@@ -85,7 +136,7 @@ impl EngineVisualizer {
             ..Default::default()
         };
         let mut engine = Engine::new(device, queue, cfg);
-        engine.set_texture_provider(Box::new(FsProvider(textures)));
+        engine.set_texture_provider(Box::new(FsProvider::new(textures)));
         engine.set_preset_switch_failed_callback(Some(|f: &lactea::SwitchFailure| {
             log::debug!(
                 "engine: preset switch failed for '{}': {}",

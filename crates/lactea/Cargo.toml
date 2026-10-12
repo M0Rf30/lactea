@@ -21,6 +21,7 @@ lactea-hlsl = { workspace = true }
 lactea-render = { workspace = true }
 wgpu = { workspace = true }
 thiserror = { workspace = true }
+gif = { version = "0.14.2", default-features = false, features = ["std"] }
 
 [features]
 # Oracle / teacher-forcing hooks (forced frames, injected images). Off by default.

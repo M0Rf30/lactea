@@ -172,7 +172,7 @@ impl FsTextureProvider {
 /// projectM decodes textures with `stbi_load(.., 4)` and sniffs the content. JPEG goes through the stb-exact
 /// decoder (`lactea-jpeg`: libjpeg-family decoders differ by up to 4 code values, which comp shaders
 /// amplify); the lossless formats go through the `image` crate.
-fn decode_file(path: &Path) -> Result<TextureImage, String> {
+pub fn decode_file(path: &Path) -> Result<TextureImage, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     if lactea_jpeg::is_jpeg(&bytes)
         && let Ok(img) = lactea_jpeg::decode_rgba(&bytes)
@@ -191,6 +191,57 @@ fn decode_file(path: &Path) -> Result<TextureImage, String> {
         height: rgba.height(),
         rgba8: rgba.into_raw(),
     })
+}
+
+/// The media files MilkDrop 3 may look for under `dirs`, as `(path relative to the MD3 data root, file)`: every
+/// file with one of `exts` below each directory (recursively, earlier directories first), registered as given
+/// (so a directory that is the data root yields `sprites/x.png`), plus, for a directory that is itself a
+/// `textures`, `sprites` or `gifs` folder, those three folders of its parent under their own names.
+#[cfg(feature = "engine")]
+pub fn media_listing(dirs: &[PathBuf], exts: &[&str]) -> Vec<(String, PathBuf)> {
+    fn walk(dir: &Path, rel: &str, depth: usize, exts: &[&str], out: &mut Vec<(String, PathBuf)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let Some(name) = p.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if p.is_dir() {
+                if depth < 8 {
+                    walk(&p, &path, depth + 1, exts, out);
+                }
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e.to_ascii_lowercase().as_str()))
+            {
+                out.push((path, p));
+            }
+        }
+    }
+    const FOLDERS: [&str; 3] = ["textures", "sprites", "gifs"];
+    let mut out = Vec::new();
+    for dir in dirs {
+        walk(dir, "", 0, exts, &mut out);
+        let is_folder = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| FOLDERS.contains(&n.to_ascii_lowercase().as_str()));
+        if let (true, Some(parent)) = (is_folder, dir.parent()) {
+            for sub in FOLDERS {
+                walk(&parent.join(sub), sub, 0, exts, &mut out);
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

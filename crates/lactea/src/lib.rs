@@ -34,9 +34,11 @@ mod control;
 mod engine;
 mod idle;
 mod md3_inputs;
+mod media;
 mod playlist;
 mod rng;
 mod runtime;
+mod sprites;
 mod teacher;
 mod textures;
 mod vars;
@@ -54,6 +56,7 @@ pub use lactea_audio::AudioFrame;
 pub use lactea_render::TransitionKind;
 pub use lactea_render::{Compat, Renderer};
 pub use md3_inputs::MouseState;
+pub use media::{AnimFrame, AnimatedImage, Media, MediaFiles, TEXTURE_EXTENSIONS, decode_gif};
 pub use playlist::{
     DEFAULT_RETRY_COUNT, FailedFn, Filter, INSERT_AT_END, LoadRequest, MAX_HISTORY, Playlist,
     SortOrder, SortPredicate, SwitchedFn,
@@ -263,4 +266,7 @@ pub struct PresetReport {
     pub unresolved_textures: Vec<String>,
     /// `(name the shader uses, name loaded from the provider)`; differs for `randNN` samplers.
     pub resolved_textures: Vec<(String, String)>,
+    /// `Compat::MilkDrop3`: the `SpriteName` of the preset's sprite when its image was loaded (so the sprite is drawn);
+    /// a sprite that could not be loaded is a warning instead.
+    pub sprite: Option<String>,
 }

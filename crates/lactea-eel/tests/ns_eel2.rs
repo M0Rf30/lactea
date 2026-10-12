@@ -363,19 +363,13 @@ fn preprocessor_and_names() {
 }
 
 /// Measured on MD3 3.37 (Wine): a '.' is not an identifier character, so `mouse.x` and `a.b` do not
-/// compile in preset code (the part is dropped). Host-registered names are looked up verbatim.
+/// compile in preset code (the part is dropped).
 #[test]
 fn dots_are_not_identifier_characters() {
     for src in ["a=mouse.x+2;", "a.b=3;", "a=b.c;", "mouse.x=1;"] {
         assert!(ctx().compile(src).is_err(), "{src}");
     }
     check(&[("a=1.5+.5;", 2.0), ("a=5.+1;", 6.0)]);
-    // the name table itself takes any string (the engine registers "mouse.x" like this)
-    let mut c = ctx();
-    let x = c.var("mouse.x");
-    c.set(x, 0.25);
-    assert_eq!(c.var("MOUSE.X"), x);
-    assert_eq!(c.get(x), 0.25);
 }
 
 /// Measured on MD3 3.37 (Wine): ns-eel2 numbers have no exponent notation.

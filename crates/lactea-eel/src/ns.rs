@@ -22,7 +22,7 @@ pub enum Dialect {
     ProjectMEval,
     /// Cockos ns-eel2 as MilkDrop 3 ships it: unguarded `/`, assignment filtering of
     /// NaN / Inf / denormals, integer `%`, `|x| >= 1e-5` truthiness, `$PI` constants only,
-    /// 8M-entry `megabuf`, wrapping 1M-entry `gmegabuf`, dotted identifiers, 53 functions.
+    /// 8M-entry `megabuf`, wrapping 1M-entry `gmegabuf`, 53 functions; `.` is not an identifier character.
     NsEel2,
 }
 

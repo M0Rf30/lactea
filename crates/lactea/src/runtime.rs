@@ -38,8 +38,6 @@ pub struct Env {
     /// `renderContext.aspectX/Y` and their inverses.
     pub aspect: [f32; 2],
     pub inv_aspect: [f32; 2],
-    /// MilkDrop 3 `mouse.x/.y/.z/.w` as the expressions see them (`y` is bottom-origin; `-1, -1` outside the window).
-    pub mouse: [f32; 4],
 }
 
 /// Compile `src` (a joined code block, see `lactea_preset`) into `ctx`; empty source gives `None` (projectM leaves
@@ -112,8 +110,6 @@ pub struct PerFrame {
     pub v: PfVars,
     pub prog: Option<Program>,
     pub q_after_init: [f64; MAX_Q],
-    /// MilkDrop 3: handles of `mouse.x/.y/.z/.w` (registered by [`PerFrame::extend_md3`]).
-    pub mouse: Option<[lactea_eel::Var; 4]>,
 }
 
 impl PerFrame {
@@ -126,15 +122,14 @@ impl PerFrame {
             v,
             prog: None,
             q_after_init: [0.0; MAX_Q],
-            mouse: None,
         }
     }
 
-    /// MilkDrop 3: `q33..q64` and `mouse.x/.y/.z/.w` join the context's variables (`monitor2` / `monitor3` are plain
-    /// user variables and persist like `monitor`).
+    /// MilkDrop 3: `q33..q64` join the context's variables (`monitor2` / `monitor3` are plain
+    /// user variables and persist like `monitor`). The `mouse.*` names are not registered: MD3's expression
+    /// grammar has no dotted identifiers, so preset code cannot read them (the mouse is a shader input only).
     pub fn extend_md3(&mut self) {
         crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
-        self.mouse = Some(crate::vars::register_mouse(&mut self.ctx));
     }
 
     pub fn q(&self, i: usize) -> f64 {
@@ -167,11 +162,6 @@ impl PerFrame {
         set(c, v.frame, f64::from(e.frame));
         for (q, &var) in self.q_after_init.iter().zip(&v.q) {
             c.set(var, *q);
-        }
-        if let Some(m) = &self.mouse {
-            for (k, &var) in m.iter().enumerate() {
-                c.set(var, f(e.mouse[k]));
-            }
         }
         set(c, v.progress, f(e.progress));
         set(c, v.decay, f(b.decay));
@@ -258,8 +248,6 @@ pub struct PerPixel {
     pub ctx: Context,
     pub v: PpVars,
     pub prog: Option<Program>,
-    /// MilkDrop 3: handles of `mouse.x/.y/.z/.w` (registered by [`PerPixel::extend_md3`]).
-    pub mouse: Option<[lactea_eel::Var; 4]>,
 }
 
 impl PerPixel {
@@ -271,14 +259,12 @@ impl PerPixel {
             ctx,
             v,
             prog: None,
-            mouse: None,
         }
     }
 
-    /// MilkDrop 3: `q33..q64` and `mouse.x/.y/.z/.w` join the context's variables.
+    /// MilkDrop 3: `q33..q64` join the context's variables.
     pub fn extend_md3(&mut self) {
         crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
-        self.mouse = Some(crate::vars::register_mouse(&mut self.ctx));
     }
 
     /// `PerPixelContext::LoadStateReadOnlyVariables` (note: `aspectx/y` are the *non*-inverse
@@ -303,12 +289,6 @@ impl PerPixel {
         set(c, v.pixelsy, f64::from(e.pixels[1]));
         set(c, v.aspectx, f64::from(e.aspect[0]));
         set(c, v.aspecty, f64::from(e.aspect[1]));
-        // MD3: the per-frame `mouse.*` values (loaded before the per-frame code) are copied once per frame
-        if let (Some(dst), Some(src)) = (&self.mouse, &pf.mouse) {
-            for (d, s) in dst.iter().zip(src) {
-                c.set(*d, pf.ctx.get(*s));
-            }
-        }
     }
 
     /// `PerPixelContext::LoadPerFrameQVariables` (once per frame, not per vertex).
@@ -551,10 +531,9 @@ mod tests {
     }
 
     /// The data flow of Annex A 4.7: q1..q64 restart from the init snapshot every frame, go pf -> pv, and the
-    /// custom waves / shapes see the *current* preset q (64) and their own t (16); mouse.* is loaded into the
-    /// per-frame context and copied to the per-vertex one before the per-frame code runs.
+    /// custom waves / shapes see the *current* preset q (64) and their own t (16).
     #[test]
-    fn md3_q64_t16_and_mouse_data_flow() {
+    fn md3_q64_t16_data_flow() {
         let gm = Arc::new(GlobalMemory::new());
         let (mut pf, mut pp) = (PerFrame::new(&gm), PerPixel::new(&gm));
         pf.extend_md3();
@@ -575,26 +554,14 @@ mod tests {
         }
         // frame: per-frame code changes q64 and writes q40; the next frame starts from the snapshot again
         pf.prog = compile_opt(&mut pf.ctx, "q40 = q64 + 1; q64 = 99;", false).unwrap();
-        let env = Env {
-            mouse: [0.25, 0.75, 1.0, 0.0],
-            ..Default::default()
-        };
+        let env = Env::default();
         for _ in 0..2 {
             pf.load_state(&BaseValues::default(), &env);
             pp.load_readonly(&pf, &env);
-            let m = pf.mouse.unwrap();
-            assert_eq!(pf.ctx.get(m[0]), 0.25);
-            assert_eq!(pf.ctx.get(m[1]), 0.75);
             assert_eq!(pf.q(63), 7.0, "q64 restarts from the init value");
             pf.run();
             assert_eq!(pf.q(39), 8.0);
         }
-        let pm = pp.mouse.unwrap();
-        assert_eq!(
-            pm.map(|v| pp.ctx.get(v)),
-            [0.25, 0.75, 1.0, 0.0],
-            "per-vertex mouse"
-        );
         pp.load_q(&pf);
         assert_eq!(
             (pp.ctx.get(pp.v.q[39]), pp.ctx.get(pp.v.q[63])),
@@ -621,11 +588,10 @@ mod tests {
     }
 
     #[test]
-    fn projectm_contexts_keep_32_q_and_8_t_and_no_mouse() {
+    fn projectm_contexts_keep_32_q_and_8_t() {
         let gm = Arc::new(GlobalMemory::new());
         let (pf, wave) = (PerFrame::new(&gm), WaveRt::new(&gm, CustomWave::default()));
         assert_eq!((pf.v.q.len(), wave.pfv.t.len()), (32, 8));
-        assert!(pf.mouse.is_none());
         assert!(pf.ctx.find_var("q33").is_none());
     }
 
@@ -659,17 +625,13 @@ mod tests {
         assert_eq!(eel_dialect(&Compat::MilkDrop3.rules()), Dialect::NsEel2);
     }
 
-    /// MD3 3.37 rejects a '.' inside identifiers (measured on the real program), so a part that
-    /// reads `mouse.x` as source text is dropped; a name the host registers is still found verbatim.
+    /// MD3 3.37 rejects a '.' inside identifiers (measured on the real program), so a part that reads `mouse.x`
+    /// as source text is dropped: preset code cannot read the mouse, only shaders can.
     #[test]
     fn dotted_names_do_not_parse_under_milkdrop3() {
         let (r, warnings) = part(Compat::MilkDrop3, "q1 = mouse.x * 2;\u{1}");
         assert!(r.unwrap().is_none());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        let mut ctx = Context::new(gm(Compat::MilkDrop3));
-        let x = ctx.var("mouse.x");
-        ctx.set(x, 0.5);
-        assert_eq!(ctx.find_var("Mouse.X").map(|v| ctx.get(v)), Some(0.5));
     }
 
     /// ns-eel2 numerics through the preset contexts: the unguarded `/` is filtered by `=`, `%` is integer.

@@ -275,14 +275,6 @@ pub(super) fn blend_vars(new: &mut PerFrame, old: &PerFrame, mix: f64, snap: f64
         blur3_max,
         blur1_edge_darken
     );
-    // MD3: `mouse.x` / `mouse.y` blend like the other per-frame outputs; `mouse.z` / `mouse.w` are neither blended
-    // nor snapped
-    if let (Some(n), Some(o)) = (new.mouse, old.mouse) {
-        for (&nv, &ov) in n.iter().zip(&o).take(2) {
-            let (a, b) = (new.ctx.get(nv), old.ctx.get(ov));
-            new.ctx.set(nv, mix * a + mix2 * b);
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------------------------

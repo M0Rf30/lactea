@@ -13,7 +13,8 @@ use lactea_preset::BaseValues;
 use lactea_render::{CompatRules, ShaderExt};
 use std::sync::Arc;
 
-/// The host's mouse, as MD3's `mouse.*` variables and `_c14` shader constant see it.
+/// The host's mouse, as MD3's `_c14` shader constant (`mouse`, `mouse_x` .. of the shader prelude) sees it. Preset
+/// expressions cannot read it: MD3's expression grammar has no dotted identifiers, so `mouse.x` does not compile there.
 ///
 /// Feed it with [`crate::Engine::set_mouse`] whenever the host learns something new (cursor move, button change);
 /// the engine reads the latest value once per rendered frame and derives the one-frame "released" edge itself, so a
@@ -29,11 +30,9 @@ pub struct MouseState {
     pub left_down: bool,
 }
 
-/// The mouse of one frame in the two conventions MD3 uses.
+/// The mouse of one frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MouseFrame {
-    /// `mouse.x`, `mouse.y` (bottom origin), `mouse.z`, `mouse.w` of the per-frame and per-vertex code.
-    pub eel: [f32; 4],
     /// `_c14` of the shaders: `x`, `y` (top origin), held, released.
     pub shader: [f32; 4],
 }
@@ -103,8 +102,8 @@ impl Md3Inputs {
 
     fn sample_mouse(&mut self) -> MouseFrame {
         let m = self.mouse;
-        // `((2 p / size - 1) * 0.5) + 0.5` and `((1 - 2 p / size) * 0.5) + 0.5`, -1 outside (MD3 3.37 stores the
-        // bottom-origin y and derives the shader's top-origin y as `1 - y`)
+        // `((2 p / size - 1) * 0.5) + 0.5`, -1 outside; MD3 3.37 stores the bottom-origin y and derives the
+        // shader's top-origin y as `1 - y`
         let (x, yb) = match m.position {
             Some([u, v]) => (((2.0 * u - 1.0) * 0.5) + 0.5, ((1.0 - 2.0 * v) * 0.5) + 0.5),
             None => (-1.0, -1.0),
@@ -118,7 +117,6 @@ impl Md3Inputs {
         };
         self.prev_down = m.left_down;
         MouseFrame {
-            eel: [x, yb, z, w],
             shader: [x, ys, z, w],
         }
     }
@@ -185,26 +183,21 @@ mod tests {
 
     /// Spec C 8.2: a 1920x1080 client.
     #[test]
-    fn mouse_values_in_both_conventions() {
+    fn mouse_values_in_the_shader_convention() {
         let (w, h) = (1920.0f32, 1080.0f32);
         let at = |px: f32, py: f32| Some([px / w, py / h]);
         let mut i = Md3Inputs::new();
         let m = sample(&mut i, at(960.0, 540.0), false);
         close(m.shader, [0.5, 0.5, 0.0, 0.0]);
-        close(m.eel, [0.5, 0.5, 0.0, 0.0]);
         let m = sample(&mut i, at(0.0, 0.0), false);
         close(m.shader, [0.0, 0.0, 0.0, 0.0]);
-        close(m.eel, [0.0, 1.0, 0.0, 0.0]);
         let m = sample(&mut i, at(480.0, 270.0), true);
         close(m.shader, [0.25, 0.25, 1.0, 0.0]);
-        close(m.eel, [0.25, 0.75, 1.0, 0.0]);
         let m = sample(&mut i, at(1919.0, 1079.0), false);
         close(m.shader, [0.99948, 0.99907, 0.0, 1.0]);
-        close(m.eel, [0.99948, 0.00093, 0.0, 1.0]);
-        // outside: (-1, -1) in both, the button state is not suppressed
+        // outside: (-1, -1), the button state is not suppressed
         let m = sample(&mut i, None, true);
         assert_eq!(m.shader, [-1.0, -1.0, 1.0, 0.0]);
-        assert_eq!(m.eel, [-1.0, -1.0, 1.0, 0.0]);
     }
 
     #[test]

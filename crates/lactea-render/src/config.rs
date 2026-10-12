@@ -219,8 +219,8 @@ pub struct CompatRules {
     /// the left spectrum, run once per rendered frame and kept across presets; `FFTAttack` / `FFTDecay` are sticky
     /// globals set by every preset load.
     pub md3_shader_fft: bool,
-    /// MilkDrop 3's extended expression and shader variables: `q1..q64`, `t1..t16`, `monitor2` / `monitor3`, the
-    /// `mouse.x/.y/.z/.w` variables of the per-frame and per-vertex code and the `_c14` / `_qi.._qp` shader constants.
+    /// MilkDrop 3's extended expression and shader variables: `q1..q64`, `t1..t16`, `monitor2` / `monitor3` and the
+    /// `_c14` / `_qi.._qp` shader constants (the mouse is a shader input only: `mouse.x` does not compile in preset code).
     pub md3_extended_vars: bool,
     /// The MilkDrop 3 shader prelude is part of every translated shader (`get_fft`, `get_fft_hz`, `mouse*`,
     /// `q33..q64`, `sampler_fft`).
@@ -232,7 +232,7 @@ pub struct CompatRules {
     /// brighten `sqrt(ret)`, solarize `ret * (1 - ret) * 4` (BeatDrop: `1 - (1 - ret)^2`, `* 2`).
     pub md3_md2_comp_effects: bool,
     /// Preset expressions run on ns-eel2 (`lactea_eel::Dialect::NsEel2`, MilkDrop 3's engine: unguarded `/`,
-    /// assignment filtering, integer `%`, `$PI` constants, dotted identifiers, 8M-entry `megabuf`, wrapping `gmegabuf`
+    /// assignment filtering, integer `%`, `$PI` constants, 8M-entry `megabuf`, wrapping `gmegabuf`
     /// and registers that outlive presets, ...) instead of projectm-eval. `docs/md3.md`, "Expression engine".
     pub md3_ns_eel2: bool,
     /// A code part that fails to compile is dropped (with a warning) and the preset still loads: a failed init part

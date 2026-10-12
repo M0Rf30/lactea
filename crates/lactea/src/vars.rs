@@ -161,11 +161,6 @@ pub fn extend_md3(ctx: &mut Context, q: &mut Vec<Var>, t: &mut Vec<Var>) {
     }
 }
 
-/// MilkDrop 3 `mouse.x`, `mouse.y`, `mouse.z`, `mouse.w` (dotted names are legal identifiers there).
-pub fn register_mouse(ctx: &mut Context) -> [Var; 4] {
-    ["mouse.x", "mouse.y", "mouse.z", "mouse.w"].map(|n| ctx.var(n))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,16 +182,14 @@ mod tests {
     }
 
     #[test]
-    fn md3_extension_adds_q33_to_q64_t9_to_t16_and_mouse() {
+    fn md3_extension_adds_q33_to_q64_and_t9_to_t16() {
         let mut ctx = Context::new(Arc::new(GlobalMemory::new()));
         let mut v = PfVars::register(&mut ctx);
         extend_md3(&mut ctx, &mut v.q, &mut v.t);
         // per-frame contexts have no `t`: it stays empty
         assert_eq!((v.q.len(), v.t.len()), (64, 0));
         assert_eq!(ctx.find_var("q64"), Some(v.q[63]));
-        let m = register_mouse(&mut ctx);
-        assert_eq!(ctx.find_var("mouse.w"), Some(m[3]));
-        assert_eq!(ctx.var_count(), 75 + 64 + 4);
+        assert_eq!(ctx.var_count(), 75 + 64);
         let mut ctx2 = Context::new(Arc::new(GlobalMemory::new()));
         let mut s = ShVars::register(&mut ctx2);
         extend_md3(&mut ctx2, &mut s.q, &mut s.t);

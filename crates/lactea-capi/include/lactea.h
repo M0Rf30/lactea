@@ -371,7 +371,7 @@ uint32_t lactea_get_fps(const LacteaEngine *engine);
 // visualizer's size, `(x, y) = (px / width, py / height)` with the origin at the **top left**, and the left button.
 // `inside == false` says the cursor is outside the window (`x` and `y` are then ignored). Call it whenever the
 // state changes; the engine reads the latest values once per rendered frame and derives the one-frame "released"
-// edge of `mouse.w` itself, so a press and release between two rendered frames is not seen.
+// edge of the shader's `mouse.w` itself, so a press and release between two rendered frames is not seen.
 //
 // # Safety
 // `engine` valid.

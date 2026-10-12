@@ -1545,7 +1545,6 @@ fn frame_env(cx: &FrameCtx) -> Env {
         pixels: [w, h],
         aspect: [ax, ay],
         inv_aspect: [1.0 / ax, 1.0 / ay],
-        mouse: cx.md3.map_or([0.0; 4], |m| m.mouse.eel),
     }
 }
 

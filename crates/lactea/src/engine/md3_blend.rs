@@ -605,10 +605,10 @@ pub enum DoubleMode {
     SoftOut,
 }
 
-/// What the host can show about the double preset on screen ([`Engine::double_preset_info`]).
+/// What the host can show about the double preset on screen ([`crate::Engine::double_preset_info`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DoublePresetInfo {
-    /// Name given to [`Engine::load_preset`].
+    /// Name given to [`crate::Engine::load_preset`].
     pub name: String,
     /// `blending_pattern` as the file says it.
     pub pattern: String,

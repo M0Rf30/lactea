@@ -12,7 +12,7 @@ impl Engine {
     }
 
     /// Set MD3's `AutoHardCutMode`: 0 = off, 1..=7 see [`crate::auto_cut`]; larger values are clamped to 7.
-    /// Takes effect on the next frame. Without [`Compat::MilkDrop3`] it is stored but never acts.
+    /// Takes effect on the next frame. Without [`lactea_render::Compat::MilkDrop3`] it is stored but never acts.
     pub fn set_auto_hard_cut_mode(&mut self, mode: u8) {
         self.auto_cut.set_mode(mode);
         self.cfg.auto_hard_cut_mode = self.auto_cut.mode();

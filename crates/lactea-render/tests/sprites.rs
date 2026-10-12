@@ -394,3 +394,19 @@ fn feedback_layers_interleave_with_shapes_waves_and_borders() {
         corner(&b4)
     );
 }
+
+/// A sprite or texture larger than the device's 2D texture limit is an error, not a wgpu validation panic.
+#[test]
+fn images_beyond_the_device_texture_limit_are_rejected() {
+    let (device, queue) = gpu_or_skip!();
+    let mut r = renderer(&device, &queue);
+    let side = device.limits().max_texture_dimension_2d + 1;
+    // the limit is checked before any pixel is read, so the data never matters
+    assert!(r.set_sprite_image(0, side, 1, &[&[0u8; 4]], true).is_err());
+    assert!(r.set_user_texture("big", 1, side, &[0u8; 4]).is_err());
+    assert!(
+        r.set_user_animation("anim", side, 1, &[&[0u8; 4]], &[0.1])
+            .is_err()
+    );
+    r.set_sprite_image(0, 1, 1, &[&[0u8; 4]], true).unwrap();
+}

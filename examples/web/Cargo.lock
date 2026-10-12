@@ -188,6 +188,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "weezl",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -333,8 +342,9 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "lactea"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
+ "gif",
  "lactea-abi",
  "lactea-audio",
  "lactea-eel",
@@ -347,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-abi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "serde",
@@ -355,26 +365,26 @@ dependencies = [
 
 [[package]]
 name = "lactea-audio"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "lactea-eel"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "lactea-hlsl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "lactea-abi",
 ]
 
 [[package]]
 name = "lactea-preset"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "lactea-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "lactea-abi",
@@ -949,6 +959,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wgpu"

@@ -61,6 +61,8 @@ case "$platform" in
     for f in "$rel/lactea_capi.dll.lib" "$rel/lactea_capi.lib" "$rel/liblactea_capi.dll.a"; do
       if [ -e "$f" ]; then cp "$f" "$dir/"; fi
     done
+    # Git Bash on the Windows runners has no `zip`; 7-Zip ships with them.
+    (cd dist && 7z a -tzip -bd "$name.zip" "$name" >/dev/null)
     ;;
 esac
 ls -l dist/"$name".*

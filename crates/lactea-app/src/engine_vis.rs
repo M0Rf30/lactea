@@ -18,6 +18,8 @@ pub struct EngineOptions {
     pub preset_duration: f64,
     pub compat: CompatArg,
     pub mesh: (u32, u32),
+    /// Initial MD3 `AutoHardCutMode` (0..=7; acts only with `--compat milkdrop3`).
+    pub auto_hard_cut_mode: u8,
 }
 
 struct FsProvider(FsTextureProvider);
@@ -79,6 +81,7 @@ impl EngineVisualizer {
             } else {
                 1e9
             },
+            auto_hard_cut_mode: opts.auto_hard_cut_mode,
             ..Default::default()
         };
         let mut engine = Engine::new(device, queue, cfg);
@@ -169,5 +172,23 @@ impl Visualizer for EngineVisualizer {
 
     fn resize(&mut self, w: u32, h: u32) {
         self.engine.resize(w, h);
+    }
+
+    fn take_auto_cuts(&mut self) -> u32 {
+        self.engine.take_auto_cuts()
+    }
+
+    fn set_auto_hard_cut_mode(&mut self, mode: u8) {
+        self.engine.set_auto_hard_cut_mode(mode);
+    }
+
+    fn auto_hard_cut_mode(&self) -> Option<u8> {
+        // Unsupported compat modes store the mode but never act on it.
+        self.engine
+            .config()
+            .compat
+            .rules()
+            .md3_auto_hard_cut
+            .then(|| self.engine.auto_hard_cut_mode())
     }
 }

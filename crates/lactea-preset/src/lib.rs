@@ -13,12 +13,14 @@
 #![warn(missing_docs)]
 
 mod cnum;
+mod md3_io;
 mod scan;
 
 use scan::{Lookup, decode, sane_entries};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+pub use md3_io::{export_shape_file, export_wave_file, import_shape_file, import_wave_file};
 pub use scan::LINEFEED_CONTROL_CHAR;
 
 /// `MAX_CUSTOM_WAVES` (md_defines.h)
@@ -58,6 +60,13 @@ pub enum ParseError {
     Empty,
     /// UTF-16 BOM: MD2 reads bytes and would see no keys at all.
     Utf16,
+    /// A `.wave` / `.shape` import named a slot that does not exist.
+    SlotOutOfRange {
+        /// The requested slot.
+        slot: usize,
+        /// Number of slots of that kind (valid slots are `0..count`).
+        count: usize,
+    },
 }
 
 /// Which importer's reading rules [`Preset::parse_with`] follows.  The two disagree on
@@ -79,6 +88,9 @@ impl std::fmt::Display for ParseError {
         match self {
             ParseError::Empty => f.write_str("empty preset"),
             ParseError::Utf16 => f.write_str("preset is UTF-16 (not supported by MilkDrop)"),
+            ParseError::SlotOutOfRange { slot, count } => {
+                write!(f, "custom wave/shape slot {slot} out of range (0..{count})")
+            }
         }
     }
 }

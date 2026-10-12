@@ -22,9 +22,9 @@ use lactea_preset::{
 use lactea_render::warp_mesh::{self, VertexVars, WarpAnim};
 use lactea_render::wavegen::{CustomWaveSampling, NUM_WAVEFORM_SAMPLES};
 use lactea_render::{
-    CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom, RenderConfig,
-    Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams, WarpGpu,
-    WavePoint,
+    Compat, CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom,
+    RenderConfig, Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams,
+    WarpGpu, WavePoint,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -114,6 +114,13 @@ struct Slot {
     renderer: Renderer,
     loaded: Loaded,
     last: LastFrame,
+}
+
+/// What [`Engine::enter_compat`] replaced, to put back when the load that triggered the switch fails.
+struct CompatUndo {
+    compat: Compat,
+    analyzer: Analyzer,
+    rng_owner: GlobalMemory,
 }
 
 /// The part of projectM's `TimeKeeper` presets can observe: when the active preset started, the
@@ -306,6 +313,13 @@ impl Engine {
     /// The configuration the engine was created with.
     pub fn config(&self) -> &EngineConfig {
         &self.cfg
+    }
+
+    /// The compatibility mode of the presets now running: [`EngineConfig::compat`] for a fixed engine, and with
+    /// [`EngineConfig::auto_compat`] the mode the last loaded preset resolved to (the configured one before the
+    /// first load).
+    pub fn current_compat(&self) -> Compat {
+        self.cfg.compat
     }
 
     /// The renderer of the active preset (the outgoing one during a soft cut); before the first
@@ -506,6 +520,85 @@ impl Engine {
         name: &str,
         transition: Transition,
     ) -> Result<PresetReport, EngineError> {
+        let want = self
+            .cfg
+            .auto_compat
+            .then(|| crate::compat_for_preset(bytes));
+        self.load_preset_resolved(bytes, name, transition, want)
+    }
+
+    /// [`Engine::load_preset`] once the compatibility mode is known (`None`: keep the current one). A different mode
+    /// replaces everything the engine derives from the mode and loads the preset with a hard cut: the running
+    /// preset's contexts, renderer rules and audio analysis belong to the old mode and cannot be blended into the
+    /// new one (`docs/md3.md`, "Automatic compatibility"). A failed load restores the old mode.
+    fn load_preset_resolved(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        transition: Transition,
+        want: Option<Compat>,
+    ) -> Result<PresetReport, EngineError> {
+        let Some(want) = want.filter(|w| *w != self.cfg.compat) else {
+            return self.load_preset_in_mode(bytes, name, transition);
+        };
+        let undo = self.enter_compat(want);
+        let result = self.load_preset_in_mode(bytes, name, Transition::Cut);
+        if result.is_err() {
+            self.leave_compat(undo);
+        }
+        result
+    }
+
+    /// Switch the engine's mode-dependent state to `compat`: the analysis mode of the audio, the EEL dialect (a fresh
+    /// `reg00..reg99` / `gmegabuf`, one `rand()` stream throughout) and the mode every renderer built from now on
+    /// follows ([`Engine::acquire_renderer`]). Returns what [`Engine::leave_compat`] needs to undo it.
+    fn enter_compat(&mut self, compat: Compat) -> CompatUndo {
+        let previous = self.cfg.compat;
+        self.cfg.compat = compat;
+        let mut analyzer = new_analyzer(&self.cfg);
+        analyzer.take_pcm_from(&self.analyzer);
+        let owner =
+            GlobalMemory::sharing_rng_with_dialect(&self.rng_owner, eel_dialect(&compat.rules()));
+        CompatUndo {
+            compat: previous,
+            analyzer: std::mem::replace(&mut self.analyzer, analyzer),
+            rng_owner: std::mem::replace(&mut self.rng_owner, owner),
+        }
+    }
+
+    /// Undo [`Engine::enter_compat`] after a failed load: the running preset keeps its mode.
+    fn leave_compat(&mut self, undo: CompatUndo) {
+        self.cfg.compat = undo.compat;
+        self.analyzer = undo.analyzer;
+        self.rng_owner = undo.rng_owner;
+        // a failed load hands its renderer back to the spare slot, built for the mode that failed
+        if let Some(r) = self.spare.as_mut().filter(|r| r.compat() != undo.compat) {
+            *r = r.sibling_with_compat(undo.compat);
+        }
+    }
+
+    /// The idle renderer every load builds into, following the engine's current mode: the spare one, or a sibling
+    /// of the active renderer (whose pipelines and noise it shares). A renderer of another mode is rebuilt.
+    fn acquire_renderer(&mut self) -> Renderer {
+        let compat = self.cfg.compat;
+        match self.spare.take() {
+            Some(r) if r.compat() == compat => r,
+            Some(r) => r.sibling_with_compat(compat),
+            None => self
+                .active
+                .as_ref()
+                .expect("engine always owns a renderer")
+                .renderer
+                .sibling_with_compat(compat),
+        }
+    }
+
+    fn load_preset_in_mode(
+        &mut self,
+        bytes: &[u8],
+        name: &str,
+        transition: Transition,
+    ) -> Result<PresetReport, EngineError> {
         // MilkDrop 3: `.milk2` double presets, and the next preset asked for while one is on screen
         let transition = match self.load_preset_md3(bytes, name, transition) {
             md3_blend::Md3Dispatch::Done(r) => return r,
@@ -524,15 +617,7 @@ impl Engine {
             transition
         };
         // every load builds into an idle renderer: the previous preset keeps drawing untouched
-        let mut renderer = match self.spare.take() {
-            Some(r) => r,
-            None => self
-                .active
-                .as_ref()
-                .expect("engine always owns a renderer")
-                .renderer
-                .sibling(),
-        };
+        let mut renderer = self.acquire_renderer();
         renderer.reset_images();
         match self.build_loaded(bytes, name, &mut renderer, true) {
             Ok((loaded, report)) => {
@@ -638,6 +723,7 @@ impl Engine {
         let mut report = PresetReport {
             name: name.to_string(),
             preset_version: preset.milkdrop_preset_version,
+            compat: self.cfg.compat,
             ..Default::default()
         };
         let gm = Arc::new(GlobalMemory::sharing_rng_with(&self.rng_owner));

@@ -818,6 +818,7 @@ impl super::Engine {
         let report = PresetReport {
             name: name.to_owned(),
             preset_version: parsed.milkdrop_preset_version,
+            compat: self.cfg.compat,
             ..Default::default()
         };
         let now = self.clock.now as f32;
@@ -894,15 +895,7 @@ impl super::Engine {
         name: &str,
         launch: BlendLaunch,
     ) -> Result<PresetReport, EngineError> {
-        let mut renderer = match self.spare.take() {
-            Some(r) => r,
-            None => self
-                .active
-                .as_ref()
-                .expect("engine always owns a renderer")
-                .renderer
-                .sibling(),
-        };
+        let mut renderer = self.acquire_renderer();
         renderer.reset_images();
         let (mut old, rep1) = match self.build_loaded(&milk2.preset1, name, &mut renderer, false) {
             Ok(v) => v,

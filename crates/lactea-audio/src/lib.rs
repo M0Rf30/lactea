@@ -3,7 +3,10 @@
 //!
 //! Default mode ([`AnalysisMode::ProjectM`]) reproduces what projectM computes for the same
 //! PCM; [`AnalysisMode::BeatDrop`] follows BeatDrop's `plugin.cpp` instead (Hz-defined bands,
-//! 1024-point window, silence -> 0).
+//! 1024-point window, silence -> 0); [`AnalysisMode::Md3`] follows MilkDrop 3 3.37 (8-bit
+//! quantised input, volume sensitivity, alignment before the analysis, left channel only,
+//! 576-sample window, silence -> 1) and comes with the [`ShaderFft`] smoother that feeds the
+//! `get_fft` shader helpers.
 //!
 //! No I/O, no threads: push interleaved PCM frames, call [`Analyzer::update`] once per
 //! rendered frame.
@@ -12,9 +15,11 @@
 
 mod align;
 mod fft;
+mod md3;
 
 use align::Aligner;
 use fft::{Fft, FftStyle};
+pub use md3::{ShaderFft, md3_spectrum};
 
 /// Samples kept in the PCM ring and fed to the aligner (`AudioBufferSamples`).
 pub const WAVE_BUF: usize = 576;
@@ -38,6 +43,13 @@ pub enum AnalysisMode {
     /// Hz-defined bands, 1024-point zero-padded window, silence -> 0 (not 1), `fps`-based
     /// rate adjustment.
     BeatDrop,
+    /// MilkDrop 3 3.37 (`Compat::MilkDrop3`; docs/audio.md, "MilkDrop 3 mode"): the PCM is
+    /// quantised to signed 8 bit when pushed, scaled by
+    /// [`volume_sensitivity`](Analyzer::volume_sensitivity), aligned *before* the analysis, and
+    /// only the left channel's 576-sample Hann spectrum feeds `bass/mid/treb`
+    /// (bins `[0,85) [85,170) [170,256)`); silence gives 1.0 for all six values.
+    /// `sample_rate` is not used.
+    Md3,
 }
 
 /// BeatDrop band edges in Hz (`m_nBassStart..m_nTrebEnd` defaults).
@@ -65,6 +77,8 @@ pub struct AudioFrame {
     pub vol_att: f32,
     /// Left/right waveform, MD2 scale (float PCM * 128). Only the first `wave_len`
     /// (= [`WAVE_VALID`]) samples are valid, the tail is whatever the ring held.
+    /// In [`AnalysisMode::Md3`]: the aligned waveform in signed 8-bit units after the volume
+    /// sensitivity (the exact input of the published spectrum).
     pub wave: [[f32; WAVE_BUF]; 2],
     /// Number of valid leading samples in `wave`.
     pub wave_len: usize,
@@ -117,6 +131,7 @@ pub struct Analyzer {
     align: [Aligner; 2],
     bands: [Band; 3],
     frame_no: u32,
+    volume_sensitivity: f32,
     out: AudioFrame,
 }
 
@@ -127,7 +142,8 @@ impl Analyzer {
         Self::with_mode(sample_rate, AnalysisMode::ProjectM)
     }
 
-    /// Analyzer for the given input `sample_rate` (Hz) and analysis `mode`.
+    /// Analyzer for the given input `sample_rate` (Hz) and analysis `mode`
+    /// (`sample_rate` only matters for [`AnalysisMode::BeatDrop`]).
     pub fn with_mode(sample_rate: u32, mode: AnalysisMode) -> Self {
         let fft = match mode {
             // 480 samples in, 512 bins out, equalize, envelope power 1
@@ -138,9 +154,11 @@ impl Analyzer {
             AnalysisMode::BeatDrop => {
                 Fft::new(2 * SPECTRUM_BINS, SPECTRUM_BINS, true, 1.0, FftStyle::Md2)
             }
+            // 576 samples in, 512 bins out, equalize, envelope power 1, MD2 constants
+            AnalysisMode::Md3 => md3::md3_fft(),
         };
         let init_rel = match mode {
-            AnalysisMode::ProjectM => 1.0,
+            AnalysisMode::ProjectM | AnalysisMode::Md3 => 1.0,
             AnalysisMode::BeatDrop => 0.0,
         };
         let band = Band {
@@ -169,6 +187,7 @@ impl Analyzer {
             align: [Aligner::new(), Aligner::new()],
             bands: [band; 3],
             frame_no: 0,
+            volume_sensitivity: 1.0,
             out,
         }
     }
@@ -188,11 +207,28 @@ impl Analyzer {
         &self.out
     }
 
+    /// Linear gain MD3 applies to the quantised waveform (`VolumeSensitivity`, default 1.0).
+    pub fn volume_sensitivity(&self) -> f32 {
+        self.volume_sensitivity
+    }
+
+    /// Set the linear gain applied to the 8-bit quantised waveform of every
+    /// [`AnalysisMode::Md3`] update, before the alignment and the analysis. It is used as given
+    /// (no clamping, so the waveform may exceed +-128; the value must be finite) and does not
+    /// recover clipped peaks. Ignored by [`AnalysisMode::ProjectM`] and
+    /// [`AnalysisMode::BeatDrop`].
+    pub fn set_volume_sensitivity(&mut self, s: f32) {
+        self.volume_sensitivity = s;
+    }
+
     /// Append interleaved float PCM (-1..1) (`projectm_pcm_add_float`).  Channel 0 is left,
     /// channel 1 right, further channels are ignored; mono is duplicated to both.  Only the most
     /// recent 576 sample frames matter (circular buffer), so pushing more than that per call is
     /// fine.  `channels == 0` or a slice shorter than one frame is a no-op; a trailing partial
     /// frame is ignored.
+    ///
+    /// In [`AnalysisMode::Md3`] every sample is quantised to signed 8 bit on the way in
+    /// (`s >= 1.0 -> 127`, `s < -1.0 -> -128`, otherwise `trunc(128 * s)`).
     pub fn push_pcm_f32(&mut self, interleaved: &[f32], channels: usize) {
         self.push_scaled(interleaved, channels, 0.0, 1.0);
     }
@@ -208,6 +244,8 @@ impl Analyzer {
     }
 
     /// projectM's `PCM::AddToBuffer`: `128 * (s - offset) / amplitude`, written at the ring start.
+    /// In [`AnalysisMode::Md3`] the value is then quantised like MD3's capture: `>= 128 -> 127`,
+    /// `< -128 -> -128`, otherwise truncated toward zero.
     fn push_scaled<T: Copy + Into<f32>>(
         &mut self,
         interleaved: &[T],
@@ -222,7 +260,11 @@ impl Analyzer {
         if count == 0 {
             return;
         }
-        let conv = |s: T| PCM_SCALE * (s.into() - offset) / amplitude;
+        let quantise = self.mode == AnalysisMode::Md3;
+        let conv = |s: T| {
+            let v = PCM_SCALE * (s.into() - offset) / amplitude;
+            if quantise { md3::quantise_i8(v) } else { v }
+        };
         for i in 0..count {
             let off = (self.start + i) % WAVE_BUF;
             let l = conv(interleaved[i * channels]);
@@ -254,7 +296,17 @@ impl Analyzer {
                 *v = ring[(self.start + i) % WAVE_BUF];
             }
         }
-        // 2. spectra (from the *unaligned* waveform)
+        // 1b. Md3 (`AnalyzeNewSound`, then `AlignWaves`, then the analysis): the gain applies
+        // to the already quantised samples and the alignment precedes the spectra
+        if self.mode == AnalysisMode::Md3 {
+            for (aligner, w) in self.align.iter_mut().zip(wave.iter_mut()) {
+                for v in w.iter_mut() {
+                    *v *= self.volume_sensitivity;
+                }
+                aligner.align(w);
+            }
+        }
+        // 2. spectra (Md3: of the aligned waveform; the other modes: of the unaligned one)
         let mut spec = [[0.0f32; SPECTRUM_BINS]; 2];
         for (w, s) in wave.iter().zip(spec.iter_mut()) {
             match self.mode {
@@ -273,6 +325,10 @@ impl Analyzer {
                     let mut padded = [0.0f32; 2 * SPECTRUM_BINS];
                     padded[..WAVE_BUF].copy_from_slice(w);
                     self.fft.time_to_frequency_domain(&padded, s);
+                }
+                AnalysisMode::Md3 => {
+                    // already scaled and aligned (step 1): 576 samples, no input damping
+                    self.fft.time_to_frequency_domain(w, s);
                 }
             }
         }
@@ -302,10 +358,18 @@ impl Analyzer {
                     self.bands[b].imm = sum;
                 }
             }
+            AnalysisMode::Md3 => {
+                // left channel only, plain sum of the bins of each third of the lower half
+                for (b, band) in self.bands.iter_mut().enumerate() {
+                    let start = SPECTRUM_BINS * b / 6;
+                    let end = SPECTRUM_BINS * (b + 1) / 6;
+                    band.imm = spec[0][start..end].iter().fold(0.0f32, |sum, &m| sum + m);
+                }
+            }
         }
         // 4. temporal blending
         let silent_rel = match self.mode {
-            AnalysisMode::ProjectM => 1.0f32,
+            AnalysisMode::ProjectM | AnalysisMode::Md3 => 1.0f32,
             AnalysisMode::BeatDrop => 0.0f32,
         };
         for bd in &mut self.bands {
@@ -323,9 +387,11 @@ impl Analyzer {
                 bd.avg_rel = bd.avg / bd.long_avg;
             }
         }
-        // 5. waveform alignment (modifies `wave` in place)
-        for (aligner, w) in self.align.iter_mut().zip(wave.iter_mut()) {
-            aligner.align(w);
+        // 5. waveform alignment (modifies `wave` in place); Md3 already did it in step 1
+        if self.mode != AnalysisMode::Md3 {
+            for (aligner, w) in self.align.iter_mut().zip(wave.iter_mut()) {
+                aligner.align(w);
+            }
         }
         // 6. publish
         let o = &mut self.out;

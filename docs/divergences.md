@@ -94,3 +94,19 @@ Rows of `Compat::MilkDrop3` against MilkDrop 2 / projectM; details in [`md3.md`]
 |---|---|---|---|
 | Auto hard cut (`md3_auto_hard_cut`; `EngineConfig::auto_hard_cut_mode`, `Engine::set_auto_hard_cut_mode`, F8 in the app, `--auto-hard-cut`) | none (projectM's own `hard_cut_*` volume-jump rule is a separate setting and stays) | none | modes 1..7 watch the previous frame's `bass` / `treb`: modes 1-6 request a blend-time-0 preset change (mode 4 can ask twice in a frame), mode 7 injects a random effect into the composite shader instead; independent of both hard-cut rules above |
 | Display time of a preset (`md3_preset_time_rand`; `PresetControl::set_md3_time_rand`) | gaussian (`easter_egg` sigma) around the preset duration | BeatDrop draws `uniform(0,1) * TimeBetweenPresetsRand`; `Compat::MilkDrop2` does not model it and keeps projectM's gaussian | `BlendTimeAuto + TimeBetweenPresets + (rand() % 1000) * TimeBetweenPresetsRand * 0.001` |
+
+## MilkDrop 3
+
+`Compat::MilkDrop3` = MilkDrop 2 plus the rows below (columns: MilkDrop 2 / BeatDrop, MilkDrop 3). Details and
+verification in [`md3.md`](md3.md).
+
+| Item | MilkDrop 2 / BeatDrop | MilkDrop 3 |
+|---|---|---|
+| Audio analysis (`md3_audio_analysis`, `AnalysisMode::Md3`) | BeatDrop: mono `(L+R)/2`, Hz bands, silence 0 | left channel only, 576-sample Hann FFT zero-padded to 1024 on the aligned 8-bit-quantised waveform times `VolumeSensitivity`, bins `[0,85)`, `[85,170)`, `[170,256)` summed, silence 1.0 |
+| `get_fft` / `sampler_fft` data (`md3_shader_fft`) | BeatDrop: mono 1024-bin RMS-normalised FFT, FPS-independent attack / decay, `sqrt`, peak-hold row | left equalised spectrum, per-frame max-normalised, 0.2 gate, squared, 3-bin smear, attack `0.5a+0.5` / decay `0.1d+0.9` once per rendered frame; the state survives preset changes |
+| `FFTAttack` / `FFTDecay` (`md3_shader_fft`) | per state, blended in soft cuts | process-global, replaced by every preset load (file value or 0.5 / 0.7), never blended |
+| Shader prelude (`md3_shader_prelude`) | `get_fft` = `sqrt(tex2D(sampler_fft, (x, .25)))`, `get_fft_hz` `/22050`, `get_fft_peak*`, `get_wave*`, `sampler_wave`, `_c15` / `_c16` time / date | `get_fft` without `sqrt` at v = 0.5, `get_fft_hz` `/24000`, none of the other helpers; `_c14` mouse, `mouse*` macros, `q33..q64` (`_qi.._qp`) |
+| `q` / `t` variables (`md3_extended_vars`) | `q1..q32`, `t1..t8` | `q1..q64`, `t1..t16` in every VM that has them, `monitor2` / `monitor3` persisted like `monitor`, no q blending |
+| Mouse (`md3_extended_vars`) | BeatDrop `mousex` ... | EEL `mouse.x/.y/.z/.w` (bottom-origin y) in the per-frame and per-vertex VMs, shader `_c14` (top-origin y); `mouse.x/.y` are blended in soft cuts, `.z/.w` are not |
+| Shader `time` (`md3_shader_time`, `_c2.x`) | absolute frame time | seconds since this state's preset started, modulo 10000 (the outgoing state of a blend uses its own start) |
+| Generated composite shader of presets without `comp_N` (`md3_md2_comp_effects`) | brighten `1-(1-ret)^2`, solarize `*2` | brighten `sqrt(ret)`, solarize `*4` |

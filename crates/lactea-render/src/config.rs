@@ -208,6 +208,25 @@ pub struct CompatRules {
     /// MD3 display time of a preset: `BlendTimeAuto + TimeBetweenPresets + (rand() % 1000) * TimeBetweenPresetsRand *
     /// 0.001` (hosts feed it to `PresetControl::set_md3_time_rand`) instead of projectM's gaussian easter egg.
     pub md3_preset_time_rand: bool,
+    /// MilkDrop 3 audio analysis (`AnalysisMode::Md3`): left channel only, 576-sample Hann FFT, 8-bit quantised input
+    /// scaled by `VolumeSensitivity`, silence -> 1.0 (`docs/md3.md`, shader inputs).
+    pub md3_audio_analysis: bool,
+    /// The MilkDrop 3 shader FFT texture (`sampler_fft`): a max-normalised, gated, smeared attack / decay recursion of
+    /// the left spectrum, run once per rendered frame and kept across presets; `FFTAttack` / `FFTDecay` are sticky
+    /// globals set by every preset load.
+    pub md3_shader_fft: bool,
+    /// MilkDrop 3's extended expression and shader variables: `q1..q64`, `t1..t16`, `monitor2` / `monitor3`, the
+    /// `mouse.x/.y/.z/.w` variables of the per-frame and per-vertex code and the `_c14` / `_qi.._qp` shader constants.
+    pub md3_extended_vars: bool,
+    /// The MilkDrop 3 shader prelude is part of every translated shader (`get_fft`, `get_fft_hz`, `mouse*`,
+    /// `q33..q64`, `sampler_fft`).
+    pub md3_shader_prelude: bool,
+    /// The shader constant `time` (`_c2.x`) is the time since *this state's* preset started, modulo 10000; otherwise
+    /// the absolute frame time.
+    pub md3_shader_time: bool,
+    /// The generated composite shader of presets without `comp_N` text uses the original MilkDrop 2 formulas:
+    /// brighten `sqrt(ret)`, solarize `ret * (1 - ret) * 4` (BeatDrop: `1 - (1 - ret)^2`, `* 2`).
+    pub md3_md2_comp_effects: bool,
 }
 
 impl Compat {
@@ -265,6 +284,12 @@ impl Compat {
                 md3_border_gate: false,
                 md3_auto_hard_cut: false,
                 md3_preset_time_rand: false,
+                md3_audio_analysis: false,
+                md3_shader_fft: false,
+                md3_extended_vars: false,
+                md3_shader_prelude: false,
+                md3_shader_time: false,
+                md3_md2_comp_effects: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -317,6 +342,12 @@ impl Compat {
                 md3_border_gate: false,
                 md3_auto_hard_cut: false,
                 md3_preset_time_rand: false,
+                md3_audio_analysis: false,
+                md3_shader_fft: false,
+                md3_extended_vars: false,
+                md3_shader_prelude: false,
+                md3_shader_time: false,
+                md3_md2_comp_effects: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
@@ -326,6 +357,12 @@ impl Compat {
                 md3_border_gate: true,
                 md3_auto_hard_cut: true,
                 md3_preset_time_rand: true,
+                md3_audio_analysis: true,
+                md3_shader_fft: true,
+                md3_extended_vars: true,
+                md3_shader_prelude: true,
+                md3_shader_time: true,
+                md3_md2_comp_effects: true,
                 ..Compat::MilkDrop2.rules()
             },
         }

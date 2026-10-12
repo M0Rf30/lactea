@@ -54,6 +54,10 @@ pub struct App {
     fps: f32,
     last_click: Option<(Instant, PhysicalPosition<f64>)>,
     cursor: PhysicalPosition<f64>,
+    /// The cursor is inside the window (`CursorEntered` / `CursorLeft`); forwarded to MilkDrop 3 presets.
+    cursor_inside: bool,
+    /// The left mouse button is down (window events only: unlike MD3 it is not tracked outside the window).
+    left_down: bool,
     fullscreen: bool,
     pending_size: Option<PhysicalSize<u32>>,
     error: Option<String>,
@@ -206,6 +210,8 @@ impl App {
             fps: 0.0,
             last_click: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
+            cursor_inside: false,
+            left_down: false,
             pending_size: None,
             error: None,
             gpu_rebuilds: 0,
@@ -739,6 +745,19 @@ impl App {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                             label: Some("frame"),
                         });
+                let size = run.window.inner_size();
+                let inside = self.cursor_inside
+                    && (0.0..f64::from(size.width)).contains(&self.cursor.x)
+                    && (0.0..f64::from(size.height)).contains(&self.cursor.y);
+                run.viz.set_mouse(
+                    inside.then(|| {
+                        [
+                            (self.cursor.x / f64::from(size.width)) as f32,
+                            (self.cursor.y / f64::from(size.height)) as f32,
+                        ]
+                    }),
+                    self.left_down,
+                );
                 run.viz.render(&mut enc, &view, time, self.frame as u32);
                 if run.viz.take_auto_cuts() > 0 && !self.presets.locked() {
                     self.pending_auto_cut = true;
@@ -822,12 +841,17 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => self.redraw(el),
             WindowEvent::KeyboardInput { event, .. } => self.on_key(el, event),
             WindowEvent::CursorMoved { position, .. } => self.cursor = position,
+            WindowEvent::CursorEntered { .. } => self.cursor_inside = true,
+            WindowEvent::CursorLeft { .. } => self.cursor_inside = false,
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
-                if let Some(run) = self.run.take() {
+                self.left_down = state == ElementState::Pressed;
+                if self.left_down
+                    && let Some(run) = self.run.take()
+                {
                     self.on_click(&run.window);
                     self.run = Some(run);
                 }

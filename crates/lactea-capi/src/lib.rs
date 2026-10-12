@@ -1004,6 +1004,53 @@ pub unsafe extern "C" fn lactea_get_fps(engine: *const LacteaEngine) -> u32 {
     unsafe { engine.as_ref() }.map_or(0, |e| e.engine.fps())
 }
 
+/// MilkDrop 3 mouse (`LACTEA_COMPAT_MILKDROP3`; ignored by the other modes): the cursor as fractions of the
+/// visualizer's size, `(x, y) = (px / width, py / height)` with the origin at the **top left**, and the left button.
+/// `inside == false` says the cursor is outside the window (`x` and `y` are then ignored). Call it whenever the
+/// state changes; the engine reads the latest values once per rendered frame and derives the one-frame "released"
+/// edge of `mouse.w` itself, so a press and release between two rendered frames is not seen.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_set_mouse(
+    engine: *mut LacteaEngine,
+    x: f32,
+    y: f32,
+    inside: bool,
+    left_down: bool,
+) -> LacteaStatus {
+    guard(|| {
+        let Some(e) = (unsafe { engine.as_mut() }) else {
+            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
+        };
+        e.engine.set_mouse(lactea::MouseState {
+            position: inside.then_some([x, y]),
+            left_down,
+        });
+        LacteaStatus::Ok
+    })
+}
+
+/// MilkDrop 3 `VolumeSensitivity`: linear gain (default 1) on the 8-bit quantised audio input. Only
+/// `LACTEA_COMPAT_MILKDROP3` uses it.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_set_volume_sensitivity(
+    engine: *mut LacteaEngine,
+    sensitivity: f32,
+) -> LacteaStatus {
+    guard(|| {
+        let Some(e) = (unsafe { engine.as_mut() }) else {
+            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
+        };
+        e.engine.set_volume_sensitivity(sensitivity);
+        LacteaStatus::Ok
+    })
+}
+
 /// Warp-mesh resolution in cells (`projectm_set_mesh_size`): odd sizes round up to even, each axis
 /// is limited to 8..=300. Read the value in use back with `lactea_get_mesh_size`.
 ///

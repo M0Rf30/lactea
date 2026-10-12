@@ -757,6 +757,7 @@ fn invalid_arguments_are_errors() {
             blur: Default::default(),
             warp_random: None,
             comp_random: None,
+            ext: Default::default(),
         },
         old_wave_mode: None,
         shape_alpha_mult: vec![],

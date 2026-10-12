@@ -52,6 +52,7 @@ mod motion;
 pub mod noise;
 mod renderer;
 mod rng;
+mod shader_ext;
 mod shaders;
 mod stroke;
 mod transition;
@@ -68,6 +69,7 @@ pub use frame::{
 };
 pub use renderer::Renderer;
 pub use rng::Rng;
+pub use shader_ext::ShaderExt;
 pub use transition::{TransitionBlender, TransitionKind, TransitionParams};
 #[cfg(feature = "diagnostics")]
 pub use uniforms::RotParams;

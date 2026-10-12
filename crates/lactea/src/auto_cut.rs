@@ -506,7 +506,7 @@ mod tests {
         use lactea_hlsl::{Options, default_comp_shader, translate};
         let texts = [
             // MD3's generated default composite (what a preset without comp text gets)
-            default_comp_shader(1.2, 0.5, 1.25, 1, 0.3, true, false, true, false)
+            default_comp_shader(1.2, 0.5, 1.25, 1, 0.3, true, false, true, false, true)
                 .replace('\n', "\u{1}"),
             "shader_body\u{1}{\u{1}  ret = tex2D(sampler_main, uv).xyz;\u{1}}\u{1}".to_string(),
             // comments, a helper function before the body, the closing brace on the code line

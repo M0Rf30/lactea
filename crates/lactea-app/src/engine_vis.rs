@@ -191,4 +191,11 @@ impl Visualizer for EngineVisualizer {
             .md3_auto_hard_cut
             .then(|| self.engine.auto_hard_cut_mode())
     }
+
+    fn set_mouse(&mut self, position: Option<[f32; 2]>, left_down: bool) {
+        self.engine.set_mouse(lactea::MouseState {
+            position,
+            left_down,
+        });
+    }
 }

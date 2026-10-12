@@ -33,6 +33,7 @@ mod callbacks;
 mod control;
 mod engine;
 mod idle;
+mod md3_inputs;
 mod playlist;
 mod rng;
 mod runtime;
@@ -49,6 +50,7 @@ pub use lactea_abi::dump::Stage;
 pub use lactea_audio::AudioFrame;
 pub use lactea_render::TransitionKind;
 pub use lactea_render::{Compat, Renderer};
+pub use md3_inputs::MouseState;
 pub use playlist::{
     DEFAULT_RETRY_COUNT, FailedFn, Filter, INSERT_AT_END, LoadRequest, MAX_HISTORY, Playlist,
     SortOrder, SortPredicate, SwitchedFn,
@@ -93,6 +95,10 @@ pub struct EngineConfig {
     /// [`Compat::MilkDrop3`]; the other compat modes ignore it. [`Engine::set_auto_hard_cut_mode`] changes it
     /// at runtime.
     pub auto_hard_cut_mode: u8,
+    /// MilkDrop 3 `VolumeSensitivity` (`settings.ini`, default 1): a linear gain on the 8-bit quantised input of the
+    /// audio analysis. Only [`Compat::MilkDrop3`] uses it (the other modes ignore it). Change it live with
+    /// [`Engine::set_volume_sensitivity`].
+    pub volume_sensitivity: f32,
 }
 
 impl Default for EngineConfig {
@@ -111,6 +117,7 @@ impl Default for EngineConfig {
             start_clean: false,
             md3_disable_box: true,
             auto_hard_cut_mode: 0,
+            volume_sensitivity: 1.0,
         }
     }
 }

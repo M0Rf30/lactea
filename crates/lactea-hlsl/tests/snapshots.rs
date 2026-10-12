@@ -8,7 +8,11 @@ use lactea_abi::*;
 use lactea_hlsl::*;
 
 fn snap(name: &str, kind: PassKind, src: &str) {
-    let t = translate(kind, src, &Options::default()).unwrap_or_else(|e| panic!("{name}: {e}"));
+    snap_with(name, kind, src, &Options::default());
+}
+
+fn snap_with(name: &str, kind: PassKind, src: &str, opts: &Options) {
+    let t = translate(kind, src, opts).unwrap_or_else(|e| panic!("{name}: {e}"));
     naga_validate(&t.wgsl).unwrap_or_else(|e| panic!("{name}: naga: {e}\n{}", t.wgsl));
     let rest = t
         .wgsl
@@ -36,7 +40,7 @@ fn default_comp_video_echo() {
     snap(
         "default_comp_video_echo",
         PassKind::Comp,
-        &default_comp_shader(1.2, 0.5, 1.25, 1, 0.3, true, false, true, false),
+        &default_comp_shader(1.2, 0.5, 1.25, 1, 0.3, true, false, true, false, false),
     );
 }
 
@@ -173,5 +177,25 @@ shader_body {
     float2 p = mul(uv - 0.5, ofs) / texsize.zw;
     ret = tex2D(sampler_main, uv).xyz * hue_shader + glow(uv) * pow(abs(p.x), 1.5);
 }",
+    );
+}
+
+#[test]
+fn md3_fft_mouse_and_q() {
+    let mut opts = Options::default();
+    opts.md3 = true;
+    snap_with(
+        "md3_fft_mouse_and_q",
+        PassKind::Warp,
+        "sampler2D sampler_pw_fft;
+shader_body
+{
+    float2 p = mouse.xy - uv;
+    q40 = q40 + mouse_z;
+    float bar = get_fft(uv.x) * q33 + get_fft_hz(440 * (1 + q64));
+    ret = tex2D(sampler_main, uv + p * mouse_w).xyz * (1 - bar)
+        + tex2D(sampler_pw_fft, float2(uv.x * 3, 0)).r * q40;
+}",
+        &opts,
     );
 }

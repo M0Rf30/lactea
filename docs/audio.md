@@ -75,6 +75,7 @@ wave: [[f32;576];2], wave_len (=480), spectrum: [[f32;512];2] }`
 | 9 | frame counter for the `<50` long-average switch | `GetFrame()` | `m_frameCount`, 0-based, incremented after each render | internal counter, 0-based, +1 per `update` |
 | 10| spectrum scale | un-normalised FFT of 128-scaled input | same | same; DC bin is always 0 (equalise[0] = -0.02*ln 1 = 0) |
 | 11| extra BeatDrop-only analysis (`get_fft()` shader texture with RMS normalisation, 2048-window `myfftshader`, `FFTAttack/FFTDecay` smoothing) | yes | none | **not implemented** (no projectM counterpart; presets from the corpus cannot use it) |
+| 12| MilkDrop 3 (3.37) analysis | rows 1-5: no 8-bit quantiser, no gain, `(L+R)/2` spectrum | rows 1-5 | `AnalysisMode::Md3` (opt-in): 8-bit quantised input, `VolumeSensitivity`, alignment **before** the analysis, bands from the **left** channel only, 576-sample window, silence -> 1; plus `ShaderFft` for the `get_fft` shader helper. See "MilkDrop 3 mode" below |
 
 ## Numerics
 
@@ -98,3 +99,130 @@ the spectrum; the ratios (`imm/long_avg`) amplify that slightly.
   `cargo test -p lactea-audio --release --test oracle_vars -- --ignored --nocapture`
   (`LACTEA_ORACLE_OUT` overrides the directory). No oracle output existed when this was
   written, so no numeric comparison has been made yet.
+
+## MilkDrop 3 mode (`AnalysisMode::Md3`, `Compat::MilkDrop3`)
+
+Source: the behavioural description of MilkDrop 3 (3.37) audio analysis and shader FFT (see
+`docs/md3.md`, shader inputs); no MD3 code or assets are used. It is an opt-in mode: the default
+(projectM) and `BeatDrop` numerics are untouched.
+
+```rust
+let mut a = Analyzer::with_mode(44100, AnalysisMode::Md3);   // sample_rate is not used
+a.set_volume_sensitivity(1.0);                               // default; only Md3 reads it
+a.push_pcm_f32(&interleaved, 2);                             // quantised to int8 on the way in
+let f = a.update(60.0);                                      // bass/mid/treb, wave, spectrum
+// every rendered frame, with the sticky FFTAttack / FFTDecay globals (defaults 0.5 / 0.7):
+let s: &[f32; 512] = shader_fft.step(&f.spectrum[0], attack, decay);
+```
+
+### Per frame
+
+1. **Quantiser (every `push_pcm_*`).** The sample is scaled to int8 units, `v = 128 * s`
+   (`push_pcm_i16`: `s / 256`, `push_pcm_u8`: `s - 128`), then `v >= 128 -> 127`, `v < -128 ->
+   -128`, otherwise `trunc(v)` (toward zero: `0.999 -> 127`, `-0.999 -> -127`, `0.0078 -> 0`).
+   This is MD3's capture quantiser `>= 1.0 -> 127`, `< -1.0 -> -128`, `(int)(128 * s)`; 0 dBFS
+   maps to 127 / -128 and there is no +128 offset. The result is stored as `f32`. A NaN becomes 0.
+   The other modes keep the unquantised `128 * s`.
+2. **Snapshot + gain.** Both channels, newest 576 frames oldest first (as in the other modes),
+   multiplied by `volume_sensitivity` (default 1.0, `set_volume_sensitivity` /
+   `volume_sensitivity`). The gain acts on the *already quantised* values, so it cannot recover
+   a clipped peak (`1.0` full scale with gain 2 is `254`, not `256`) and the waveform may leave
+   +-128; it is not clamped. It is applied at `update`, so changing it takes effect on the
+   samples already buffered. Ignored by `ProjectM` and `BeatDrop`.
+3. **Alignment first.** The existing per-channel `Aligner` (nSamples 480, octaves 6) runs
+   *before* the analysis, so the spectra and the bands see the aligned waveform including its
+   zeroed tail (samples 480..575 are zero whenever the best offset is > 0). This is the opposite
+   of the other modes (spectrum of the unaligned ring, alignment afterwards).
+4. **Spectrum (`md3_spectrum`).** Both channels: the 576 aligned samples times
+   `env[i] = 0.5 + 0.5 * sin(i * (1/576 * 6.2831853) - 1.5707963268)` (literal `f32`
+   constants of MD2's `fft.cpp`), zero padded to 1024, radix-2 FFT, `out[i] = equalize[i] *
+   |X[i]|` for `i < 512` with `equalize[i] = -0.02 * ln((512 - i) / 512)`. It is the MD2 FFT
+   (`FftStyle::Md2`, `samples_in = 576`) with **no** `0.5 * (x[i] + x[i-1])` input damping.
+   The public `md3_spectrum(&[f32; 576]) -> [f32; 512]` is exactly this step for an already
+   prepared int8-unit waveform (no alignment, no gain); the analyzer produces identical values
+   (it keeps its own tables, `md3_spectrum` rebuilds them on every call).
+5. **Bands, left channel only.** `imm[b] = sum of the left spectrum over bins
+   [512*b/6, 512*(b+1)/6)`, b = 0, 1, 2 -> `[0,85) [85,170) [170,256)` (a plain sum, no mean over
+   the channels; with a 44.1 kHz effective rate 0-3.6 / 3.6-7.3 / 7.3-11 kHz). Whatever the
+   right channel carries does not change `bass/mid/treb`.
+6. **Smoothing.** As the other modes: `rate = imm > avg ? 0.2 : 0.5`, `avg = avg * rate +
+   imm * (1 - rate)`, `long_avg` rate 0.9 for frame < 50 else 0.992, every rate through
+   `AdjustRateToFPS` (`(r^30)^dt`), `imm_rel = avg_rel = 1.0` while `|long_avg| < 0.001`, else
+   `imm / long_avg` and `avg / long_avg`. Initial values are 1.0 (not 0, unlike `BeatDrop`);
+   `vol = (bass + mid + treb) * 0.333` as in `ProjectM`. Digital silence therefore gives exactly
+   1.0 for all six values on every frame (`long_avg` stays 0).
+7. **Published.** `AudioFrame.wave` = the aligned, gain-scaled int8-unit waveform (only the first
+   `wave_len` = 480 samples are meaningful, as before); `AudioFrame.spectrum` = both channels'
+   `md3_spectrum` of that very waveform; `bass/mid/treb(_att)`, `vol(_att)` as above.
+
+Consequences worth knowing (they follow from the steps, they are not special cases): the 8-bit
+quantisation noise (truncation, roughly 0.6 LSB rms) and the abrupt end of a shifted, zero-tailed
+waveform put energy into every band, so an onset from digital silence raises `bass`, `mid` and
+`treb` together (`1 / (1 - r)` on the first frame); only a settled signal followed by a change
+shows band contrast. A constant level (no shift, no noise) lands only in the lowest bins, i.e.
+`bass`. `imm_rel / avg_rel` are ratios, so the gain changes them only through the 0.001 floor of
+`long_avg` (a power-of-two gain scales wave and spectrum exactly).
+
+### Shader FFT (`ShaderFft`)
+
+The `get_fft` / `get_fft_hz` shader helpers read a 512-texel state `S` that MD3 updates once per
+rendered frame from the **left** spectrum above. `ShaderFft` is that state and recursion in
+`f32`; attack/decay are not stored (they are MD3's sticky globals: the preset's `FFTAttack` /
+`FFTDecay` when present, otherwise the previous preset's values, initially 0.5 / 0.7; the engine
+passes them each frame, values are used as given). One instance per engine, never reset on
+preset changes; there is no frame-rate compensation (the recursion advances once per call).
+
+```text
+step(spec, attack, decay):
+  m  = max(0.001, max_i spec[i])            ga = 0.5*attack + 0.5     gd = 0.1*decay + 0.9
+  for i in 0..512 ascending, S updated in place:
+      v = spec[i] / m ;  if !(0.2 <= v) { v = 0 } ;  t = v*v
+      for k in {-3,-2,-1,1,2,3} with 0 <= i+k < 512:  t = max(t, (1 - 0.25*|k|) * S[i+k])
+      s = S[i] ;  S[i] = if t > s { s + (t - s)*ga } else { gd * s }
+```
+
+* The neighbours are read from the partially updated state: the three left ones are already new,
+  the three right ones still old. An isolated bin therefore smears to the right in one frame
+  (at the default attack `S[i+1] = 0.75 * 0.75 * S[i]`, ...) and to the left only on the next one.
+* `t == s` takes the decay branch: a bin that reached its target decays; in `f32` a saturated
+  peak bin runs an 11-frame limit cycle (`... 1, 1, 1, 1, 0.97, 0.9925, 0.99813, ...`).
+* The output is volume invariant (about the squared relative spectrum): the gain only matters
+  through the 0.001 floor of `m`. Silence (`m = 0.001`, every bin gated to 0) lets the smear and
+  the decay act on what is left (`S[256]`: 1 -> 0.9698 -> 0.9407 ...); digital silence from the
+  start stays 0.
+* `get_fft(pos)`: `u = clamp(pos, 0, 1)`, `x = clamp(u * 512 - 0.5, 0, 511)`, linear
+  interpolation of `S[floor x]` and `S[min(floor x + 1, 511)]` (texel `i` has its centre at
+  `(i + 0.5) / 512`). `get_fft_hz(hz) = get_fft(clamp(hz / 24000, 0, 1))` (a fixed 48 kHz rate).
+  These are the CPU reference of the shader macros; the GPU side uploads `state()` as a 512x1
+  `R32Float` texture and does the clamp + bilinear by hand because `R32Float` is not filterable.
+
+### Not modelled
+
+* MD3's capture layer is outside this crate: 8-bit capture ring of 2304 samples, box decimation
+  of rates above 44.1 kHz (`R / 44100`), "no packet for a while -> empty ring -> zeros". The host
+  pushes the PCM it wants analysed (zeros for stale capture); the effective rate only affects
+  what a bin means in Hz.
+* MD3 returns silence for the first fetches until 576 samples have been captured; this crate,
+  like the other modes, treats the missing history as zeros (the partial window is analysed).
+* The classic `imm / avg / med / long` that MD3's shell also computes are never read by it and are
+  not reproduced.
+
+### Verification (`tests/md3.rs`, no external data)
+
+* `md3_spectrum`: fs/4 tone (`0, 64, 0, -64, ...`) peak bin 256 = 127.7609, flanks
+  51.4947 / 103.1458 / 104.3150 / 52.6687, bins >= 261 < 1.2; an f64 DFT of the enveloped,
+  zero-padded input (no damping); sine vectors at 1 / 5 / 12 kHz (peak bin and band sums);
+  silence.
+* `ShaderFft`: frames 1, 2, 3, 6 of the fs/4 tone for bins 252..260 and `get_fft(0.5)`;
+  `S[256]` over 40 frames (limit cycle, period 11); silence after frame 6; the `attack = 1`,
+  `decay = 0` variant; floor of `m`, 0.2 gate, in-place smear, array ends, NaN bins;
+  `get_fft` / `get_fft_hz` edge cases and an f64 evaluation of the interpolation. The recursion
+  is also bit-identical to the float32 reference model on random spectra (checked once, not
+  kept as a test).
+* `Analyzer`: quantiser table for f32 / i16 / u8 / mono, other modes unquantised, gain after
+  the quantiser (254, not 256; unclamped; applied at `update`; exact doubling of wave and
+  spectrum), gain ignored by the other modes, left channel only (right-only tone -> exactly 1.0),
+  silence -> exactly 1.0, spectrum == `md3_spectrum(wave)` on a drifting tone (alignment first,
+  shifted window + zero tail), the 60 fps smoothing vectors T1 / T2 (`bass` 19.487, 10.000,
+  6.8406, ...), the 0.9 -> 0.992 switch at frame 50, a loud low tone after a high tone
+  (`bass > 3`, `treb < 0.1`), a constant level (`bass` only, analytic `1 / (1 - r^(k+1))`).

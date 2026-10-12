@@ -89,6 +89,7 @@ impl Engine {
                 p.base.darken,
                 p.base.solarize,
                 p.base.invert,
+                self.cfg.compat.rules().md3_md2_comp_effects,
             )
             .replace('\n', "\u{1}"),
         };

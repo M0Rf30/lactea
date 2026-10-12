@@ -84,6 +84,8 @@ pub struct FrameInput {
     /// MilkDrop 2's preset blend (`m_bBlending`) in progress (`CompatRules::md2_preset_blend`): the fields above are
     /// then the new state's blended values and this carries the rest, see [`Md2Blend`](crate::Md2Blend). `None` = no blend.
     pub md2_blend: Option<crate::blend::Md2Blend>,
+    /// MilkDrop 3 shader inputs (`_c14`, `_qi.._qp`, shader time, FFT); neutral outside MilkDrop 3.
+    pub ext: crate::ShaderExt,
 }
 
 /// Decay, composite-pass controls.
@@ -428,6 +430,7 @@ impl Default for FrameInput {
             waves: Vec::new(),
             darken_center: false,
             warp_random: None,
+            ext: crate::ShaderExt::default(),
             comp_random: None,
             hue_offsets: None,
             md2_blend: None,

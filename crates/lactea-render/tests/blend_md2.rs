@@ -9,6 +9,7 @@ use lactea_abi::dump::Stage;
 use lactea_abi::{ShaderInterface, WGSL_COMMON};
 use lactea_render::{
     BlurParams, Compat, CompiledShader, FrameInput, Md2Blend, Md2OldPass, RenderConfig, Renderer,
+    ShaderExt,
 };
 
 const W: u32 = 64;
@@ -84,6 +85,7 @@ fn blend_input(progress: f32) -> FrameInput {
             blur: BlurParams::default(),
             warp_random: None,
             comp_random: None,
+            ext: ShaderExt::default(),
         },
         old_wave_mode: None,
         shape_alpha_mult: vec![],

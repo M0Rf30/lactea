@@ -23,7 +23,8 @@ mod wav;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use lactea::{
-    Compat, Engine, EngineConfig, ForcedFrame, FrameClock, PresetReport, Transition, TransitionKind,
+    Compat, Engine, EngineConfig, ForcedFrame, FrameClock, MouseState, PresetReport, Transition,
+    TransitionKind,
 };
 use lactea_abi::dump::{DumpMeta, Stage};
 use lactea_abi::{NoiseTex, RunConfig, pcm_range};
@@ -95,6 +96,13 @@ struct Args {
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
     #[arg(long)]
     stroke: Option<String>,
+    /// MilkDrop 3 (`--compat md3`): a fixed mouse for every frame, `X,Y[,down]` with X, Y the cursor as fractions of
+    /// the image (0..1, origin top left); `down` presses the left button. Default: the cursor is outside the window.
+    #[arg(long, value_name = "X,Y[,down]")]
+    mouse: Option<String>,
+    /// MilkDrop 3 `VolumeSensitivity` (`--compat md3` only): linear gain on the 8-bit quantised audio input.
+    #[arg(long, default_value_t = 1.0)]
+    volume_sensitivity: f32,
     /// second preset: replaced at --switch-frame by a soft cut of --soft-cut seconds
     #[arg(long)]
     preset2: Option<PathBuf>,
@@ -121,6 +129,28 @@ struct Args {
     /// fdrender.json); mode 7 injects its effects into the composite shader, so the frames show them
     #[arg(long, default_value_t = 0)]
     auto_hard_cut: u8,
+}
+
+/// `--mouse X,Y[,down]`.
+fn parse_mouse(s: &str) -> Result<MouseState> {
+    let mut it = s.split(',');
+    let mut coord = |what: &str| -> Result<f32> {
+        it.next()
+            .ok_or_else(|| anyhow!("--mouse: expected X,Y[,down], got {s:?}"))?
+            .trim()
+            .parse::<f32>()
+            .map_err(|e| anyhow!("--mouse: {what}: {e}"))
+    };
+    let (x, y) = (coord("X")?, coord("Y")?);
+    let left_down = match it.next().map(str::trim) {
+        None => false,
+        Some("down") => true,
+        Some(o) => bail!("--mouse: the third field is `down`, got {o:?}"),
+    };
+    Ok(MouseState {
+        position: Some([x, y]),
+        left_down,
+    })
 }
 
 fn parse_pair<T: std::str::FromStr>(s: &str, sep: char, what: &str) -> Result<(T, T)> {
@@ -358,6 +388,7 @@ fn run(args: &Args) -> Result<i32> {
             preset_duration: 1e9,
             start_clean: args.start_clean != 0,
             auto_hard_cut_mode: args.auto_hard_cut,
+            volume_sensitivity: args.volume_sensitivity,
             ..EngineConfig::default()
         },
     );
@@ -390,6 +421,9 @@ fn run(args: &Args) -> Result<i32> {
             "quads" => lactea_render::StrokeRaster::Quads,
             o => bail!("--stroke: expected native|emulated|quads, got {o:?}"),
         });
+    }
+    if let Some(m) = &args.mouse {
+        engine.set_mouse(parse_mouse(m)?);
     }
 
     if let Some(r) = &reference {

@@ -41,7 +41,10 @@ mod vars;
 
 pub use callbacks::{Hook, SwitchFailure};
 pub use control::{HARD_CUT_MIN_FRAMES, PresetControl, SwitchRequest};
-pub use engine::{DebugImage, Engine, TouchType};
+pub use engine::{
+    DebugImage, DoubleMode, DoublePresetInfo, Engine, Md3Locks, Md3Pattern, Md3PatternInstance,
+    TouchType, default_enabled_patterns, md3_draw_progress, md3_fill_vertinfo, md3_random_instance,
+};
 pub use idle::{IDLE_PRESET, IDLE_PRESET_NAME};
 pub use lactea_abi::PassKind;
 pub use lactea_abi::dump::Stage;
@@ -85,6 +88,15 @@ pub struct EngineConfig {
     /// (projectM's default) warps the new preset's first frame from the previous active preset's
     /// finished image. The very first preset always starts black.
     pub start_clean: bool,
+    /// MilkDrop 3 `BlendMilk2` (default on): transitions into and out of a `.milk2` double preset are soft. Off, every
+    /// load of a `.milk2` and every change away from one is a hard cut. Only [`Compat::MilkDrop3`] reads it.
+    pub blend_milk2: bool,
+    /// MilkDrop 3 `BlendTimeUser` in seconds (default 1.7): the duration of the two legs of a soft transition into a
+    /// `.milk2` (the request's own time only has to be positive) and of the soft-out ramp's time base.
+    pub blend_time_user: f64,
+    /// The patterns random soft cuts of [`Compat::MilkDrop3`] may pick (MD3's `[transitions]` settings; empty = only
+    /// `zoom`). Default: the 13 patterns MD3 enables without a settings file.
+    pub md3_transition_patterns: Vec<Md3Pattern>,
 }
 
 impl Default for EngineConfig {
@@ -101,6 +113,9 @@ impl Default for EngineConfig {
             fps: 60,
             preset_duration: 1e9,
             start_clean: false,
+            blend_milk2: true,
+            blend_time_user: 1.7,
+            md3_transition_patterns: engine::default_enabled_patterns(),
         }
     }
 }
@@ -160,6 +175,13 @@ pub enum EngineError {
     /// The GPU backend rejected the preset's resources.
     #[error("render error: {0}")]
     Render(#[from] lactea_render::RenderError),
+    /// The preset needs something the configured compatibility mode does not have (a `.milk2` double preset needs
+    /// [`Compat::MilkDrop3`]).
+    #[error("{0}")]
+    Unsupported(String),
+    /// A `.milk2` header value could not be read (a malformed number).
+    #[error("double preset: {0}")]
+    Milk2(#[from] lactea_preset::milk2::Milk2Error),
 }
 
 impl EngineError {

@@ -47,6 +47,8 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | warp animation terms (`warp_anim_projectm`) | projectM's `y` sign and GPU `pow` | MD2's |
 /// | `shapecode_N_image` key (`custom_shape_image`) | read | not a key (stays in `extra`) |
 /// | no-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
+/// | `.milk2` double presets (`md3_double_preset`) | not loaded (error) | not loaded (error) |
+/// | soft-cut blend patterns (`md3_blend_patterns`) | (projectM transition shaders) | BeatDrop's 19 (MD3: its 30) |
 ///
 /// `MilkDrop3` is `MilkDrop2` plus the MilkDrop 3 deltas (see `docs/md3.md`); every MD3 delta is a field of
 /// [`CompatRules`], and [`Compat::md2_family`] is true for both variants.
@@ -192,6 +194,12 @@ pub struct CompatRules {
     pub custom_shape_image: bool,
     /// The no-shader composite pass samples the feedback image with the `Wrap` address mode; otherwise `Clamp`.
     pub noshader_comp_wrap: bool,
+    /// MilkDrop 3 `.milk2` double presets: two presets in one file, played as a frozen MD2 soft cut with its own
+    /// progress modes (`docs/md3.md`). Loading a `.milk2` without this rule is an error.
+    pub md3_double_preset: bool,
+    /// Ordinary soft cuts draw their blend pattern from MilkDrop 3's 30 patterns (the enabled list) instead of
+    /// BeatDrop's 19. Needs `md2_preset_blend`.
+    pub md3_blend_patterns: bool,
 }
 
 impl Compat {
@@ -243,6 +251,8 @@ impl Compat {
                 warp_anim_projectm: true,
                 custom_shape_image: true,
                 noshader_comp_wrap: false,
+                md3_double_preset: false,
+                md3_blend_patterns: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -289,9 +299,13 @@ impl Compat {
                 warp_anim_projectm: false,
                 custom_shape_image: false,
                 noshader_comp_wrap: true,
+                md3_double_preset: false,
+                md3_blend_patterns: false,
             },
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
+                md3_double_preset: true,
+                md3_blend_patterns: true,
                 ..Compat::MilkDrop2.rules()
             },
         }

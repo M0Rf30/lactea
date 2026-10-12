@@ -4,6 +4,7 @@
 //! engine to it and [`ScopeVisualizer`] is a dependency-free oscilloscope used to develop and
 //! test the shell (window, audio paths, preset keys) without an engine.
 
+use crate::cli::CompatArg;
 use bytemuck::{Pod, Zeroable};
 
 /// How a loaded preset replaces the running one.
@@ -49,6 +50,11 @@ pub trait Visualizer {
     /// The current auto hard cut mode, or `None` when the visualizer has no such feature or its
     /// compat mode does not support it (the key then tells the user what to enable).
     fn auto_hard_cut_mode(&self) -> Option<u8> {
+        None
+    }
+    /// The compat mode the visualizer runs now (never `Auto`): after a successful `load_preset`, the mode the
+    /// loaded preset runs under. `None` for visualizers without compat modes.
+    fn current_compat(&self) -> Option<CompatArg> {
         None
     }
 }

@@ -39,19 +39,38 @@ pub enum AudioBackend {
 /// Which renderer a difference between projectM, MilkDrop 2 and MilkDrop 3 resolves to (engine only).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CompatArg {
-    /// projectM behaviour (the measurement oracle; default).
+    /// Pick projectM or MilkDrop 3 behaviour per preset from the preset file (default); a change of
+    /// mode between two presets is a hard cut. MilkDrop 2 is never chosen automatically.
+    Auto,
+    /// projectM behaviour (the measurement oracle), for every preset.
     Projectm,
-    /// MilkDrop 2 behaviour.
+    /// MilkDrop 2 behaviour, for every preset.
     Milkdrop2,
-    /// MilkDrop 3 behaviour (MilkDrop 2 plus the MD3 deltas, `docs/md3.md`).
+    /// MilkDrop 3 behaviour (MilkDrop 2 plus the MD3 deltas, `docs/md3.md`), for every preset.
     Milkdrop3,
 }
 
 impl CompatArg {
-    /// Whether this mode follows MilkDrop 3 (`CompatRules::md3_auto_hard_cut` /
-    /// `md3_preset_time_rand`); usable without the `engine` feature.
+    /// Whether this mode is statically MilkDrop 3 (`CompatRules::md3_auto_hard_cut` /
+    /// `md3_preset_time_rand`); usable without the `engine` feature. `Auto` is not: it resolves per
+    /// preset, the host follows the resolved mode after each load.
     pub fn md3(self) -> bool {
         self == CompatArg::Milkdrop3
+    }
+
+    /// Whether `.milk2` double presets are listed: they can only play as MilkDrop 3.
+    pub fn lists_milk2(self) -> bool {
+        matches!(self, CompatArg::Auto | CompatArg::Milkdrop3)
+    }
+
+    /// Human readable name of a (resolved) mode, for the title and the log.
+    pub fn label(self) -> &'static str {
+        match self {
+            CompatArg::Auto => "auto",
+            CompatArg::Projectm => "projectM",
+            CompatArg::Milkdrop2 => "MilkDrop 2",
+            CompatArg::Milkdrop3 => "MilkDrop 3",
+        }
     }
 }
 
@@ -71,7 +90,8 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 ///
 /// Keys: N/Right/Space next preset, P/Left previous, R random, L lock/unlock auto-advance,
 /// F/F11 (or double-click) fullscreen, Esc/Q quit.
-/// F8 cycles the MD3 auto hard cut mode (`--compat milkdrop3` only).
+/// F8 cycles the MD3 auto hard cut mode (while the preset runs as MilkDrop 3: `--compat milkdrop3`, or
+/// `--compat auto` on a MilkDrop 3 preset).
 #[derive(Parser, Debug, Clone)]
 #[command(name = "lactea", version)]
 pub struct Args {
@@ -79,8 +99,8 @@ pub struct Args {
     #[arg(short, long, value_name = "FILE")]
     pub preset: Option<PathBuf>,
 
-    /// Preset directory, scanned recursively for *.milk (and, with --compat milkdrop3, *.milk2 double
-    /// presets; repeatable). Default (when no --preset was given): the first existing of
+    /// Preset directory, scanned recursively for *.milk (and, with --compat auto or milkdrop3, *.milk2
+    /// double presets; repeatable). Default (when no --preset was given): the first existing of
     /// /usr/share/projectM/presets, /usr/local/share/projectM/presets and
     /// /opt/homebrew/share/projectM/presets; none on Windows.
     #[arg(short, long, value_name = "DIR")]
@@ -132,8 +152,9 @@ pub struct Args {
     #[arg(long, default_value_t = 1)]
     pub seed: u32,
 
-    /// Engine: projectM (default) or MilkDrop 2 behaviour where they differ.
-    #[arg(long, value_enum, default_value_t = CompatArg::Projectm)]
+    /// Engine: `auto` (default) resolves projectM or MilkDrop 3 behaviour per preset from the preset
+    /// file (hard cut when the mode changes); `projectm`, `milkdrop2` and `milkdrop3` fix it.
+    #[arg(long, value_enum, default_value_t = CompatArg::Auto)]
     pub compat: CompatArg,
 
     /// Engine: warp mesh cells (both even).
@@ -211,7 +232,7 @@ pub struct Args {
     #[arg(long, value_name = "FRAME:KEY,...", hide = true)]
     pub inject_keys: Option<String>,
 
-    /// Engine, `--compat milkdrop3` only: initial MilkDrop 3 AutoHardCutMode, 0 = off. 1..=6 change the
+    /// Engine, MilkDrop 3 mode only (`--compat milkdrop3`, or `auto` on a MilkDrop 3 preset): initial MilkDrop 3 AutoHardCutMode, 0 = off. 1..=6 change the
     /// preset instantly (a hard cut, whatever --transition-duration) on beat/loudness triggers; 7 injects a
     /// random effect into the composite shader without changing the preset. F8 cycles it at runtime.
     #[arg(
@@ -222,7 +243,7 @@ pub struct Args {
     )]
     pub auto_hard_cut: u8,
 
-    /// `--compat milkdrop3` only: MD3 TimeBetweenPresetsRand. A preset stays for --transition-duration +
+    /// MilkDrop 3 mode only (`--compat milkdrop3`, or `auto` on a MilkDrop 3 preset): MD3 TimeBetweenPresetsRand. A preset stays for --transition-duration +
     /// --duration + a random 0..SECONDS (negative = 0) instead of --duration alone.
     #[arg(long, default_value_t = 10.0, value_name = "SECONDS")]
     pub duration_rand: f64,
@@ -234,6 +255,24 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, clap::Error> {
         Args::try_parse_from(std::iter::once("lactea").chain(args.iter().copied()))
+    }
+
+    #[test]
+    fn compat_defaults_to_auto_and_fixed_modes_stay_fixed() {
+        let a = parse(&[]).unwrap();
+        assert_eq!(a.compat, CompatArg::Auto);
+        assert!(!a.compat.md3(), "auto is not statically MD3");
+        assert!(a.compat.lists_milk2());
+        for (flag, arg, md3, milk2) in [
+            ("auto", CompatArg::Auto, false, true),
+            ("projectm", CompatArg::Projectm, false, false),
+            ("milkdrop2", CompatArg::Milkdrop2, false, false),
+            ("milkdrop3", CompatArg::Milkdrop3, true, true),
+        ] {
+            let a = parse(&["--compat", flag]).unwrap();
+            assert_eq!(a.compat, arg);
+            assert_eq!((arg.md3(), arg.lists_milk2()), (md3, milk2), "{flag}");
+        }
     }
 
     #[test]

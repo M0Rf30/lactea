@@ -90,8 +90,8 @@ pub(crate) fn collect_presets(args: &Args) -> Vec<PresetEntry> {
                 .find(|d| d.is_dir()),
         );
     }
-    // `.milk2` double presets play only under `--compat milkdrop3`
-    let milk2 = args.compat == CompatArg::Milkdrop3;
+    // `.milk2` double presets play only as MilkDrop 3: `--compat milkdrop3`, or `auto` (resolved per preset)
+    let milk2 = args.compat.lists_milk2();
     for d in dirs {
         let found = presets::scan_dir(&d, milk2);
         if found.is_empty() {
@@ -400,6 +400,23 @@ impl App {
         self.switch_with(run, nav, now, false);
     }
 
+    /// Make everything compat-dependent in the host follow the compat mode the last loaded preset runs
+    /// under: under `--compat auto` the MD3 display time applies to MilkDrop 3 presets only (fixed modes
+    /// are set once in `new`). `None` (no compat modes) changes nothing.
+    fn follow_compat(&mut self, resolved: Option<CompatArg>) {
+        if self.args.compat != CompatArg::Auto {
+            return;
+        }
+        match resolved {
+            Some(c) if c.md3() => self.presets.set_md3_time(
+                Duration::from_secs_f64(self.args.transition_duration.max(0.0)),
+                self.args.duration_rand,
+            ),
+            Some(_) => self.presets.clear_md3_time(),
+            None => {}
+        }
+    }
+
     /// [`Self::switch`]; `force_cut` loads with a hard cut whatever `--transition-duration` says (MD3
     /// auto hard cuts).
     fn switch_with(&mut self, run: &mut Running, nav: Nav, now: Instant, force_cut: bool) {
@@ -425,6 +442,7 @@ impl App {
             let t0 = Instant::now();
             match Self::load_entry(run, &entry, change) {
                 Ok(()) => {
+                    self.follow_compat(run.viz.current_compat());
                     self.presets.commit(idx, nav, now);
                     log::info!(
                         "preset [{}/{}]{}: {} ({:.0} ms)",
@@ -438,6 +456,9 @@ impl App {
                         entry.name,
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
+                    if let Some(c) = run.viz.current_compat() {
+                        log::info!("preset {}: compat {}", entry.name, c.label());
+                    }
                     break;
                 }
                 Err(e) => {
@@ -487,7 +508,9 @@ impl App {
             Action::Quit => el.exit(),
             Action::Navigate(nav) => self.switch(&mut run, nav, now),
             Action::CycleAutoHardCut => match run.viz.auto_hard_cut_mode() {
-                None => log::info!("auto hard cut needs --compat milkdrop3"),
+                None => log::info!(
+                    "auto hard cut needs a MilkDrop 3 preset (--compat milkdrop3, or auto on one)"
+                ),
                 Some(mode) => {
                     let next = next_auto_hard_cut(mode);
                     run.viz.set_auto_hard_cut_mode(next);
@@ -572,8 +595,14 @@ impl App {
             return;
         }
         self.last_title_at = now;
+        let compat = match (self.args.compat, run.viz.current_compat()) {
+            (CompatArg::Auto, Some(c)) if self.presets.current().is_some() => {
+                format!(" [{}]", c.label())
+            }
+            _ => String::new(),
+        };
         let preset = match (self.presets.current(), self.presets.current_entry()) {
-            (Some(i), Some(e)) => format!("{} [{}/{}]", e.name, i + 1, self.presets.len()),
+            (Some(i), Some(e)) => format!("{}{compat} [{}/{}]", e.name, i + 1, self.presets.len()),
             _ => "no preset".to_string(),
         };
         let hardcut = match run.viz.auto_hard_cut_mode() {

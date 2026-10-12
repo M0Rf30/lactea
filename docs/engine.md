@@ -21,14 +21,19 @@ engine.render(&mut encoder, &target_view, FrameClock { time, frame });   // one 
 engine.resize(w, h);  engine.frame_vars();  engine.renderer() / renderer_mut();
 engine.transition_progress();  engine.transition_info();  engine.incoming_renderer();   // soft cut in progress (projectM)
 engine.set_md2_blend_pattern(Some(1));  engine.md2_blend_pattern();                      // MilkDrop 2 blend (`Compat::MilkDrop2`)
+engine.current_compat();                                                  // mode in use (follows each load with `auto_compat`)
 engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teacher forcing (fdrender)
 ```
 
-* `EngineConfig { width, height, mesh, seed, compat, texel_offset, output_format, sample_rate, fps,
-  preset_duration, start_clean }` (`Default`: 640×360, 48×36, seed 1, projectM, Rgba8Unorm, 44.1 kHz, 60 fps,
-  `start_clean: false` = projectM's default).
+* `EngineConfig { width, height, mesh, seed, compat, auto_compat, texel_offset, output_format, sample_rate, fps,
+  preset_duration, start_clean }` (`Default`: 640×360, 48×36, seed 1, projectM, `auto_compat: false`, Rgba8Unorm,
+  44.1 kHz, 60 fps, `start_clean: false` = projectM's default).
   `fps` is the *target* rate presets read (projectM reports the target, not a measurement);
   `preset_duration` (default 1e9 s = locked preset) is the `progress` denominator.
+  `auto_compat: true` makes every `load_preset` pick `Compat::ProjectM` or `Compat::MilkDrop3` from the preset's bytes
+  (`lactea::compat_for_preset`, `lactea_preset::detect_compat`) and switch the engine to it when it differs from the
+  current mode, with a hard cut; `compat` is then only the mode before the first load. See "Automatic compatibility"
+  in `md3.md` (heuristics, what a switch rebuilds, transitions, limits).
 * `TextureProvider { fn load(&mut self, name) -> Option<Image{width,height,rgba8}>; fn random_pool(&self) -> Vec<String> }`.
   Names are lowercase, without `sampler_`/`fw_`-style prefixes and file extension. The pool must be
   sorted by name (it is part of the determinism contract). The engine never touches the filesystem.
@@ -40,8 +45,8 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
   used evicted) and the translated shaders (16 MiB) across `load_preset` calls, so a reload, a playlist revisit or the
   two halves of a `.milk2` do not decode or translate again; the provider is asked once per name. `set_texture_provider`
   drops the media. A provider whose files change while it is installed is not re-read.
-* `PresetReport`: `warp`/`comp` `ShaderOutcome {NotUsed, User, Default, Fallback}`, `warnings`,
-  `shader_fallbacks`, `unresolved_textures`, `resolved_textures`.
+* `PresetReport`: `compat` (the mode the preset was loaded under), `warp`/`comp` `ShaderOutcome {NotUsed, User, Default,
+  Fallback}`, `warnings`, `shader_fallbacks`, `unresolved_textures`, `resolved_textures`.
 * `EngineError {Parse, Compile{what,error}, Render}`. On error the previous preset stays active.
 * Time: `FrameClock.time` is the `time` variable (projectM: global running time, not time since
   preset start); audio smoothing advances by `time - previous time` (0 on the first frame).
@@ -248,7 +253,7 @@ injects the previous `main` image. Frames 0..n-1 still run so megabuf and expres
 ```
 fdrender --preset P --audio WAV --out DIR [--size 640x360] [--mesh 48x36] [--fps 60] [--frames 300]
          [--seed 1] [--texel-offset 0,0] [--stages final,main,warped,blur1,blur2,blur3|all|none]
-         [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2|md3]
+         [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2|md3|auto]
          [--auto-hard-cut 0..7]
 ```
 
@@ -272,6 +277,12 @@ effects; only with `--compat md3`, ignored with a note otherwise; N > 7 is a usa
 cuts of modes 1..=6 are only counted (`"auto_cuts"` in `fdrender.json`, present when the mode is active); mode 7's effects show in
 the rendered frames.
 
+`--compat auto` (default stays `projectm`, the fidelity tool) runs the engine with `auto_compat`: each preset (also
+`--preset2`) resolves to projectM or MilkDrop 3 from its bytes, `fdrender: compat auto -> md3 (evidence: ...)` is logged,
+`fdrender.json` gets `"compat"` (resolved mode of the first preset) plus `"compat_auto": true` and `"compat_evidence"`,
+and the MD3-only flags (`--mouse`, `--volume-sensitivity`, `--auto-hard-cut`) apply when the preset resolved to MD3. A
+`--preset2` of another mode is a hard cut (`md3.md`, "Automatic compatibility").
+
 `scripts/fidelity.sh SET [FILTER]` runs free + teacher runs for a whole oracle set and `fdcompare corpus`
 (see the script header); `scripts/fdq.py` (quick PSNR probe)
 and `scripts/probes/*.milk` (tiny presets rendered through the oracle to isolate one feature) are the
@@ -291,6 +302,9 @@ UV blend `mix2 * dx`, shape `alpha_mult`, `progress`, load / cut / failed load d
 composite shaders, all 16 shader combinations without validation errors) and the pure-logic unit tests in
 `crates/lactea/src/engine/md2_blend.rs` (`CBlendableFloat`, snap points, variable blend, `mix2`, the 19 patterns) and
 `crates/lactea-render/src/blend.rs` (tile culling, pass tables, composite alpha lookup, two-wave blend, `CosineInterp`).
+`tests/auto_compat.rs` (`EngineConfig::auto_compat`: a projectM / MD3 / `.milk2` playlist through one engine, hard cut on a mode
+change, failed load keeps the mode, determinism) and `crates/lactea-preset/src/detect.rs` (detection heuristics and
+their false-positive guards).
 
 ## projectM API parity additions
 

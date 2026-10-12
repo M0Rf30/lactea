@@ -83,6 +83,18 @@ impl GlobalMemory {
         }
     }
 
+    /// Memory of `dialect` that draws `rand()` from the **same** stream as `other` (like
+    /// [`sharing_rng_with`](Self::sharing_rng_with)) but starts with its own, empty `reg00..reg99` and gmegabuf: a
+    /// host that switches the dialect mid-run keeps one random sequence and loses the state of the other dialect.
+    pub fn sharing_rng_with_dialect(other: &GlobalMemory, dialect: Dialect) -> Self {
+        GlobalMemory {
+            dialect,
+            regs: new_regs(),
+            blocks: new_blocks(),
+            rng: Arc::clone(&other.rng),
+        }
+    }
+
     /// Value of `reg00 + i` (`i < 100`).
     ///
     /// # Panics

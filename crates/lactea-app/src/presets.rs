@@ -28,7 +28,7 @@ pub struct PresetEntry {
 }
 
 /// Recursively collect `*.milk` (any case) below `dir`, and with `milk2` also `*.milk2` (double presets, which only
-/// `--compat milkdrop3` plays), sorted by path. Directories are visited once (by canonical path), so symlink loops
+/// `--compat auto` / `milkdrop3` play), sorted by path. Directories are visited once (by canonical path), so symlink loops
 /// and aliases cannot blow the scan up.
 pub fn scan_dir(dir: &Path, milk2: bool) -> Vec<PresetEntry> {
     fn walk(dir: &Path, milk2: bool, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
@@ -173,6 +173,12 @@ impl PresetBrowser {
     /// A zero `duration` still never rotates.
     pub fn set_md3_time(&mut self, blend: Duration, rand: f64) {
         self.md3_time = Some((blend, rand.max(0.0)));
+    }
+
+    /// Back to `duration` alone for the presets started from now on (a non-MD3 preset under `--compat auto`).
+    pub fn clear_md3_time(&mut self) {
+        self.md3_time = None;
+        self.md3_extra = Duration::ZERO;
     }
 
     /// Time a preset stays before the timer asks for the next one.
@@ -443,6 +449,20 @@ mod tests {
     }
 
     #[test]
+    fn clearing_md3_time_returns_to_the_plain_duration() {
+        let t0 = Instant::now();
+        let mut b = md3_browser(7, 30, 3, 10.0);
+        assert!(period_after_commit(&mut b, t0) >= Duration::from_secs(33));
+        b.clear_md3_time();
+        for _ in 0..5 {
+            assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(30));
+        }
+        // and back on again (auto compat switching between presets)
+        b.set_md3_time(Duration::from_secs(3), 0.0);
+        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+    }
+
+    #[test]
     fn failure_skips_in_direction_and_terminates() {
         let mut b = browser(3);
         let mut tried = 1;
@@ -509,7 +529,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(d);
     }
 
-    /// `.milk2` double presets are listed only on request (they need `--compat milkdrop3`) and keep their extension in
+    /// `.milk2` double presets are listed only on request (`--compat auto` or milkdrop3) and keep their extension in
     /// the name, so the engine can tell them from plain presets.
     #[test]
     fn scan_dir_lists_milk2_on_request() {

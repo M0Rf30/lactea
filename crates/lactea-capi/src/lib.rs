@@ -62,6 +62,13 @@ pub enum LacteaCompat {
     Milkdrop2 = 1,
     /// Follow MilkDrop 3.
     Milkdrop3 = 2,
+    /// Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
+    /// (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
+    /// names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
+    /// code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
+    /// changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
+    /// mode in use. Before the first load the mode is projectM.
+    Auto = 3,
 }
 
 /// Construction parameters. Fill with `lactea_config_default` and override fields.
@@ -441,6 +448,10 @@ unsafe fn engine_config(config: *const LacteaConfig) -> Option<EngineConfig> {
             LacteaCompat::Milkdrop2 => Compat::MilkDrop2,
             LacteaCompat::Milkdrop3 => Compat::MilkDrop3,
             LacteaCompat::Projectm => Compat::ProjectM,
+            LacteaCompat::Auto => {
+                cfg.auto_compat = true;
+                Compat::ProjectM
+            }
         };
         cfg.sample_rate = c.sample_rate;
         cfg.fps = c.fps;
@@ -462,6 +473,7 @@ fn build_engine(
     let mut control = PresetControl::new(cfg.seed);
     control.set_preset_duration(cfg.preset_duration);
     // MD3 display time: BlendTimeAuto + TimeBetweenPresets + a random part up to TimeBetweenPresetsRand.
+    // Re-evaluated after every load (`sync_md3_time_rand`) because `LACTEA_COMPAT_AUTO` can change the mode.
     if cfg.compat.rules().md3_preset_time_rand {
         control.set_md3_time_rand(Some(MD3_TIME_BETWEEN_PRESETS_RAND));
     }
@@ -565,8 +577,21 @@ pub unsafe extern "C" fn lactea_load_preset_ex(
     })
 }
 
+/// MD3 display-time randomisation follows the mode the engine runs now (`LACTEA_COMPAT_AUTO` can
+/// change it at every load).
+fn sync_md3_time_rand(e: &mut LacteaEngine) {
+    let rand = e
+        .engine
+        .current_compat()
+        .rules()
+        .md3_preset_time_rand
+        .then_some(e.md3_time_rand);
+    e.control.set_md3_time_rand(rand);
+}
+
 /// A preset was loaded (`soft`: blending in over that many seconds): restart the switch timer.
 fn preset_started(e: &mut LacteaEngine, soft: Option<f64>) {
+    sync_md3_time_rand(e);
     let now = e.engine.last_frame_time();
     match soft {
         Some(seconds) => {
@@ -1245,6 +1270,32 @@ pub unsafe extern "C" fn lactea_get_auto_hard_cut_mode(
     })
 }
 
+/// The compat mode the engine is running now, never `LACTEA_COMPAT_AUTO`: with
+/// `LACTEA_COMPAT_AUTO` it is the mode the last successfully loaded preset resolved to (the creation
+/// mode, `LACTEA_COMPAT_PROJECTM`, before the first load); with a fixed mode it is that mode.
+///
+/// # Safety
+/// `engine` valid; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_get_compat(
+    engine: *const LacteaEngine,
+    out: *mut LacteaCompat,
+) -> LacteaStatus {
+    guard(|| {
+        let (Some(e), false) = (unsafe { engine.as_ref() }, out.is_null()) else {
+            return fail(LacteaStatus::InvalidArgument, "engine or out is NULL");
+        };
+        unsafe {
+            out.write(match e.engine.current_compat() {
+                Compat::ProjectM => LacteaCompat::Projectm,
+                Compat::MilkDrop2 => LacteaCompat::Milkdrop2,
+                Compat::MilkDrop3 => LacteaCompat::Milkdrop3,
+            })
+        };
+        LacteaStatus::Ok
+    })
+}
+
 /// projectM's preset-switching settings in one struct (`projectm_set_*` / `projectm_get_*` of beat
 /// sensitivity, aspect correction, easter egg, preset lock, preset / soft-cut / hard-cut timing).
 /// Defaults (what a fresh engine reports): 1.0, true, 1.0, false, `config.preset_duration`, 3.0, false,
@@ -1340,7 +1391,7 @@ pub unsafe extern "C" fn lactea_set_switch_settings(
         c.set_hard_cut_duration(s.hard_cut_duration);
         c.set_hard_cut_sensitivity(s.hard_cut_sensitivity);
         e.md3_time_rand = s.preset_duration_rand.max(0.0);
-        if e.engine.config().compat.rules().md3_preset_time_rand {
+        if e.engine.current_compat().rules().md3_preset_time_rand {
             c.set_md3_time_rand(Some(e.md3_time_rand));
         }
         e.engine.set_preset_duration(s.preset_duration);
@@ -2134,6 +2185,48 @@ mod tests {
                 assert_eq!((*e).control.md3_time_rand(), md3.then_some(0.0));
                 lactea_destroy(e);
             }
+        }
+    }
+
+    #[test]
+    fn auto_compat_follows_the_loaded_preset() {
+        let Some(e) = engine_with(LacteaCompat::Auto, 0) else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let plain = b"[preset00]\nfDecay=0.9\nper_frame_1=zoom=1.01;\n";
+        let md3 = b"[preset00]\nMILKDROP_PRESET_VERSION=300\nfDecay=0.9\nper_frame_1=q40=1;\n\
+                    [SPRITE1_BEGIN]\nSpriteName=x\n[SPRITE1_END]\n";
+        let compat = |e: *mut LacteaEngine| {
+            let mut out = LacteaCompat::Auto;
+            assert_eq!(unsafe { lactea_get_compat(e, &mut out) }, LacteaStatus::Ok);
+            out
+        };
+        unsafe {
+            assert_eq!(compat(e), LacteaCompat::Projectm);
+            assert_eq!(
+                lactea_load_preset(e, plain.as_ptr(), plain.len(), c"plain".as_ptr()),
+                LacteaStatus::Ok
+            );
+            assert_eq!(compat(e), LacteaCompat::Projectm);
+            assert_eq!((*e).control.md3_time_rand(), None);
+            assert_eq!(
+                lactea_load_preset(e, md3.as_ptr(), md3.len(), c"md3".as_ptr()),
+                LacteaStatus::Ok
+            );
+            assert_eq!(compat(e), LacteaCompat::Milkdrop3);
+            assert_eq!((*e).control.md3_time_rand(), Some(10.0));
+            assert_eq!(
+                lactea_load_preset(e, plain.as_ptr(), plain.len(), c"plain".as_ptr()),
+                LacteaStatus::Ok
+            );
+            assert_eq!(compat(e), LacteaCompat::Projectm);
+            assert_eq!((*e).control.md3_time_rand(), None);
+            assert_eq!(
+                lactea_get_compat(e, null_mut()),
+                LacteaStatus::InvalidArgument
+            );
+            lactea_destroy(e);
         }
     }
 }

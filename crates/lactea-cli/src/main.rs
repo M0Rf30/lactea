@@ -90,17 +90,21 @@ struct Args {
     /// use the noise textures of an oracle dump directory (free run)
     #[arg(long)]
     inject_noise: Option<PathBuf>,
-    /// projectm (default) | md2 | md3
+    /// projectm (default) | md2 | md3 | auto. `auto` picks projectm or md3 per preset from its content
+    /// (md2 only as the fallback for a preset projectm rejects with a compile error; a mode change on
+    /// `--preset2` is a hard cut) and reports the choice in fdrender.json (`compat_auto`,
+    /// `compat_evidence`); the default stays projectm.
     #[arg(long, default_value = "projectm")]
     compat: String,
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
     #[arg(long)]
     stroke: Option<String>,
-    /// MilkDrop 3 (`--compat md3`): a fixed mouse for every frame, `X,Y[,down]` with X, Y the cursor as fractions of
-    /// the image (0..1, origin top left); `down` presses the left button. Default: the cursor is outside the window.
+    /// MilkDrop 3 (`--compat md3`, or `auto` when the preset resolves to md3): a fixed mouse for every frame,
+    /// `X,Y[,down]` with X, Y the cursor as fractions of the image (0..1, origin top left); `down` presses the
+    /// left button. Default: the cursor is outside the window.
     #[arg(long, value_name = "X,Y[,down]")]
     mouse: Option<String>,
-    /// MilkDrop 3 `VolumeSensitivity` (`--compat md3` only): linear gain on the 8-bit quantised audio input.
+    /// MilkDrop 3 `VolumeSensitivity` (`--compat md3`, or `auto` with an md3 preset): linear gain on the 8-bit quantised audio input.
     #[arg(long, default_value_t = 1.0)]
     volume_sensitivity: f32,
     /// MilkDrop 3 locked shader (`MD31` handle): replace the preset's warp stub with the HLSL in FILE. Repeatable.
@@ -131,7 +135,7 @@ struct Args {
     /// pass (isolates the transition shader; per-preset stages stay ours)
     #[arg(long)]
     blend_teacher: Option<PathBuf>,
-    /// MilkDrop 3 AutoHardCutMode 0..=7 (0 = off; acts only with --compat md3). fdrender has no preset
+    /// MilkDrop 3 AutoHardCutMode 0..=7 (0 = off; acts only with --compat md3, or auto with an md3 preset). fdrender has no preset
     /// switching, so the instant preset changes of modes 1..=6 are only counted ("auto_cuts" in
     /// fdrender.json); mode 7 injects its effects into the composite shader, so the frames show them
     #[arg(long, default_value_t = 0)]
@@ -282,11 +286,12 @@ fn run(args: &Args) -> Result<i32> {
     let stages = parse_stages(&args.stages)?;
     // non-ABI extra stage of the oracle: previous main + this frame's motion vectors
     let want_warpsrc = args.stages.split(',').any(|t| t.trim() == "warpsrc");
-    let compat = match args.compat.as_str() {
-        "projectm" => Compat::ProjectM,
+    let auto_compat = args.compat == "auto";
+    let base_compat = match args.compat.as_str() {
+        "projectm" | "auto" => Compat::ProjectM,
         "md2" => Compat::MilkDrop2,
         "md3" => Compat::MilkDrop3,
-        o => bail!("--compat: expected projectm|md2|md3, got {o:?}"),
+        o => bail!("--compat: expected projectm|md2|md3|auto, got {o:?}"),
     };
     if args.auto_hard_cut > lactea::auto_cut::AUTO_HARD_CUT_MODES {
         bail!(
@@ -416,7 +421,8 @@ fn run(args: &Args) -> Result<i32> {
             height,
             mesh: [mx, my],
             seed: args.seed,
-            compat,
+            compat: base_compat,
+            auto_compat,
             texel_offset: [tox, toy],
             output_format: wgpu::TextureFormat::Rgba8Unorm,
             sample_rate: audio.rate,
@@ -429,7 +435,7 @@ fn run(args: &Args) -> Result<i32> {
             ..EngineConfig::default()
         },
     );
-    if args.auto_hard_cut > 0 && !engine.auto_hard_cut_active() {
+    if !auto_compat && args.auto_hard_cut > 0 && !engine.auto_hard_cut_active() {
         eprintln!("fdrender: --auto-hard-cut needs --compat md3, ignored");
     }
     let tex_dir = args.texture_dir.clone().unwrap_or_else(default_texture_dir);
@@ -518,6 +524,29 @@ fn run(args: &Args) -> Result<i32> {
             f.pass, f.reason, f.fallback
         );
     }
+    let evidence = if auto_compat {
+        let (name, ev) = detect_note(&preset_bytes, &report);
+        eprintln!("fdrender: compat auto -> {name} (evidence: {ev})");
+        if report.compat != Compat::MilkDrop3 {
+            if args.mouse.is_some() {
+                eprintln!("fdrender: --mouse needs an md3 preset under --compat auto, ignored");
+            }
+            if args.volume_sensitivity != 1.0 {
+                eprintln!(
+                    "fdrender: --volume-sensitivity needs an md3 preset under --compat auto, ignored"
+                );
+            }
+            if args.auto_hard_cut > 0 {
+                eprintln!(
+                    "fdrender: --auto-hard-cut needs an md3 preset under --compat auto, ignored"
+                );
+            }
+        }
+        detected_evidence(&preset_bytes, &report)
+    } else {
+        Vec::new()
+    };
+    let mut evidence2: Option<Vec<String>> = None;
     for t in &report.unresolved_textures {
         eprintln!("fdrender: unresolved texture {t}");
     }
@@ -572,6 +601,11 @@ fn run(args: &Args) -> Result<i32> {
                             "fdrender: SHADER FALLBACK preset2 ({:?}): {} -> {}",
                             f.pass, f.reason, f.fallback
                         );
+                    }
+                    if auto_compat {
+                        let (name, ev) = detect_note(p2, &r);
+                        eprintln!("fdrender: compat auto -> {name} (preset2; {ev})");
+                        evidence2 = Some(detected_evidence(p2, &r));
                     }
                     report2 = Some(r);
                 }
@@ -795,6 +829,15 @@ fn run(args: &Args) -> Result<i32> {
     if engine.auto_hard_cut_active() {
         info["auto_cuts"] = serde_json::json!(auto_cuts);
     }
+    info["compat"] = serde_json::json!(compat_name(report.compat));
+    if auto_compat {
+        info["compat_auto"] = serde_json::json!(true);
+        info["compat_evidence"] = serde_json::json!(evidence);
+        if let (Some(r), Some(ev)) = (&report2, &evidence2) {
+            info["preset2"]["compat"] = serde_json::json!(compat_name(r.compat));
+            info["preset2"]["compat_evidence"] = serde_json::json!(ev);
+        }
+    }
     write_info(&args.out, info)?;
     if !validation_errors.is_empty() {
         return Ok(4);
@@ -804,6 +847,43 @@ fn run(args: &Args) -> Result<i32> {
     } else {
         3
     })
+}
+
+fn compat_name(c: Compat) -> &'static str {
+    match c {
+        Compat::ProjectM => "projectm",
+        Compat::MilkDrop2 => "md2",
+        Compat::MilkDrop3 => "md3",
+    }
+}
+
+/// What `lactea_preset::detect_compat` found in `bytes`, one string per piece of evidence, then the engine's
+/// `fallback: ...` note when the load fell back to MilkDrop 2.
+fn detected_evidence(bytes: &[u8], report: &lactea::PresetReport) -> Vec<String> {
+    let mut ev: Vec<String> = lactea_preset::detect_compat(bytes)
+        .evidence
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    ev.extend(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.starts_with("fallback: "))
+            .cloned(),
+    );
+    ev
+}
+
+/// Name of the resolved mode and the evidence for the `--compat auto` log line.
+fn detect_note(bytes: &[u8], report: &lactea::PresetReport) -> (&'static str, String) {
+    let ev = detected_evidence(bytes, report);
+    let ev = if ev.is_empty() {
+        "none".to_string()
+    } else {
+        ev.join(", ")
+    };
+    (compat_name(report.compat), ev)
 }
 
 fn write_info(dir: &Path, v: serde_json::Value) -> Result<()> {

@@ -13,7 +13,7 @@ pub enum Action {
     /// Write every pipeline stage of the last frame as `lactea-debug-<frame>-<stage>.png` into
     /// `$LACTEA_DEBUG_DIR` (default: `<temp dir>/lactea-debug`).
     DumpStages,
-    /// Cycle the MD3 auto hard cut mode off, 1..=7, off (MD3's F8; needs `--compat milkdrop3`).
+    /// Cycle the MD3 auto hard cut mode off, 1..=7, off (MD3's F8; needs a MilkDrop 3 preset: `--compat milkdrop3` or auto).
     CycleAutoHardCut,
 }
 

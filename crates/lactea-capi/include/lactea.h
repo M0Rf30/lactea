@@ -27,6 +27,13 @@ enum LacteaCompat
   LACTEA_COMPAT_MILKDROP2 = 1,
   // Follow MilkDrop 3.
   LACTEA_COMPAT_MILKDROP3 = 2,
+  // Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
+  // (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
+  // names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
+  // code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
+  // changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
+  // mode in use. Before the first load the mode is projectM.
+  LACTEA_COMPAT_AUTO = 3,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
@@ -429,6 +436,14 @@ LacteaStatus lactea_set_auto_hard_cut_mode(LacteaEngine *engine, uint8_t mode);
 // # Safety
 // `engine` valid; `out` writable.
 LacteaStatus lactea_get_auto_hard_cut_mode(const LacteaEngine *engine, uint8_t *out);
+
+// The compat mode the engine is running now, never `LACTEA_COMPAT_AUTO`: with
+// `LACTEA_COMPAT_AUTO` it is the mode the last successfully loaded preset resolved to (the creation
+// mode, `LACTEA_COMPAT_PROJECTM`, before the first load); with a fixed mode it is that mode.
+//
+// # Safety
+// `engine` valid; `out` writable.
+LacteaStatus lactea_get_compat(const LacteaEngine *engine, LacteaCompat *out);
 
 // Read the preset-switching settings (see `LacteaSwitchSettings`).
 //

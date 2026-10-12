@@ -54,7 +54,8 @@ lactea --audio-file song.flac --preset foo.milk
 ```
 
 Keys: N/→/Space next, P/← previous, R random, L lock, F/F11 fullscreen, Esc/Q quit. All options:
-[`docs/app.md`](docs/app.md).
+[`docs/app.md`](docs/app.md). The compatibility mode (projectM or MilkDrop 3) is picked per preset
+automatically; `--compat projectm|milkdrop2|milkdrop3` fixes it.
 
 ## Embedding
 

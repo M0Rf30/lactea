@@ -133,6 +133,17 @@ impl Visualizer for EngineVisualizer {
         match self.engine.load_preset(bytes, name, transition) {
             Ok(report) => {
                 log_report(&report);
+                if let Some(d) = self.engine.double_preset_info() {
+                    log::debug!(
+                        "double preset '{}': {} (direction {}) held at {}, {} + {}",
+                        d.name,
+                        d.pattern,
+                        d.direction,
+                        d.progress,
+                        d.name1.as_deref().unwrap_or("?"),
+                        d.name2.as_deref().unwrap_or("?")
+                    );
+                }
                 Ok(())
             }
             Err(e) => Err(e.to_string()),

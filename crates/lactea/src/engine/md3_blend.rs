@@ -1025,6 +1025,7 @@ mod tests {
     /// `(pattern index, direction, [(a, c) at v0, v3, v7, v14])` of the reference table (4x2 mesh, aspect
     /// `(1, 0.5625)`, `r = [0.25, 0.5, 0.75, 0.125, 0.875]`).
     #[rustfmt::skip]
+    #[allow(clippy::type_complexity)]
     const TABLE: &[(usize, i32, [(f32, f32); 4])] = &[
         (0, 1, [(1.0000, 0.0000), (1.0000, 0.0000), (1.0000, 0.0000), (1.0000, 0.0000)]),
         (1, 1, [(6.0000, -4.2692), (6.0000, -4.2671), (6.0000, -3.2734), (6.0000, -2.2776)]),

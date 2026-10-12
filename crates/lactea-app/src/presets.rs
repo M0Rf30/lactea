@@ -23,14 +23,15 @@ pub(crate) fn default_preset_dirs() -> &'static [&'static str] {
 #[derive(Clone, Debug)]
 pub struct PresetEntry {
     pub path: PathBuf,
-    /// Display name: path relative to its scan root, without `.milk`.
+    /// Display name: path relative to its scan root, without `.milk` (a `.milk2` keeps its extension).
     pub name: String,
 }
 
-/// Recursively collect `*.milk` (any case) below `dir`, sorted by path. Directories are visited
-/// once (by canonical path), so symlink loops and aliases cannot blow the scan up.
-pub fn scan_dir(dir: &Path) -> Vec<PresetEntry> {
-    fn walk(dir: &Path, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
+/// Recursively collect `*.milk` (any case) below `dir`, and with `milk2` also `*.milk2` (double presets, which only
+/// `--compat milkdrop3` plays), sorted by path. Directories are visited once (by canonical path), so symlink loops
+/// and aliases cannot blow the scan up.
+pub fn scan_dir(dir: &Path, milk2: bool) -> Vec<PresetEntry> {
+    fn walk(dir: &Path, milk2: bool, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
         let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         if !visited.insert(canon) {
             return;
@@ -41,25 +42,30 @@ pub fn scan_dir(dir: &Path) -> Vec<PresetEntry> {
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
-                walk(&p, visited, out);
+                walk(&p, milk2, visited, out);
             } else if p
                 .extension()
                 .and_then(|x| x.to_str())
                 .is_some_and(|x| x.eq_ignore_ascii_case("milk"))
+                || (milk2 && is_milk2(&p))
             {
                 out.push(p);
             }
         }
     }
     let mut files = Vec::new();
-    walk(dir, &mut HashSet::new(), &mut files);
+    walk(dir, milk2, &mut HashSet::new(), &mut files);
     files.sort();
     files
         .into_iter()
         .map(|path| {
             let rel = path.strip_prefix(dir).unwrap_or(&path);
             PresetEntry {
-                name: rel.with_extension("").to_string_lossy().into_owned(),
+                name: if is_milk2(&path) {
+                    rel.to_string_lossy().into_owned()
+                } else {
+                    rel.with_extension("").to_string_lossy().into_owned()
+                },
                 path,
             }
         })
@@ -99,14 +105,26 @@ pub fn append_unique(out: &mut Vec<PresetEntry>, found: Vec<PresetEntry>) {
     }
 }
 
+/// Display name of a preset file: its file name without `.milk`; a `.milk2` keeps its extension (the engine takes
+/// it as a hint that the file is a double preset).
 pub fn entry_for_file(path: &Path) -> PresetEntry {
+    let milk2 = is_milk2(path);
     PresetEntry {
-        name: path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string()),
+        name: if milk2 {
+            path.file_name()
+        } else {
+            path.file_stem()
+        }
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string()),
         path: path.to_path_buf(),
     }
+}
+
+fn is_milk2(path: &Path) -> bool {
+    path.extension()
+        .and_then(|x| x.to_str())
+        .is_some_and(|x| x.eq_ignore_ascii_case("milk2"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,7 +368,7 @@ mod tests {
         std::fs::write(d.join("a/x.milk"), b"").unwrap();
         std::os::unix::fs::symlink(&d, d.join("a/loop")).unwrap();
         std::os::unix::fs::symlink(d.join("a"), d.join("alias")).unwrap();
-        let found = scan_dir(&d);
+        let found = scan_dir(&d, false);
         assert_eq!(found.len(), 1, "{found:?}");
         let _ = std::fs::remove_dir_all(d);
     }
@@ -363,7 +381,7 @@ mod tests {
         std::fs::write(d.join("one.milk"), b"").unwrap();
         std::fs::create_dir_all(d.join("sub")).unwrap();
         let mut out = vec![entry_for_file(&d.join("sub/../one.milk"))];
-        let mut found = scan_dir(&d);
+        let mut found = scan_dir(&d, false);
         // 20k extra entries must not make this quadratic.
         for i in 0..20_000 {
             found.push(PresetEntry {
@@ -387,9 +405,32 @@ mod tests {
         std::fs::write(d.join("a/y.MILK"), b"").unwrap();
         std::fs::write(d.join("a/b/z.milk"), b"").unwrap();
         std::fs::write(d.join("a/readme.txt"), b"").unwrap();
-        let e = scan_dir(&d);
+        let e = scan_dir(&d, false);
         let names: Vec<_> = e.iter().map(|e| e.name.replace('\\', "/")).collect();
         assert_eq!(names, vec!["a/b/z", "a/y", "x"]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// `.milk2` double presets are listed only on request (they need `--compat milkdrop3`) and keep their extension in
+    /// the name, so the engine can tell them from plain presets.
+    #[test]
+    fn scan_dir_lists_milk2_on_request() {
+        let d = std::env::temp_dir().join(format!("lactea-presets-m2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("a")).unwrap();
+        std::fs::write(d.join("x.milk"), b"").unwrap();
+        std::fs::write(d.join("a/y.milk2"), b"").unwrap();
+        std::fs::write(d.join("a/z.MILK2"), b"").unwrap();
+        let names = |milk2| -> Vec<String> {
+            scan_dir(&d, milk2)
+                .iter()
+                .map(|e| e.name.replace('\\', "/"))
+                .collect()
+        };
+        assert_eq!(names(false), vec!["x"]);
+        assert_eq!(names(true), vec!["a/y.milk2", "a/z.MILK2", "x"]);
+        assert_eq!(entry_for_file(&d.join("a/y.milk2")).name, "y.milk2");
+        assert_eq!(entry_for_file(&d.join("x.milk")).name, "x");
         let _ = std::fs::remove_dir_all(d);
     }
 }

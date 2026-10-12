@@ -196,3 +196,51 @@ fn bad_preset_exits_2_and_bad_args_exit_nonzero() {
     assert_ne!(code, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `.milk2` path renders under `--compat md3` and is a clear load failure (exit 2) under the default compat.
+#[test]
+fn milk2_needs_md3_compat() {
+    let dir = tmp("milk2");
+    let audio = dir.join("a.wav");
+    wav(&audio);
+    let half =
+        "MILKDROP_PRESET_VERSION=100\nfDecay=0.9\nfGammaAdj=1\nob_size=0.1\nob_a=1\nob_r=1\n";
+    let preset = dir.join("pair.milk2");
+    std::fs::write(
+        &preset,
+        format!(
+            "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\n\
+             blending_pattern=side\nblending_progress=0.50\nblending_direction=1\n\
+             random_1=0.250000\nrandom_2=0.500000\nrandom_3=0.500000\nrandom_4=0.500000\nrandom_5=0.500000\n\n\
+             [PRESET1_BEGIN]\nNAME=a\n{half}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{half}[PRESET2_END]\n"
+        ),
+    )
+    .unwrap();
+    let run_with = |compat: &[&str], out: &str| {
+        let out = dir.join(out);
+        let mut args = vec![
+            "--preset",
+            preset.to_str().unwrap(),
+            "--audio",
+            audio.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--frames",
+            "3",
+            "--size",
+            "64x36",
+        ];
+        args.extend_from_slice(compat);
+        run(&args)
+    };
+    let (code, err) = run_with(&["--compat", "md3"], "md3");
+    if code == 1 && err.contains("no wgpu adapter") {
+        return;
+    }
+    assert_eq!(code, 0, "{err}");
+    assert!(dir.join("md3/final/00002.png").exists());
+    let (code, err) = run_with(&[], "projectm");
+    assert_eq!(code, 2, "{err}");
+    assert!(err.contains("MilkDrop3"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

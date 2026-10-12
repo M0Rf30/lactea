@@ -345,6 +345,7 @@ fn run(args: &Args) -> Result<i32> {
             fps: args.fps,
             preset_duration: 1e9,
             start_clean: args.start_clean != 0,
+            ..Default::default()
         },
     );
     let tex_dir = args.texture_dir.clone().unwrap_or_else(default_texture_dir);

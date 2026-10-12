@@ -536,7 +536,7 @@ pub fn write_milk2(m: &Milk2, created: &str, eol: LineEnding) -> Vec<u8> {
         lf.push(b'\n');
     };
     line(&format!("Created with MILKDROP 3.37 on {created}"));
-    line("www.milkdrop3.com");
+    line("github.com/M0Rf30/lactea");
     line("");
     if m.has_sprite {
         line("sprite=1");
@@ -888,7 +888,7 @@ mod tests {
             None,
         );
         let out = write_milk2(&m, "05/01/2026 at 12:34:56", LineEnding::Lf);
-        let want = "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\nblending_pattern=cercle\nblending_progress=0.45\nblending_direction=-1\nrandom_1=0.579675\nrandom_2=0.335230\nrandom_3=0.944580\nrandom_4=0.292683\nrandom_5=0.528049\n\n[PRESET1_BEGIN]\nNAME=name1\nMILKDROP_PRESET_VERSION=201\n[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=name2\nfDecay=0.5\n[PRESET2_END]\n";
+        let want = "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\ngithub.com/M0Rf30/lactea\n\nblending_pattern=cercle\nblending_progress=0.45\nblending_direction=-1\nrandom_1=0.579675\nrandom_2=0.335230\nrandom_3=0.944580\nrandom_4=0.292683\nrandom_5=0.528049\n\n[PRESET1_BEGIN]\nNAME=name1\nMILKDROP_PRESET_VERSION=201\n[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=name2\nfDecay=0.5\n[PRESET2_END]\n";
         assert_eq!(String::from_utf8(out.clone()).unwrap(), want);
         let crlf_out = write_milk2(&m, "05/01/2026 at 12:34:56", LineEnding::Crlf);
         assert_eq!(crlf_out, crlf(want));

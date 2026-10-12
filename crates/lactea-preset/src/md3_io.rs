@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 /// The comp/warp text MD3 writes in place of a closed shader contains this marker; only then is the
 /// matching `MD31` / `MD32` handle written back.
-const LOCKED_SHADER_MARKER: &str = "This shader";
+const PLACEHOLDER_SHADER_MARKER: &str = "This shader";
 
 fn check_input(bytes: &[u8]) -> Result<(), ParseError> {
     if bytes.is_empty() {
@@ -165,13 +165,13 @@ impl CustomShape {
 }
 
 impl Preset {
-    /// The `MD31` (warp) locked-shader handle from [`Preset::extra`] (first occurrence), whether or not the
+    /// The `MD31` (warp) encrypted-shader handle from [`Preset::extra`] (first occurrence), whether or not the
     /// shader text is a stub.
     pub fn md31_handle(&self) -> Option<u64> {
         self.extra_handle("MD31")
     }
 
-    /// The `MD32` (comp) locked-shader handle, see [`Preset::md31_handle`].
+    /// The `MD32` (comp) encrypted-shader handle, see [`Preset::md31_handle`].
     pub fn md32_handle(&self) -> Option<u64> {
         self.extra_handle("MD32")
     }
@@ -185,9 +185,9 @@ impl Preset {
 }
 
 impl Preset {
-    /// The `MD31` / `MD32` handle for `key` when the matching shader text is a locked-shader stub.
-    fn locked_handle(&self, key: &str, shader: Option<&String>) -> Option<u64> {
-        if !shader?.contains(LOCKED_SHADER_MARKER) {
+    /// The `MD31` / `MD32` handle for `key` when the matching shader text is a encrypted-shader stub.
+    fn encrypted_handle(&self, key: &str, shader: Option<&String>) -> Option<u64> {
+        if !shader?.contains(PLACEHOLDER_SHADER_MARKER) {
             return None;
         }
         self.extra_handle(key)
@@ -199,7 +199,7 @@ impl Preset {
     /// only for ps >= 2 and always backticked.
     ///
     /// Lines in order: `MD31=` / `MD32=` (only when the preset carries that handle in
-    /// [`Preset::extra`] and the shader text is a locked-shader stub), the version lines (when
+    /// [`Preset::extra`] and the shader text is a encrypted-shader stub), the version lines (when
     /// [`Preset::max_ps_version`] > 0: `MILKDROP_PRESET_VERSION=300` if the preset has a [`Preset::sprite`]
     /// else `201`, then `PSVERSION*`), `[preset00]`, the base values, waves, shapes, code blocks and the sprite
     /// block (blank line, `[SPRITE1_BEGIN]` .. `[SPRITE1_END]`, `%.6f` scalars).
@@ -209,10 +209,10 @@ impl Preset {
     /// for a lossless library round trip.
     pub fn to_milk_md3(&self) -> String {
         let mut out = String::new();
-        if let Some(h) = self.locked_handle("MD31", self.warp_shader.as_ref()) {
+        if let Some(h) = self.encrypted_handle("MD31", self.warp_shader.as_ref()) {
             let _ = writeln!(out, "MD31={h}");
         }
-        if let Some(h) = self.locked_handle("MD32", self.comp_shader.as_ref()) {
+        if let Some(h) = self.encrypted_handle("MD32", self.comp_shader.as_ref()) {
             let _ = writeln!(out, "MD32={h}");
         }
         let max = self.max_ps_version();

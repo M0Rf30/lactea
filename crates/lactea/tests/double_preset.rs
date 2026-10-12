@@ -43,7 +43,7 @@ fn green() -> String {
 /// A hand-made `.milk2` (LF endings, the saver's layout).
 fn milk2(p1: &str, p2: &str, header: &str) -> String {
     format!(
-        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\n{header}\n[PRESET1_BEGIN]\nNAME=first.milk\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=second\n{p2}[PRESET2_END]\n"
+        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.example.org\n\n{header}\n[PRESET1_BEGIN]\nNAME=first.milk\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=second\n{p2}[PRESET2_END]\n"
     )
 }
 

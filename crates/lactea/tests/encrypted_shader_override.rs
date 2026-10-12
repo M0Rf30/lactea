@@ -7,8 +7,8 @@ const W: u32 = 64;
 const H: u32 = 48;
 const HANDLE: u64 = 0x1234_5678_9abc_def0;
 
-/// A locked preset: `MD31` header, a stub warp shader painting solid red.
-fn locked_preset() -> String {
+/// A preset with encrypted shaders: `MD31` header, a stub warp shader painting solid red.
+fn encrypted_preset() -> String {
     format!(
         "MD31={HANDLE}\nMILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=5\nPSVERSION_COMP=0\n[preset00]\n\
          fDecay=1\nfWaveAlpha=0\nfGammaAdj=1\n\
@@ -73,7 +73,7 @@ fn render_centre(
 }
 
 #[test]
-fn override_replaces_locked_stub() {
+fn override_replaces_encrypted_stub() {
     let instance = wgpu::Instance::default();
     let Ok(adapter) =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
@@ -114,7 +114,7 @@ fn override_replaces_locked_stub() {
         view_formats: &[],
     });
     let view = target.create_view(&Default::default());
-    let text = locked_preset();
+    let text = encrypted_preset();
 
     engine
         .load_preset(text.as_bytes(), "locked", Transition::Cut)

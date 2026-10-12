@@ -64,7 +64,7 @@ pub enum Compat {
     ProjectM,
     /// MilkDrop 2's behaviour (Direct3D 9 semantics).
     MilkDrop2,
-    /// MilkDrop 3 (3.37) behaviour: MilkDrop 2 / BeatDrop rules plus the MilkDrop 3 deltas. MD3 is closed source;
+    /// MilkDrop 3 (3.37) behaviour: MilkDrop 2 / BeatDrop rules plus the MilkDrop 3 deltas. MD3's source is unpublished;
     /// its behaviour is implemented from clean-room specs, see `docs/md3.md`.
     MilkDrop3,
 }

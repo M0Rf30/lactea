@@ -153,8 +153,8 @@ only static scenes compare pixel for pixel):
 * `lara - Flexi Romanesco Uncompressed [MOUSE].milk` (PSVERSION 4/3, `mouse.x/.y/.z`, `get_fft` in the composite): the same
   faceted fractal with the same cyan-to-deep-blue palette and framing, morphing differently with time (and `mouse`, which is
   `(-1, -1, 0, 0)` in `fdrender`, an unknown real cursor in the oracle); the exact shape was not compared.
-* A locked preset (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
-  runs) while MD3 draws its licensed laser scene: expected, see `md3.md`.
+* A preset with encrypted shaders (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
+  runs) while MD3 draws its laser scene: expected, see `md3.md`.
 
 ## Verification
 

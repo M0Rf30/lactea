@@ -47,7 +47,7 @@ fn sprite(r: f32, g: f32, b: f32) -> String {
 /// A hand-made `.milk2`: PRESET1 left, PRESET2 right.
 fn milk2(p1: &str, p2: &str) -> String {
     format!(
-        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\n\
+        "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.example.org\n\n\
          blending_pattern=side\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.000000\n\
          random_2=0.500000\nrandom_3=0.5\nrandom_4=0.5\nrandom_5=0.5\n\
          \n[PRESET1_BEGIN]\nNAME=first.milk\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=second\n{p2}[PRESET2_END]\n"

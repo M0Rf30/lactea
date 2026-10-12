@@ -42,6 +42,35 @@ OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 chroma resampling, YCbCr conversion) so that textures decode byte for byte as in projectM. stb_image
 is dual-licensed public domain / MIT (Sean Barrett); no stb source is shipped.
 
+## ns-eel2 (Cockos / Nullsoft) — zlib-style licence
+
+`crates/lactea-eel/src/ns_pre.rs` is a Rust port of `preprocessCode` from `nseel-compiler.c`, and the
+`Dialect::NsEel2` paths of `crates/lactea-eel/src/lexer.rs` and `parser.rs` reproduce the behaviour of
+`nseel-lextab.c` (scanner) and `nseel-caltab.c` (grammar). These are altered versions, not the original
+source; no ns-eel2 source is shipped. Original notice (identical in the ns-eel2 sources):
+
+```
+Expression Evaluator Library (NS-EEL) v2
+Copyright (C) 2004-2008 Cockos Incorporated
+Copyright (C) 1999-2003 Nullsoft, Inc.
+
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
 ## projectM and projectm-eval — external test oracles only
 
 projectM (LGPL-2.1) and projectm-eval (MIT) are built locally by the maintainers' test tooling

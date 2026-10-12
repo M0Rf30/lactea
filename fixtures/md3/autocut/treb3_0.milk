@@ -1,0 +1,13 @@
+MILKDROP_PRESET_VERSION=201
+PSVERSION=2
+PSVERSION_WARP=0
+PSVERSION_COMP=0
+[preset00]
+fDecay=0.000000
+fGammaAdj=1.000000
+fWaveAlpha=0.000000
+wave_a=0
+ob_size=0.000000
+ib_size=0.000000
+per_frame_1=decay=0;zoom=1;rot=0;warp=0;wave_a=0;ib_a=0;ob_size=0.5;ob_r=0.25;ob_g=0;ob_b=0;ob_a=1;
+per_frame_2=treb=3.0;

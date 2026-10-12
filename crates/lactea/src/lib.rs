@@ -64,6 +64,17 @@ pub use playlist::{
 pub use teacher::ForcedFrame;
 pub use textures::{Image, TextureProvider};
 
+use std::collections::HashMap;
+
+/// User-supplied HLSL for a locked MilkDrop 3 preset (see [`EngineConfig::shader_overrides`]).
+#[derive(Clone, Debug, Default)]
+pub struct ShaderOverride {
+    /// Replacement for the warp shader of the preset whose `MD31` handle matches.
+    pub warp: Option<String>,
+    /// Replacement for the composite shader of the preset whose `MD32` handle matches.
+    pub comp: Option<String>,
+}
+
 /// Engine construction parameters.
 #[derive(Clone, Debug)]
 pub struct EngineConfig {
@@ -114,6 +125,10 @@ pub struct EngineConfig {
     /// The patterns random soft cuts of [`Compat::MilkDrop3`] may pick (MD3's `[transitions]` settings; empty = only
     /// `zoom`). Default: the 13 patterns MD3 enables without a settings file.
     pub md3_transition_patterns: Vec<Md3Pattern>,
+    /// Locked-shader overrides keyed by the preset's `MD31` / `MD32` handle (`docs/md3.md`, "Locked shaders").
+    /// A matching entry replaces the preset's shader text (the locked stub). Override text is plain
+    /// `\n`-separated HLSL, not the `\x01` form of preset text. Default: empty.
+    pub shader_overrides: HashMap<u64, ShaderOverride>,
 }
 
 impl Default for EngineConfig {
@@ -135,6 +150,7 @@ impl Default for EngineConfig {
             volume_sensitivity: 1.0,
             blend_milk2: true,
             blend_time_user: 1.7,
+            shader_overrides: HashMap::new(),
             md3_transition_patterns: engine::default_enabled_patterns(),
         }
     }

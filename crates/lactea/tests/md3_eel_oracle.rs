@@ -73,11 +73,13 @@ fn read_back(
 }
 
 /// (fixture, outer band RGB, inner band RGB) as shot by MD3 3.37.
-const MD3_SHOTS: [(&str, [u8; 3], [u8; 3]); 13] = [
+const MD3_SHOTS: [(&str, [u8; 3], [u8; 3]); 14] = [
     // constants 0.2 / 0.4 / 0.6 (x2 by gamma, clamped) and the colour of `0.5 + 0.1 * v`
     ("colors", [102, 204, 255], [204, 255, 254]),
     // round-to-nearest-even: `3.7|0`, `10%3.5`, `loop(3.5)`, `megabuf(1.6)`, `megabuf(-1)`, `gmegabuf(-1)`
     ("rounding", [255, 255, 255], [255, 255, 255]),
+    // ties go to even: `2.5|0 = 2`, `3.5|0 = 4`, `loop(2.5)` runs 2 times, `0.5|0 = 0`, `10%2.5 = 0`, `loop(0.5)` runs 0 times
+    ("rounding_ties", [255, 255, 255], [255, 255, 255]),
     // `-7%3` is -1 (sign after `%`), `a%3` of a negative a is +1, `-2^2`, `2*3^2`, `2^3^2`
     ("mod_pow_sign", [122, 132, 132], [106, 218, 158]),
     ("prec_mod_pow", [146, 158, 158], [188, 192, 152]),

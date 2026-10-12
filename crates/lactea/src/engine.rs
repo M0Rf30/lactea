@@ -10,7 +10,7 @@ use crate::sprites::{SpriteInputs, SpriteRt};
 use crate::textures::{TextureProvider, pick_random, rand_slot};
 use crate::{
     EngineConfig, EngineError, ForcedFrame, FrameClock, PresetReport, ShaderFallback,
-    ShaderOutcome, Transition, TransitionInfo,
+    ShaderOutcome, ShaderOverride, Transition, TransitionInfo,
 };
 use lactea_abi::{PassKind, ShaderInterface, TexSource};
 use lactea_audio::{Analyzer, AudioFrame};
@@ -476,6 +476,12 @@ impl Engine {
     // preset loading
     // -----------------------------------------------------------------------------------------
 
+    /// Register user HLSL for the locked preset(s) carrying `handle` as `MD31` / `MD32`
+    /// ([`EngineConfig::shader_overrides`]). Takes effect on the next load.
+    pub fn set_shader_override(&mut self, handle: u64, shader: ShaderOverride) {
+        self.cfg.shader_overrides.insert(handle, shader);
+    }
+
     /// Load a preset. `transition` says how it replaces the current one: [`Transition::Cut`]
     /// immediately, [`Transition::Soft`] by blending the two presets (both keep running) over
     /// the given number of seconds, like projectM's smooth preset change. With nothing loaded
@@ -896,7 +902,13 @@ impl Engine {
         // ---- warp ---------------------------------------------------------------------
         let mut warp = None;
         if p.warp_ps_version > 0 {
-            let text = p.warp_shader.as_deref().map(code_to_source);
+            let text = match p
+                .md31_handle()
+                .and_then(|h| self.cfg.shader_overrides.get(&h))
+            {
+                Some(ShaderOverride { warp: Some(w), .. }) => Some(w.clone()),
+                _ => p.warp_shader.as_deref().map(code_to_source),
+            };
             match text.filter(|t| !t.trim().is_empty()) {
                 Some(src) => match translate(PassKind::Warp, &src, &opts) {
                     Ok(t) => {
@@ -929,7 +941,13 @@ impl Engine {
         // ---- composite ----------------------------------------------------------------
         let mut comp = None;
         if p.comp_ps_version > 0 {
-            let text = p.comp_shader.as_deref().map(code_to_source);
+            let text = match p
+                .md32_handle()
+                .and_then(|h| self.cfg.shader_overrides.get(&h))
+            {
+                Some(ShaderOverride { comp: Some(c), .. }) => Some(c.clone()),
+                _ => p.comp_shader.as_deref().map(code_to_source),
+            };
             let default_src = if md2 {
                 default_comp_shader(
                     p.base.gamma_adj,

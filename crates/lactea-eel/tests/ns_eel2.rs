@@ -299,13 +299,15 @@ fn rand_stream() {
             "{src}"
         );
     }
-    // raw outputs: 978073627, 1463485156, 3838205119, 4078471044
+    // raw outputs: 978073627, 1463485156, 3838205119, 4078471044.  A literal above 2147483647 is
+    // clamped (`atoi`), so the generator word is scaled by the clamped limit.
     let mut c = ctx();
-    let p = c.compile("a=rand(4294967295);").unwrap();
+    let p = c.compile("a=rand(2147483647);").unwrap();
     let a = c.var("a");
     for raw in [978073627u32, 1463485156, 3838205119, 4078471044] {
         c.run(&p);
-        assert!((c.get(a) - f64::from(raw)).abs() < 1e-3);
+        let want = f64::from(raw) * (1.0 / 4294967295.0) * 2147483647.0;
+        assert!((c.get(a) - want).abs() < 1e-6, "{} vs {want}", c.get(a));
     }
     // the run seed re-seeds the stream, reproducibly
     let mut c = ctx();
@@ -335,7 +337,13 @@ fn preprocessor_and_names() {
         ("a=$PHI;", 1.61803399),
         ("a=$X10;", 16.0),
         ("a=$xff;", 255.0),
-        ("a=$XFFFFFFFFFF;", 4294967295.0),
+        // `$X` prints the (32-bit saturated) value as decimal text, which the scanner then reads
+        // with `atoi`: above 2147483647 it clamps (measured: `$XFFFFFFFF / 1e9` is 2.147)
+        ("a=$XFFFFFFFFFF;", 2147483647.0),
+        ("a=$X7FFFFFFF;", 2147483647.0),
+        ("a=$X80000000;", 2147483647.0),
+        ("a=4294967295;", 2147483647.0),
+        ("a=2147483647+1;", 2147483648.0),
         ("a=$'A';", 65.0),
         ("a=pi;", 0.0),
         ("a=e;", 0.0),
@@ -372,10 +380,12 @@ fn dots_are_not_identifier_characters() {
     check(&[("a=1.5+.5;", 2.0), ("a=5.+1;", 6.0)]);
 }
 
-/// Measured on MD3 3.37 (Wine): ns-eel2 numbers have no exponent notation.
+/// Measured on MD3 3.37 (Wine): the scanner has no exponent notation for integers (`1e3` is `1`
+/// and the name `e3`), but a decimal literal accepts `[eE][0-9]*` after its point and no sign:
+/// `1.5e1` is 15 and `1.0e-5` is `1.0e` minus 5 = -4 (`nseel-lextab.c` DFA, reproduced exactly).
 #[test]
-fn exponent_literals_do_not_compile() {
-    for src in ["a=1e3;", "a=1e-5;", "a=2.5e10;"] {
+fn exponent_literals_follow_the_scanner_dfa() {
+    for src in ["a=1e3;", "a=1e-5;", "a=1E5;"] {
         assert!(ctx().compile(src).is_err(), "{src}");
         assert!(
             Context::new(Arc::new(GlobalMemory::new()))
@@ -384,6 +394,19 @@ fn exponent_literals_do_not_compile() {
             "{src} compiles under projectm-eval"
         );
     }
+    check(&[
+        ("a=1.5e1;", 15.0),  // measured
+        ("a=1.0e-5;", -4.0), // measured: `1.0e` then `-5`
+        ("a=3+.;", 3.0),     // measured: a lone `.` is the number 0
+        ("a=2.5e3;", 2500.0),
+        ("a=5.e2;", 500.0),
+        ("a=.5E1;", 5.0),
+        ("a=1.5e;", 1.5),   // a dangling `e` is part of the literal
+        ("a=1.5e+2;", 3.5), // the sign is not part of the exponent
+        ("a=.;", 0.0),
+    ]);
+    // an exponent is only recognised after the decimal point: `1e3` is `1` then the name `e3`
+    assert!(ctx().compile("a=1 e3;").is_err());
 }
 
 /// Operator levels measured on MD3 3.37 (Wine): `%` and `^` are one left-associative level above
@@ -419,6 +442,75 @@ fn operator_precedence() {
     c.run(&p);
     let a = c.var("a");
     assert_eq!(c.get(a), 4.0);
+}
+
+/// The operators ns-eel2 rewrites in its source pass (`ns_pre`): every comparison, `&&` and `||`
+/// takes whole operand texts (the arithmetic and bitwise operators bind inside them), and `&&` / `||`
+/// share one left-associative level.  Rows marked "measured" are border pixels of MD3 3.37.
+#[test]
+fn rewriter_operator_levels() {
+    check(&[
+        ("a=2==3|1;", 0.0),   // measured: `2==(3|1)`
+        ("a=1||0&&0;", 0.0),  // measured: `(1||0)&&0`
+        ("a=2&1==0;", 1.0),   // measured: `(2&1)==0`
+        ("a=(5; -6);", -1.0), // measured: `;` before a sign is a blank, so `5 -6`
+        ("a=0||1&&0;", 0.0),
+        ("a=0&&1||1;", 1.0),
+        ("a=1+1==2;", 1.0),
+        ("a=3>2==1;", 1.0),
+        ("a=2==2>1;", 0.0), // `2==(2>1)`: a comparison takes everything up to `&&` / `||` / `?`
+        ("a=3<2<1;", 0.0),  // `3<(2<1)`
+        ("a=2==2==1;", 0.0), // `2==(2==1)`, not `(2==2)==1`
+        ("a=1<2&&3>2;", 1.0),
+        ("a=2^-1;", 0.5),
+        ("a=4%3%2;", 1.0),
+        ("a=(b=3)+1;", 4.0),
+        ("a=(1; 2; 3);", 3.0),
+        ("a=(1;2);", 2.0),
+        ("a=5; b=a>3 ? 10 : 20; a=b;", 10.0),
+        ("a=1?2:0?3:4;", 2.0),
+        ("a=0?2:0?3:4;", 4.0),
+        ("a=0?2:1?3:4;", 3.0),
+        ("a=1; a+=1?2:3;", 3.0),
+        ("a=0; 1 ? a=1 : a=2;", 1.0), // measured: compiles, assigns in the branch
+        ("a=0; 0 ? a=1 : a=2;", 2.0),
+        ("x=1; x[2]=7; a=megabuf(3);", 7.0), // `x[i]` is `megabuf(x+i)`
+        ("gmem[5]=9; a=gmegabuf(5);", 9.0),
+        ("a=gmem; gmem=4; a=gmem+a;", 4.0), // a bare `gmem` is an ordinary variable
+        ("a=loop(3, b=b+1; b);", 3.0),
+        ("a=if(1, 4; 5, 6);", 5.0),
+    ]);
+    // a statement the grammar rejects drops the whole text
+    for src in [
+        "a=1 2;", "a=(;", "a=]1;", "a=:1;", "a=?1;", "a=$Q;", "a=;;;)",
+    ] {
+        assert!(ctx().compile(src).is_err(), "{src}");
+    }
+}
+
+/// Adversarial nesting is an error (rewriter recursion / tree depth), never a stack overflow.  The
+/// compiler recurses up to its depth limit (1000); an unoptimised build needs more than the 2 MiB
+/// of a default test thread for that, so this runs on a 32 MiB one.
+#[test]
+fn deep_nesting_is_rejected_not_overflowed() {
+    std::thread::Builder::new()
+        .stack_size(32 << 20)
+        .spawn(|| {
+            let n = 5_000;
+            for src in [
+                format!("a={}1;", "-".repeat(n)),
+                format!("a={}1;", "!".repeat(n)),
+                format!("{}1;", "a=".repeat(n)),
+                format!("a={}1{};", "sin(".repeat(n), ")".repeat(n)),
+                format!("a=b{};", "+b".repeat(n)),
+                format!("a={}1{};", "(".repeat(n), ")".repeat(n)),
+            ] {
+                assert!(ctx().compile(&src).is_err(), "{}", &src[..20]);
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -596,4 +688,147 @@ fn default_dialect_is_unchanged() {
     let (a, b) = (c.var("a"), c.var("b"));
     assert_eq!(c.get(a), 0.0);
     assert_eq!(c.get(b), f64::from(std::f32::consts::E));
+}
+
+/// Text substitution of the `$` constants (`ns_pre`): `$E5` is the digits `2.718281835`.
+#[test]
+fn dollar_constants_are_text_substitutions() {
+    check(&[
+        ("a=$E5;", 2.718281835),
+        ("a=$PI2;", 3.141592653589793_2),
+        ("a=$PHI0;", 1.618033990),
+        ("a=$X1F+$'a';", 31.0 + 97.0),
+        ("a=$X 10;", 16.0),  // `strtoul` skips blanks
+        ("a=$X0x10;", 16.0), // and accepts a `0x` prefix
+        ("a=$X;", 0.0),      // no digits: the text `0`
+    ]);
+}
+
+/// Every probe preset under `fixtures/md3/eel/` was run on the real MD3 3.37 (Wine, `md3shot.sh`,
+/// 800x600, outer band at x = 20, inner band at x = 60): the bytes below are what it drew.  The
+/// per-frame code is evaluated here without the renderer: a border channel is
+/// `min(255, 255 * 2 * value)` (gamma 2), which MD3 draws within 2 of that (it is 126 for the
+/// 0.25 of `t = 0`, not 127.5).  A channel that is `None` is not set by the probe.
+#[test]
+fn probe_fixtures_match_the_md3_screenshots() {
+    const OB_IB: [&str; 6] = ["ob_r", "ob_g", "ob_b", "ib_r", "ib_g", "ib_b"];
+    // (fixture, outer RGB, inner RGB); `None` = no per-frame code sets it
+    type Shot = (&'static str, [Option<u8>; 3], [Option<u8>; 3]);
+    let shots: [Shot; 18] = [
+        (
+            "colors",
+            [Some(102), Some(204), Some(255)],
+            [Some(204), Some(255), Some(254)],
+        ),
+        ("rounding", [Some(255); 3], [Some(255); 3]),
+        (
+            "mod_pow_sign",
+            [Some(122), Some(132), Some(132)],
+            [Some(106), Some(218), Some(158)],
+        ),
+        (
+            "prec_mod_pow",
+            [Some(146), Some(158), Some(158)],
+            [Some(188), Some(192), Some(152)],
+        ),
+        (
+            "prec_bitwise",
+            [Some(172), Some(126), Some(158)],
+            [Some(142), Some(126), Some(132)],
+        ),
+        (
+            "literals",
+            [Some(152), Some(142), Some(140)],
+            [Some(122), Some(142), Some(160)],
+        ),
+        (
+            "ternary_funcs",
+            [Some(158), Some(162), Some(126)],
+            [Some(126), Some(162), Some(192)],
+        ),
+        (
+            "mod_zero_loops",
+            [Some(152), Some(132), Some(136)],
+            [Some(180), Some(180), Some(136)],
+        ),
+        (
+            "truthiness",
+            [Some(228), Some(152), Some(132)],
+            [Some(132), Some(132), Some(126)],
+        ),
+        (
+            "prec_unary",
+            [Some(132), Some(126), Some(152)],
+            [Some(106), Some(122), Some(44)],
+        ),
+        (
+            "underscore_name",
+            [Some(142), Some(132), Some(136)],
+            [Some(142), Some(146), Some(152)],
+        ),
+        (
+            "mod_negative",
+            [Some(204), Some(255), Some(254)],
+            [Some(255), Some(254), Some(255)],
+        ),
+        // `(5; -6)` is `5 -6`; `||` / `&&` share a level; a comparison takes `3|1` / `1` whole
+        (
+            "ns_logic",
+            [Some(126), Some(126), Some(132)],
+            [Some(122), None, None],
+        ),
+        // `1 ? t=4 : t=5` compiles and assigns in the branch
+        ("ns_branch", [Some(146), None, None], [None, None, None]),
+        // `1.5e1` is 15 (an exponent after the decimal point)
+        ("ns_lit_exp", [Some(204), None, None], [None, None, None]),
+        // `1.0e-5` is `1.0e` minus 5
+        ("ns_lit_expneg", [Some(106), None, None], [None, None, None]),
+        // a lone `.` is the number 0
+        ("ns_lit_dot", [Some(142), None, None], [None, None, None]),
+        // an integer literal and `$X..` are clamped to 2147483647 by `atoi`: 2.147 * 5.1 + 126
+        (
+            "ns_lit_big",
+            [Some(138), Some(138), Some(138)],
+            [None, None, None],
+        ),
+    ];
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/md3/eel");
+    for (name, ob, ib) in shots {
+        let text = std::fs::read_to_string(dir.join(format!("{name}.milk"))).unwrap();
+        let mut lines: Vec<(u32, &str)> = text
+            .lines()
+            .filter_map(|l| {
+                let rest = l.trim_end().strip_prefix("per_frame_")?;
+                let (n, code) = rest.split_once('=')?;
+                Some((n.parse().ok()?, code))
+            })
+            .collect();
+        lines.sort_by_key(|l| l.0);
+        let code: String = lines.iter().map(|l| l.1).collect();
+        let mut c = ctx();
+        let p = c.compile(&code).unwrap_or_else(|e| panic!("{name}: {e}"));
+        c.run(&p);
+        for (i, want) in ob.iter().chain(ib.iter()).enumerate() {
+            let Some(want) = want else { continue };
+            let v = c.var(OB_IB[i]);
+            let got = (255.0 * 2.0 * c.get(v)).clamp(0.0, 255.0);
+            assert!(
+                (got - f64::from(*want)).abs() <= 3.0,
+                "{name}: {} is {got:.1}, MD3 drew {want}",
+                OB_IB[i]
+            );
+        }
+    }
+    // `mouse.x` does not compile: MD3 draws no border at all
+    let text = std::fs::read_to_string(dir.join("mouse_dot_x.milk")).unwrap();
+    let code: String = text
+        .lines()
+        .filter_map(|l| {
+            l.trim_end()
+                .strip_prefix("per_frame_")?
+                .split_once('=')
+                .map(|p| p.1)
+        })
+        .collect();
+    assert!(ctx().compile(&code).is_err());
 }

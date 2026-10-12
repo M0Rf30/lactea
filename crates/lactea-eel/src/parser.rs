@@ -5,7 +5,10 @@
 use crate::context::{CompileError, Context, Program};
 use crate::lexer::{Tok, Token, lex};
 use crate::ns::Dialect;
-use crate::tree::{BITAND_DEF, BITOR_DEF, FuncDef, FuncKind, Loc, Node, lookup_func, to_ns};
+use crate::ns_pre;
+use crate::tree::{
+    BITAND_DEF, BITOR_DEF, FuncDef, FuncKind, Loc, Node, lookup_func, lookup_func_ns, to_ns,
+};
 
 /// Default maximum tree depth accepted (the interpreter is recursive).
 pub(crate) const DEFAULT_MAX_DEPTH: u32 = 1000;
@@ -66,7 +69,7 @@ fn tok_desc(t: &Tok) -> String {
 
 /// (precedence, right-assoc, function name) of an infix token.  Levels follow the `%left` /
 /// `%right` declaration order in Compiler.y, lowest first.
-fn infix(t: &Tok, ns: bool) -> Option<(u8, bool, &'static str)> {
+fn infix(t: &Tok) -> Option<(u8, bool, &'static str)> {
     Some(match t {
         Tok::Ch(b'=') => (2, true, "_set"),
         Tok::AddOp => (3, true, "_addop"),
@@ -92,9 +95,8 @@ fn infix(t: &Tok, ns: bool) -> Option<(u8, bool, &'static str)> {
         Tok::Ch(b'-') => (14, false, "_sub"),
         Tok::Ch(b'*') => (15, false, "_mul"),
         Tok::Ch(b'/') => (15, false, "_div"),
-        // ns-eel2 (measured on MD3 3.37): `%` and `^` share one left-associative level above `*`.
         Tok::Ch(b'%') => (16, false, "_mod"),
-        Tok::Ch(b'^') => (if ns { 16 } else { 18 }, false, "pow"),
+        Tok::Ch(b'^') => (18, false, "pow"),
         _ => return None,
     })
 }
@@ -140,11 +142,10 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Minimum binding level of a unary `-` / `+` operand.  projectm-eval binds the sign tighter
-    /// than everything (`-2^2` is `(-2)^2`); in ns-eel2 it applies to a whole `%` / `^` chain
-    /// (`-2^2` is -4, `-7%3` is -1; measured on MD3 3.37).
+    /// Minimum binding level of a unary `-` / `+` operand: projectm-eval binds the sign tighter
+    /// than everything (`-2^2` is `(-2)^2`).
     fn unary_level(&self) -> u8 {
-        if self.ns { 16 } else { 20 }
+        20
     }
 
     fn expect(&mut self, c: u8) -> PResult<()> {
@@ -446,7 +447,7 @@ impl<'a> Parser<'a> {
                 lhs = self.named("_mem", vec![idx], at)?;
                 continue;
             }
-            let Some((prec, right, name)) = infix(&t, self.ns) else {
+            let Some((prec, right, name)) = infix(&t) else {
                 break;
             };
             if prec < min {
@@ -455,13 +456,8 @@ impl<'a> Parser<'a> {
             self.pos += 1;
             if name == "?" {
                 let tv = self.parse_expr(0)?;
-                // ns-eel2 lets the false branch default to 0: `c ? x` is `c ? x : 0`.
-                let fv = if self.ns && *self.peek() != Tok::Ch(b':') {
-                    self.constant(0.0)
-                } else {
-                    self.expect(b':')?;
-                    self.parse_expr(6)?
-                };
+                self.expect(b':')?;
+                let fv = self.parse_expr(6)?;
                 lhs = self.named("_if", vec![lhs, tv, fv], at)?;
             } else {
                 let rhs = self.parse_expr(if right { prec } else { prec + 1 })?;
@@ -493,7 +489,6 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(b')')?;
                 let def = lookup_func(&name).expect("lexer only emits Tok::Func for known names");
-                let def = if self.ns { to_ns(def) } else { def };
                 self.func(def, &name, args, at)
             }
             Tok::Gmem => {
@@ -532,9 +527,142 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// ns-eel2: the source rewriter (`ns_pre`) has already turned every `= ?: && || ==... % ^ [ ] !`
+/// into a call, so what is left is the grammar of `nseel-caltab.c`: `| & + - * / %` over unary
+/// minus, calls and parentheses, one expression per `;`-separated segment.
+impl<'a> Parser<'a> {
+    /// Binding level of the infix tokens left after the rewrite.  `%` is the sequencing operator
+    /// (the compiler's `FN_MODULO` entry is `exec2`; the real modulo is the rewritten `_mod`).
+    fn ns_infix(t: &Tok) -> Option<(u8, &'static str)> {
+        Some(match t {
+            Tok::Ch(b'|') => (1, "/*or*/"),
+            Tok::Ch(b'&') => (2, "/*and*/"),
+            Tok::Ch(b'+') => (3, "_add"),
+            Tok::Ch(b'-') => (3, "_sub"),
+            Tok::Ch(b'*') => (4, "_mul"),
+            Tok::Ch(b'/') => (4, "_div"),
+            Tok::Ch(b'%') => (4, "exec2"),
+            _ => return None,
+        })
+    }
+
+    fn ns_expr(&mut self, min: u8) -> PResult<CNode> {
+        self.rdepth += 1;
+        if self.rdepth > self.ctx.max_depth {
+            return Err(self.err_at(self.pos, "expression nested too deeply".into()));
+        }
+        let r = self.ns_expr_inner(min);
+        self.rdepth -= 1;
+        r
+    }
+
+    fn ns_expr_inner(&mut self, min: u8) -> PResult<CNode> {
+        let mut lhs = self.ns_prefix()?;
+        while let Some((prec, name)) = Self::ns_infix(self.peek()) {
+            if prec < min {
+                break;
+            }
+            let at = self.pos;
+            self.pos += 1;
+            let rhs = self.ns_expr(prec + 1)?;
+            lhs = self.named(name, vec![lhs, rhs], at)?;
+        }
+        Ok(lhs)
+    }
+
+    fn ns_prefix(&mut self) -> PResult<CNode> {
+        let at = self.pos;
+        match self.peek().clone() {
+            Tok::Num(v) => {
+                self.pos += 1;
+                Ok(self.constant(v))
+            }
+            Tok::Var(name) => {
+                self.pos += 1;
+                Ok(self.variable(&name))
+            }
+            Tok::Func(name) => {
+                self.pos += 1;
+                self.expect(b'(')?;
+                let mut args = vec![self.ns_expr(0)?];
+                while *self.peek() == Tok::Ch(b',') {
+                    self.pos += 1;
+                    args.push(self.ns_expr(0)?);
+                }
+                self.expect(b')')?;
+                let def =
+                    lookup_func_ns(&name).expect("lexer only emits Tok::Func for known names");
+                self.func(def, &name, args, at)
+            }
+            Tok::Ch(b'(') => {
+                self.pos += 1;
+                let n = self.ns_expr(0)?;
+                self.expect(b')')?;
+                Ok(n)
+            }
+            // `UMINUS` / `UPLUS` bind tighter than every infix operator.
+            Tok::Ch(b'-') => {
+                self.pos += 1;
+                self.rdepth += 1;
+                if self.rdepth > self.ctx.max_depth {
+                    return Err(self.err_at(self.pos, "expression nested too deeply".into()));
+                }
+                let v = self.ns_prefix();
+                self.rdepth -= 1;
+                self.named("_neg", vec![v?], at)
+            }
+            Tok::Ch(b'+') => {
+                self.pos += 1;
+                self.rdepth += 1;
+                if self.rdepth > self.ctx.max_depth {
+                    return Err(self.err_at(self.pos, "expression nested too deeply".into()));
+                }
+                let v = self.ns_prefix();
+                self.rdepth -= 1;
+                v
+            }
+            _ => Err(self.unexpected()),
+        }
+    }
+
+    /// `NSEEL_code_compile`: each `;`-separated segment is parsed on its own and the first one
+    /// that fails rejects the whole text.
+    fn ns_program(&mut self) -> PResult<Option<CNode>> {
+        let mut list: Option<CNode> = None;
+        loop {
+            while *self.peek() == Tok::Ch(b';') {
+                self.pos += 1;
+            }
+            if *self.peek() == Tok::Eof {
+                return Ok(list);
+            }
+            let e = self.ns_expr(0)?;
+            if !matches!(self.peek(), Tok::Ch(b';') | Tok::Eof) {
+                return Err(self.unexpected());
+            }
+            list = Some(match list {
+                None => e,
+                Some(l) => self.add_instruction(l, e),
+            });
+        }
+    }
+}
+
 pub(crate) fn compile(ctx: &mut Context, src: &str) -> Result<Program, CompileError> {
     let ns = ctx.dialect() == Dialect::NsEel2;
-    let toks = lex(src, ns);
+    let rewritten;
+    let src = if ns {
+        rewritten = ns_pre::preprocess(src.as_bytes()).map_err(|()| CompileError {
+            message: "expression nested too deeply".into(),
+            line: 1,
+            column: 0,
+            column_end: 0,
+        })?;
+        String::from_utf8_lossy(&rewritten)
+    } else {
+        std::borrow::Cow::Borrowed(src)
+    };
+    let toks = lex(&src, ns);
     // Undefined characters are scanner errors regardless of where the parser stands.
     let mut p = Parser {
         ctx,
@@ -544,13 +672,21 @@ pub(crate) fn compile(ctx: &mut Context, src: &str) -> Result<Program, CompileEr
         rdepth: 0,
         ns,
     };
-    if *p.peek() == Tok::Eof {
-        return Ok(Program::new(None, 4, p.ctx.id()));
-    }
-    let root = p.parse_instr_list()?;
-    if *p.peek() != Tok::Eof {
-        return Err(p.unexpected());
-    }
+    let root = if ns {
+        match p.ns_program()? {
+            Some(r) => r,
+            None => return Ok(Program::new(None, 4, p.ctx.id())),
+        }
+    } else {
+        if *p.peek() == Tok::Eof {
+            return Ok(Program::new(None, 4, p.ctx.id()));
+        }
+        let root = p.parse_instr_list()?;
+        if *p.peek() != Tok::Eof {
+            return Err(p.unexpected());
+        }
+        root
+    };
     let n = p.next_slot;
     let id = p.ctx.id();
     Ok(Program::new(Some(crate::fast::lower(root.node)), n, id))

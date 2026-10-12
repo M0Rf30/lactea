@@ -103,6 +103,13 @@ struct Args {
     /// MilkDrop 3 `VolumeSensitivity` (`--compat md3` only): linear gain on the 8-bit quantised audio input.
     #[arg(long, default_value_t = 1.0)]
     volume_sensitivity: f32,
+    /// MilkDrop 3 locked shader (`MD31` handle): replace the preset's warp stub with the HLSL in FILE. Repeatable.
+    /// The HLSL must be one you own; see docs/md3.md, "Locked shaders".
+    #[arg(long, value_name = "HANDLE=FILE")]
+    shader_override_warp: Vec<String>,
+    /// MilkDrop 3 locked shader (`MD32` handle): replace the preset's composite stub with the HLSL in FILE. Repeatable.
+    #[arg(long, value_name = "HANDLE=FILE")]
+    shader_override_comp: Vec<String>,
     /// second preset: replaced at --switch-frame by a soft cut of --soft-cut seconds
     #[arg(long)]
     preset2: Option<PathBuf>,
@@ -370,6 +377,35 @@ fn run(args: &Args) -> Result<i32> {
         },
     )?;
 
+    let mut shader_overrides = std::collections::HashMap::<u64, lactea::ShaderOverride>::new();
+    for (spec, is_warp) in args
+        .shader_override_warp
+        .iter()
+        .map(|s| (s, true))
+        .chain(args.shader_override_comp.iter().map(|s| (s, false)))
+    {
+        let flag = if is_warp {
+            "--shader-override-warp"
+        } else {
+            "--shader-override-comp"
+        };
+        let Some((handle, file)) = spec.split_once('=') else {
+            bail!("{flag}: expected HANDLE=FILE, got {spec:?}");
+        };
+        let handle: u64 = handle
+            .trim()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("{flag}: bad handle {handle:?}: {e}"))?;
+        let text = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("{flag}: reading {file}: {e}"))?;
+        let entry = shader_overrides.entry(handle).or_default();
+        if is_warp {
+            entry.warp = Some(text);
+        } else {
+            entry.comp = Some(text);
+        }
+    }
+
     let gpu = gpu::init()?;
     eprintln!("fdrender: adapter {}", gpu.adapter_name);
     let mut engine = Engine::new(
@@ -389,6 +425,7 @@ fn run(args: &Args) -> Result<i32> {
             start_clean: args.start_clean != 0,
             auto_hard_cut_mode: args.auto_hard_cut,
             volume_sensitivity: args.volume_sensitivity,
+            shader_overrides,
             ..EngineConfig::default()
         },
     );

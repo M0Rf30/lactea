@@ -165,6 +165,26 @@ impl CustomShape {
 }
 
 impl Preset {
+    /// The `MD31` (warp) locked-shader handle from [`Preset::extra`] (first occurrence), whether or not the
+    /// shader text is a stub.
+    pub fn md31_handle(&self) -> Option<u64> {
+        self.extra_handle("MD31")
+    }
+
+    /// The `MD32` (comp) locked-shader handle, see [`Preset::md31_handle`].
+    pub fn md32_handle(&self) -> Option<u64> {
+        self.extra_handle("MD32")
+    }
+
+    fn extra_handle(&self, key: &str) -> Option<u64> {
+        self.extra
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.trim().parse().ok())
+    }
+}
+
+impl Preset {
     /// The `MD31` / `MD32` handle for `key` when the matching shader text is a locked-shader stub.
     fn locked_handle(&self, key: &str, shader: Option<&String>) -> Option<u64> {
         if !shader?.contains(LOCKED_SHADER_MARKER) {

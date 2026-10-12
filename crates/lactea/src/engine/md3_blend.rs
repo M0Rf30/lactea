@@ -1356,4 +1356,154 @@ mod tests {
             assert_eq!(v, s.next32() >> 17);
         }
     }
+
+    /// Every import resets the global `FFTAttack` / `FFTDecay` to 0.5 / 0.7 and then reads its own keys, so after a
+    /// double preset is loaded the globals are PRESET2's (PRESET1 is imported first), also when PRESET2 has no keys.
+    #[test]
+    fn double_preset_leaves_preset2s_fft_params() {
+        use crate::{Compat, Engine, EngineConfig, Transition};
+        let device_queue = {
+            let instance = wgpu::Instance::default();
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()
+                .and_then(|a| {
+                    pollster::block_on(a.request_device(&wgpu::DeviceDescriptor::default())).ok()
+                })
+        };
+        let Some((device, queue)) = device_queue else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let half = |keys: &str| {
+            format!("MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\n{keys}fDecay=1\n")
+        };
+        let file = |p1: &str, p2: &str| {
+            format!(
+                "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{p1}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{p2}[PRESET2_END]\n"
+            )
+        };
+        let mut e = Engine::new(
+            &device,
+            &queue,
+            EngineConfig {
+                width: 32,
+                height: 24,
+                mesh: [8, 8],
+                compat: Compat::MilkDrop3,
+                ..Default::default()
+            },
+        );
+        let p1 = half("FFTAttack=0.9\nFFTDecay=0.2\n");
+        let p2 = half("FFTAttack=0.3\nFFTDecay=0.4\n");
+        e.load_preset(file(&p1, &p2).as_bytes(), "pair.milk2", Transition::Cut)
+            .unwrap();
+        assert_eq!(e.md3.fft_params(), (0.3, 0.4), "PRESET2's keys win");
+        e.load_preset(
+            file(&p1, &half("")).as_bytes(),
+            "pair2.milk2",
+            Transition::Cut,
+        )
+        .unwrap();
+        assert_eq!(
+            e.md3.fft_params(),
+            (0.5, 0.7),
+            "PRESET2 without keys resets them, PRESET1's are gone"
+        );
+    }
+
+    /// Shader `time` counts from the start of each state's own preset: a hard load builds both halves at once (the
+    /// same start); a soft transition starts PRESET1 with the request and PRESET2 when the first leg ends.
+    #[test]
+    fn halves_of_a_double_preset_have_their_own_shader_start_times() {
+        use crate::{Compat, Engine, EngineConfig, FrameClock, Transition};
+        let device_queue = {
+            let instance = wgpu::Instance::default();
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .ok()
+                .and_then(|a| {
+                    pollster::block_on(a.request_device(&wgpu::DeviceDescriptor::default())).ok()
+                })
+        };
+        let Some((device, queue)) = device_queue else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 32,
+                height: 24,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        let half = "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\nfDecay=1\n";
+        let file = format!(
+            "Created with MILKDROP 3.37 on 05/01/2026 at 12:34:56\nwww.milkdrop3.com\n\nblending_pattern=zoom\nblending_progress=0.5\nblending_direction=1\nrandom_1=0.1\nrandom_2=0.2\nrandom_3=0.3\nrandom_4=0.4\nrandom_5=0.5\n[PRESET1_BEGIN]\nNAME=a\n{half}[PRESET1_END]\n\n[PRESET2_BEGIN]\nNAME=b\n{half}[PRESET2_END]\n"
+        );
+        let mut e = Engine::new(
+            &device,
+            &queue,
+            EngineConfig {
+                width: 32,
+                height: 24,
+                mesh: [8, 8],
+                compat: Compat::MilkDrop3,
+                blend_time_user: 1.0,
+                ..Default::default()
+            },
+        );
+        let mut frame = 0u32;
+        let mut run = |e: &mut Engine, until: f64| {
+            while f64::from(frame) / 60.0 <= until {
+                let mut enc = device.create_command_encoder(&Default::default());
+                e.render(
+                    &mut enc,
+                    &view,
+                    FrameClock {
+                        time: f64::from(frame) / 60.0,
+                        frame,
+                    },
+                );
+                queue.submit(Some(enc.finish()));
+                frame += 1;
+            }
+        };
+        e.load_preset(half.as_bytes(), "plain", Transition::Cut)
+            .unwrap();
+        run(&mut e, 2.0);
+        // hard load at t = 2: both halves start there
+        e.load_preset(file.as_bytes(), "pair.milk2", Transition::Cut)
+            .unwrap();
+        let (new, old) = (
+            e.active.as_ref().unwrap().loaded.start_time,
+            e.md2.as_ref().unwrap().old.start_time,
+        );
+        assert_eq!(new, old);
+        assert!((new - 2.0).abs() < 0.05, "{new}");
+        // soft transition at t = 4 from a plain preset (a soft request while a `.milk2` is on screen is deferred):
+        // PRESET1 starts now, PRESET2 when the 1 s leg ends
+        e.load_preset(half.as_bytes(), "plain", Transition::Cut)
+            .unwrap();
+        run(&mut e, 4.0);
+        e.load_preset(
+            file.as_bytes(),
+            "pair2.milk2",
+            Transition::Soft { seconds: 2.7 },
+        )
+        .unwrap();
+        let p1_start = e.active.as_ref().unwrap().loaded.start_time;
+        assert!((p1_start - 4.0).abs() < 0.05, "{p1_start}");
+        run(&mut e, 5.5);
+        let new = e.active.as_ref().unwrap().loaded.start_time;
+        let old = e.md2.as_ref().unwrap().old.start_time;
+        assert_eq!(old, p1_start, "PRESET1 keeps its own start");
+        assert!((new - 5.0).abs() < 0.05, "PRESET2 starts with leg B: {new}");
+    }
 }

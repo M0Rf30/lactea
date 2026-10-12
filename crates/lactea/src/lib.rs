@@ -29,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod auto_cut;
+mod cache;
 mod callbacks;
 mod control;
 mod engine;

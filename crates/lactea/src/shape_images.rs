@@ -7,7 +7,8 @@
 
 use super::Engine;
 use crate::PresetReport;
-use crate::textures::{Image, shape_image};
+use crate::media::Media;
+use crate::textures::shape_image;
 use lactea_preset::Preset;
 use std::collections::HashSet;
 
@@ -40,9 +41,12 @@ impl Engine {
             if !seen.insert(im.name.clone()) {
                 continue;
             }
-            let img: Option<Image> = self.provider.as_mut().and_then(|p| p.load(&im.name));
-            match img {
-                Some(img)
+            let found = match self.provider.as_mut() {
+                Some(p) => self.media_cache.still(&mut **p, &im.name),
+                None => None,
+            };
+            match found.as_deref() {
+                Some(Media::Still(img))
                     if img.width > 0
                         && img.height > 0
                         && img.rgba8.len() == (img.width * img.height * 4) as usize =>
@@ -209,6 +213,42 @@ mod tests {
         assert_eq!(report.unresolved_textures, vec!["missing".to_string()]);
         let c = centre(&mut e, &device, &queue, size);
         assert!(c[0] < 30, "placeholder, got {c:?}");
+    }
+
+    /// The provider is asked for a texture once; a reload of the preset resolves it from the engine's cache and
+    /// reports it the same way.
+    #[test]
+    fn reloaded_shape_image_comes_from_the_cache() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let size = (64u32, 36u32);
+        let asked = Rc::new(RefCell::new(Vec::new()));
+        let mut e = Engine::new(
+            &device,
+            &queue,
+            EngineConfig {
+                width: size.0,
+                height: size.1,
+                ..Default::default()
+            },
+        );
+        e.set_texture_provider(Box::new(Red(asked.clone())));
+        let preset = shape_preset("shapecode_0_image=redtex\n");
+        let first = e
+            .load_preset(preset.as_bytes(), "a", crate::Transition::Cut)
+            .unwrap();
+        let second = e
+            .load_preset(preset.as_bytes(), "b", crate::Transition::Cut)
+            .unwrap();
+        assert_eq!(*asked.borrow(), vec!["redtex"]);
+        assert_eq!(first.resolved_textures, second.resolved_textures);
+        let c = centre(&mut e, &device, &queue, size);
+        assert!(
+            c[0] > 200 && c[1] < 30 && c[2] < 30,
+            "textured with the cached red image, got {c:?}"
+        );
     }
 
     /// projectM registers its noise textures before it scans a directory: `image=noise_lq` never reaches the provider,

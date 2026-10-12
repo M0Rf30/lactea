@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use crate::audio::deterministic::WavFeed;
+use crate::audio::devices::CaptureKind;
 use crate::audio::monitor::AudioStatus;
 use crate::audio::player::FilePlayer;
 use crate::audio::{AudioSource, LIVE_RATE, SourceShared};
@@ -21,40 +22,38 @@ pub enum AudioFeed {
 }
 
 impl AudioFeed {
-    pub fn open(args: &Args) -> AudioFeed {
+    /// Opens the input the CLI asks for. `--audio-wav` and `--audio-file` are explicit requests, so
+    /// an unreadable file is an error: a `--deterministic` run that silently fell back to the wall
+    /// clock would not be reproducible. Only live capture degrades to [`AudioFeed::Unavailable`].
+    pub fn open(args: &Args) -> Result<AudioFeed, String> {
         if args.no_audio {
-            return AudioFeed::Silent;
+            return Ok(AudioFeed::Silent);
         }
         if let Some(wav) = &args.audio_wav {
             let fps = args.fps.unwrap_or(60);
-            return match WavFeed::load(wav, fps) {
-                Ok(f) => {
-                    log::info!(
-                        "deterministic audio: {} ({} Hz, {} video frames at {fps} fps)",
-                        wav.display(),
-                        f.sample_rate(),
-                        f.video_frames()
-                    );
-                    AudioFeed::Deterministic(f)
-                }
-                Err(e) => AudioFeed::Unavailable(e),
-            };
+            let f = WavFeed::load(wav, fps).map_err(|e| format!("--audio-wav: {e}"))?;
+            log::info!(
+                "deterministic audio: {} ({} Hz, {} video frames at {fps} fps)",
+                wav.display(),
+                f.sample_rate(),
+                f.video_frames()
+            );
+            return Ok(AudioFeed::Deterministic(f));
         }
         if let Some(file) = &args.audio_file {
-            return match FilePlayer::open(
+            let p = FilePlayer::open(
                 file,
                 args.output_device.as_deref(),
                 args.loop_audio,
                 args.audio_delay_ms,
-            ) {
-                Ok(p) => AudioFeed::Live {
-                    source: Box::new(p),
-                    tag: "file",
-                },
-                Err(e) => AudioFeed::Unavailable(e),
-            };
+            )
+            .map_err(|e| format!("--audio-file: {e}"))?;
+            return Ok(AudioFeed::Live {
+                source: Box::new(p),
+                tag: "file",
+            });
         }
-        Self::open_capture(args)
+        Ok(Self::open_capture(args))
     }
 
     fn open_capture(args: &Args) -> AudioFeed {
@@ -68,15 +67,21 @@ impl AudioFeed {
             match crate::audio::pw::PipewireCapture::start(LIVE_RATE, args.pipewire_target.clone())
             {
                 Ok(pw) => {
-                    log::info!(
-                        "audio: capturing the default sink monitor through PipeWire ({LIVE_RATE} Hz stereo)"
-                    );
+                    match pw.target() {
+                        Some(t) => {
+                            log::info!("audio: capturing PipeWire node {t} ({LIVE_RATE} Hz stereo)")
+                        }
+                        None => log::info!(
+                            "audio: capturing the default sink monitor through PipeWire ({LIVE_RATE} Hz stereo)"
+                        ),
+                    }
                     return AudioFeed::Live {
                         source: Box::new(pw),
                         tag: "pw",
                     };
                 }
-                Err(e) if backend == AudioBackend::Pipewire => {
+                // An explicit request (backend or target) is never answered with another source.
+                Err(e) if backend == AudioBackend::Pipewire || args.pipewire_target.is_some() => {
                     return AudioFeed::Unavailable(e);
                 }
                 Err(e) => log::warn!("PipeWire capture unavailable ({e}); falling back to cpal"),
@@ -89,10 +94,16 @@ impl AudioFeed {
             );
         }
         let _ = LIVE_RATE;
-        match crate::audio::cpal_input::CpalCapture::open(args.capture_device.as_deref()) {
+        if args.pipewire_target.is_some() {
+            log::warn!("--pipewire-target ignored: PipeWire capture is not in use");
+        }
+        match crate::audio::cpal_input::CpalCapture::open(args.capture_device.as_deref(), backend) {
             Ok(c) => AudioFeed::Live {
+                tag: match c.kind() {
+                    CaptureKind::Input => "cpal",
+                    CaptureKind::Loopback => "cpal-loopback",
+                },
                 source: Box::new(c),
-                tag: "cpal",
             },
             Err(e) => AudioFeed::Unavailable(e),
         }

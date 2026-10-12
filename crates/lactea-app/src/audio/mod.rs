@@ -4,8 +4,10 @@
 //! lock-free SPSC ring; the render thread drains it once per frame via [`AudioSource::poll`]
 //! and hands the result to the visualizer. Sources:
 //!
-//! * [`pw::PipewireCapture`] — native PipeWire capture of the default sink's monitor,
-//! * [`cpal_input::CpalCapture`] — cpal default/selected input device,
+//! * [`pw::PipewireCapture`] — native PipeWire capture of the default sink's monitor (or of an
+//!   explicit `--pipewire-target` node),
+//! * [`cpal_input::CpalCapture`] — cpal input device, or an output device captured as loopback
+//!   (WASAPI/CoreAudio),
 //! * [`player::FilePlayer`] — symphonia decode + cpal playback, visualizer fed in sync with
 //!   what is audible,
 //! * [`deterministic::WavFeed`] — fixed-step PCM slices of a WAV (no device, no clock).

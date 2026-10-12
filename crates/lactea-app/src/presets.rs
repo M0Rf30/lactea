@@ -136,6 +136,18 @@ pub enum Nav {
     Auto,
 }
 
+/// Seed of the browser's random stream (shuffle, R, MD3 display-time draws): `--seed` when given,
+/// 1 in `--deterministic` runs, else the clock, so "random" differs on every launch. It is a `u32`
+/// so that `--seed N` reproduces a logged value. `clock` is any value that changes per launch
+/// (nanoseconds since the epoch).
+pub fn browser_seed(seed: Option<u32>, deterministic: bool, clock: u128) -> u32 {
+    match seed {
+        Some(s) => s,
+        None if deterministic => 1,
+        None => (clock ^ (clock >> 32) ^ (clock >> 64)) as u32,
+    }
+}
+
 pub struct PresetBrowser {
     entries: Vec<PresetEntry>,
     current: Option<usize>,
@@ -149,6 +161,8 @@ pub struct PresetBrowser {
     md3_time: Option<(Duration, f64)>,
     /// Random part of the current preset's MD3 display time, drawn by `commit`.
     md3_extra: Duration,
+    /// See [`PresetBrowser::stall`].
+    stalled: bool,
 }
 
 impl PresetBrowser {
@@ -164,6 +178,7 @@ impl PresetBrowser {
             rng: fastrand::Rng::with_seed(seed),
             md3_time: None,
             md3_extra: Duration::ZERO,
+            stalled: false,
         }
     }
 
@@ -188,10 +203,6 @@ impl PresetBrowser {
 
     pub fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 
     pub fn entry(&self, idx: usize) -> &PresetEntry {
@@ -219,7 +230,7 @@ impl PresetBrowser {
 
     /// Seconds until the next automatic switch (None when locked / nothing to switch to).
     pub fn auto_remaining(&self, now: Instant) -> Option<Duration> {
-        if self.locked || self.entries.len() <= 1 || self.duration.is_zero() {
+        if self.stalled || self.locked || self.entries.len() <= 1 || self.duration.is_zero() {
             return None;
         }
         Some(
@@ -284,6 +295,7 @@ impl PresetBrowser {
         }
         self.current = Some(idx);
         self.loaded_at = now;
+        self.stalled = false;
         if let Some((_, rand)) = self.md3_time {
             let secs = f64::from(self.rng.u32(..1000)) * rand * 0.001;
             self.md3_extra = Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO);
@@ -303,6 +315,26 @@ impl PresetBrowser {
             Nav::Auto if self.shuffle => self.random_other(failed),
             _ => (failed + 1) % n,
         })
+    }
+
+    /// A whole round of loads failed: stop retrying (every retry re-reads and re-parses each entry,
+    /// every frame) until the user navigates (`resume`) or a load succeeds.
+    pub fn stall(&mut self) {
+        self.stalled = true;
+    }
+
+    pub fn stalled(&self) -> bool {
+        self.stalled
+    }
+
+    /// The user asked for another preset: loading may be attempted again.
+    pub fn resume(&mut self) {
+        self.stalled = false;
+    }
+
+    /// Nothing is showing and nothing has failed yet: the first preset is due.
+    pub fn first_load_due(&self) -> bool {
+        self.current.is_none() && !self.stalled
     }
 }
 
@@ -530,5 +562,52 @@ mod tests {
         assert_eq!(entry_for_file(&d.join("a/y.milk2")).name, "y.milk2");
         assert_eq!(entry_for_file(&d.join("x.milk")).name, "x");
         let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// After a whole round of failed loads nothing may ask for another one on its own: that was a
+    /// retry of every entry on every frame.
+    #[test]
+    fn stalled_browser_stops_first_loads_and_auto_switches_until_resumed() {
+        let mut b = browser(3);
+        assert!(b.first_load_due());
+        b.stall();
+        assert!(b.stalled() && !b.first_load_due());
+        let much_later = Instant::now() + Duration::from_secs(3600);
+        assert!(!b.auto_due(much_later));
+        b.resume();
+        assert!(b.first_load_due());
+        // a successful load also clears it
+        b.stall();
+        go(&mut b, Nav::Next);
+        assert!(!b.stalled() && !b.first_load_due());
+    }
+
+    /// A stalled browser with a preset on screen never auto-advances either (the user must navigate).
+    #[test]
+    fn stalled_browser_with_current_preset_does_not_auto_advance() {
+        let mut b = PresetBrowser::new(entries(2), false, Duration::from_secs(1), 1);
+        go(&mut b, Nav::Next);
+        let later = Instant::now() + Duration::from_secs(60);
+        assert!(b.auto_due(later));
+        b.stall();
+        assert!(!b.auto_due(later));
+    }
+
+    #[test]
+    fn browser_seed_is_fixed_only_when_asked() {
+        assert_eq!(browser_seed(Some(7), false, 123_456), 7);
+        assert_eq!(browser_seed(Some(7), true, 123_456), 7);
+        assert_eq!(browser_seed(None, true, 123_456), 1);
+        let a = browser_seed(None, false, 1_000_000_001);
+        let b = browser_seed(None, false, 1_000_000_002);
+        assert_ne!(a, b);
+        // equal clocks give equal seeds: the logged seed reproduces the order
+        let order = |seed: u32| -> Vec<usize> {
+            let mut b =
+                PresetBrowser::new(entries(50), true, Duration::from_secs(30), u64::from(seed));
+            (0..8).map(|_| go(&mut b, Nav::Random)).collect()
+        };
+        assert_eq!(order(a), order(a));
+        assert_ne!(order(a), order(b));
     }
 }

@@ -26,14 +26,20 @@ impl VisualizerKind {
     }
 }
 
+/// Which capture backend `--audio-backend` selects.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum AudioBackend {
-    /// PipeWire sink monitor on Linux when available, else cpal.
+    /// PipeWire sink monitor on Linux when available, else cpal (loopback of the default output
+    /// on Windows and macOS, the default input device elsewhere).
     Auto,
     /// Native PipeWire capture of the default sink's monitor (Linux).
     Pipewire,
-    /// cpal: default input device (or `--capture-device`).
+    /// cpal input devices only: the default input device (microphone, line in) or
+    /// `--capture-device`.
     Cpal,
+    /// cpal loopback of the default output device: WASAPI (Windows) or CoreAudio tap
+    /// (macOS 14.6+). An error on Linux, where PipeWire covers it.
+    CpalLoopback,
 }
 
 /// Which renderer a difference between projectM, MilkDrop 2 and MilkDrop 3 resolves to (engine only).
@@ -67,10 +73,22 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
+/// `--mesh WxH`: the engine's warp mesh needs even cell counts of at least 2 each.
+fn parse_mesh(s: &str) -> Result<(u32, u32), String> {
+    let (w, h) = parse_size(s)?;
+    if w % 2 != 0 || h % 2 != 0 || w < 2 || h < 2 {
+        return Err(format!(
+            "both dimensions must be even and >= 2, got {w}x{h}"
+        ));
+    }
+    Ok((w, h))
+}
+
 /// lactea: MilkDrop 2/3 and projectM-compatible music visualizer.
 ///
 /// Keys: N/Right/Space next preset, P/Left previous, R random, L lock/unlock auto-advance,
-/// F/F11 (or double-click) fullscreen, Esc/Q quit.
+/// F/F11 (or double-click) fullscreen, D dump the pipeline stages as PNG (`$LACTEA_DEBUG_DIR`),
+/// Esc/Q quit.
 /// F8 cycles the MD3 auto hard cut mode (`--compat milkdrop3` only).
 #[derive(Parser, Debug, Clone)]
 #[command(name = "lactea", version)]
@@ -100,7 +118,7 @@ pub struct Args {
     pub shuffle: bool,
 
     /// Cap the frame rate (default: vsync only; in --deterministic mode: the step rate, 60).
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
     pub fps: Option<u32>,
 
     /// Present without vsync (Mailbox/Immediate when available). Use with --fps.
@@ -128,32 +146,41 @@ pub struct Args {
     #[arg(long = "texture-dir", value_name = "DIR")]
     pub texture_dir: Vec<PathBuf>,
 
-    /// Engine seed (rand, noise textures, random textures).
-    #[arg(long, default_value_t = 1)]
-    pub seed: u32,
+    /// Engine seed (rand, noise textures, random textures; default 1). Also seeds the shuffle
+    /// and R: without --seed (and outside --deterministic) the preset order differs on every
+    /// launch, and the log prints the seed that reproduces it.
+    #[arg(long)]
+    pub seed: Option<u32>,
 
     /// Engine: projectM (default) or MilkDrop 2 behaviour where they differ.
     #[arg(long, value_enum, default_value_t = CompatArg::Projectm)]
     pub compat: CompatArg,
 
-    /// Engine: warp mesh cells (both even).
-    #[arg(long, default_value = "48x36", value_parser = parse_size, value_name = "WxH")]
+    /// Engine: warp mesh cells (both even, at least 2).
+    #[arg(long, default_value = "48x36", value_parser = parse_mesh, value_name = "WxH")]
     pub mesh: (u32, u32),
 
-    /// Audio capture backend.
+    /// Audio capture backend. auto: PipeWire (the default sink's monitor) on Linux when it is
+    /// available, otherwise cpal; with cpal, auto records what plays on the default output
+    /// device where the OS supports it (Windows, macOS) and falls back to the default input
+    /// device, and uses the default input device on Linux.
     #[arg(long, value_enum, default_value_t = AudioBackend::Auto)]
     pub audio_backend: AudioBackend,
 
-    /// Capture from this cpal input device (name, substring or id; implies --audio-backend cpal).
-    #[arg(long, value_name = "NAME", conflicts_with_all = ["audio_file", "audio_wav", "no_audio"])]
+    /// Capture from this cpal device (name, substring or id; see --list-devices). Matches input
+    /// devices and, on Windows and macOS, output devices, which are then captured as loopback
+    /// (what the device plays). Implies a cpal backend: it cannot be combined with
+    /// --audio-backend pipewire.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["audio_file", "audio_wav", "no_audio", "pipewire_target"])]
     pub capture_device: Option<String>,
 
-    /// PipeWire only: capture this node (node.name or object serial) instead of the default
-    /// sink's monitor.
-    #[arg(long, value_name = "NODE")]
+    /// PipeWire only: capture this node (node.name or object.serial, exact; an unknown one is an
+    /// error) instead of the default sink's monitor.
+    #[arg(long, value_name = "NODE", conflicts_with_all = ["audio_file", "audio_wav", "no_audio"])]
     pub pipewire_target: Option<String>,
 
-    /// List capture/playback devices and exit.
+    /// List capture/playback devices (cpal inputs, outputs, PipeWire sinks) and exit; * marks the
+    /// default of each list, [loopback] an output that --capture-device can record.
     #[arg(long)]
     pub list_devices: bool,
 
@@ -169,8 +196,14 @@ pub struct Args {
     #[arg(long = "loop", requires = "audio_file")]
     pub loop_audio: bool,
 
-    /// Shift what the visualizer hears relative to what is audible (+ = later), ms.
-    #[arg(long, default_value_t = 0.0, value_name = "MS")]
+    /// Shift what the visualizer hears relative to what is audible (+ = later), ms. Needs
+    /// --audio-file: it only shifts file playback.
+    #[arg(
+        long,
+        default_value_t = 0.0,
+        value_name = "MS",
+        requires = "audio_file"
+    )]
     pub audio_delay_ms: f64,
 
     /// Fixed-step input: frame n is rendered at time n/fps with PCM `pcm_range(n)` of this WAV.
@@ -228,6 +261,44 @@ pub struct Args {
     pub duration_rand: f64,
 }
 
+impl Args {
+    /// The engine seed: `--seed`, else 1.
+    pub fn engine_seed(&self) -> u32 {
+        self.seed.unwrap_or(1)
+    }
+
+    /// Cross-argument checks clap cannot express.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.screenshot.is_some()
+            && let Some(n) = self.frames
+            && self.screenshot_frame >= n
+        {
+            return Err(format!(
+                "--screenshot-frame {} is never rendered with --frames {n} (frames 0..{n} are)",
+                self.screenshot_frame
+            ));
+        }
+        if self.capture_device.is_some() && self.audio_backend == AudioBackend::Pipewire {
+            return Err(
+                "--capture-device selects a cpal device and conflicts with --audio-backend pipewire"
+                    .into(),
+            );
+        }
+        if self.pipewire_target.is_some()
+            && matches!(
+                self.audio_backend,
+                AudioBackend::Cpal | AudioBackend::CpalLoopback
+            )
+        {
+            return Err(
+                "--pipewire-target only applies to PipeWire capture: use --audio-backend auto or pipewire"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +341,63 @@ mod tests {
     }
 
     #[test]
+    fn audio_delay_needs_an_audio_file() {
+        // The 0.0 default must not count as "given".
+        assert!(parse(&[]).is_ok());
+        assert!(parse(&["--audio-delay-ms", "50"]).is_err());
+        let a = parse(&["--audio-file", "a.mp3", "--audio-delay-ms", "50"]).unwrap();
+        assert_eq!(a.audio_delay_ms, 50.0);
+        assert_eq!(
+            parse(&["--audio-file", "a.mp3"]).unwrap().audio_delay_ms,
+            0.0
+        );
+    }
+
+    #[test]
+    fn pipewire_target_is_exclusive_with_other_sources() {
+        assert!(parse(&["--pipewire-target", "n"]).is_ok());
+        assert!(parse(&["--pipewire-target", "n", "--capture-device", "x"]).is_err());
+        assert!(parse(&["--pipewire-target", "n", "--audio-file", "a.mp3"]).is_err());
+        assert!(parse(&["--pipewire-target", "n", "--no-audio"]).is_err());
+    }
+
+    #[test]
+    fn capture_device_with_a_non_pipewire_backend_is_fine() {
+        // The default backend (auto) is not "explicit pipewire".
+        let a = parse(&["--capture-device", "x"]).unwrap();
+        assert!(a.validate().is_ok());
+        for b in ["auto", "cpal", "cpal-loopback"] {
+            let a = parse(&["--capture-device", "x", "--audio-backend", b]).unwrap();
+            assert!(a.validate().is_ok(), "{b}");
+        }
+    }
+
+    #[test]
+    fn capture_device_conflicts_with_explicit_pipewire_backend() {
+        let a = parse(&["--capture-device", "x", "--audio-backend", "pipewire"]).unwrap();
+        let e = a.validate().unwrap_err();
+        assert!(
+            e.contains("--capture-device") && e.contains("pipewire"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn pipewire_target_needs_the_pipewire_capable_backends() {
+        for b in ["auto", "pipewire"] {
+            let a = parse(&["--pipewire-target", "n", "--audio-backend", b]).unwrap();
+            assert!(a.validate().is_ok(), "{b}");
+        }
+        for b in ["cpal", "cpal-loopback"] {
+            let a = parse(&["--pipewire-target", "n", "--audio-backend", b]).unwrap();
+            assert!(
+                a.validate().unwrap_err().contains("--pipewire-target"),
+                "{b}"
+            );
+        }
+    }
+
+    #[test]
     fn size_and_repeatables() {
         let a = parse(&[
             "--size",
@@ -299,5 +427,46 @@ mod tests {
         assert!(parse(&["--auto-hard-cut", "8"]).is_err());
         assert!(parse(&["--auto-hard-cut", "-1"]).is_err());
         assert!(parse(&["--auto-hard-cut", "x"]).is_err());
+    }
+
+    #[test]
+    fn seed_is_explicit_only_when_given() {
+        let a = parse(&[]).unwrap();
+        assert_eq!((a.seed, a.engine_seed()), (None, 1));
+        let a = parse(&["--seed", "7"]).unwrap();
+        assert_eq!((a.seed, a.engine_seed()), (Some(7), 7));
+    }
+
+    #[test]
+    fn screenshot_frame_must_be_rendered() {
+        // the default --screenshot-frame is 90
+        let a = parse(&["--frames", "5", "--screenshot", "s.png"]).unwrap();
+        assert!(a.validate().unwrap_err().contains("--screenshot-frame 90"));
+        let a = parse(&[
+            "--frames",
+            "5",
+            "--screenshot",
+            "s.png",
+            "--screenshot-frame",
+            "4",
+        ])
+        .unwrap();
+        assert!(a.validate().is_ok());
+        assert!(
+            parse(&["--screenshot", "s.png"])
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+        assert!(parse(&["--frames", "5"]).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn fps_zero_and_odd_mesh_are_rejected_at_parse_time() {
+        assert!(parse(&["--fps", "0"]).is_err());
+        assert_eq!(parse(&["--fps", "30"]).unwrap().fps, Some(30));
+        assert!(parse(&["--mesh", "47x35"]).is_err());
+        assert!(parse(&["--mesh", "0x0"]).is_err());
+        assert_eq!(parse(&["--mesh", "32X24"]).unwrap().mesh, (32, 24));
     }
 }

@@ -18,6 +18,11 @@ pub enum Change {
 pub trait Visualizer {
     /// Load a `.milk` preset (raw bytes, `name` = display name). An `Err` means "skip this one".
     fn load_preset(&mut self, bytes: &[u8], name: &str, change: Change) -> Result<(), String>;
+    /// Show something alive although no preset could be loaded (the engine's built-in idle preset);
+    /// visualizers that always draw have nothing to do.
+    fn load_idle(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     /// PCM that became audible since the previous call: interleaved f32 in [-1, 1].
     fn push_pcm(&mut self, interleaved: &[f32], channels: usize);
     /// Draw one frame into `view` (the swapchain view, in the format the visualizer was built for).

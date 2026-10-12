@@ -11,6 +11,7 @@ use crate::geom::{self, WarpVertex, WfVertex};
 use crate::motion::MotionVectorState;
 use crate::noise;
 use crate::rng::Rng;
+use crate::shader_ext::ShaderExt;
 use crate::shaders;
 use crate::stroke::{self, LineRule};
 use crate::uniforms::{self, MilkUniformInputs, RotParams};
@@ -18,8 +19,8 @@ use crate::warp_mesh::{self, MeshGeometry, VertexVars, WarpAnim};
 use crate::wavegen;
 use lactea_abi::dump::Stage;
 use lactea_abi::{
-    Address, FRAGMENT_ENTRY, Filter, MeshVertex, MilkUniforms, NoiseTex, PassUniforms,
-    ShaderInterface, TexDim, TexSource,
+    Address, BINDING_MILK_EXT, FFT_BINS, FRAGMENT_ENTRY, Filter, MeshVertex, MilkUniforms,
+    NoiseTex, PassUniforms, ShaderInterface, TexDim, TexSource,
 };
 use std::collections::HashMap;
 use wgpu::util::DeviceExt;
@@ -89,6 +90,52 @@ fn create_sink(device: &wgpu::Device, w: u32, h: u32) -> Tex {
         view,
         w,
         h,
+    }
+}
+
+/// The MilkDrop 3 shader FFT texture ([`TexSource::Fft`]): [`FFT_BINS`] x 1 `R32Float`, zero until the first upload.
+/// `R32Float` is not filterable without `FLOAT32_FILTERABLE`; the translated shaders `textureLoad` it and blend the
+/// two neighbouring bins by hand.
+fn create_fft_tex(device: &wgpu::Device, queue: &wgpu::Queue) -> Tex {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("fft"),
+        size: wgpu::Extent3d {
+            width: FFT_BINS as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&[0.0f32; FFT_BINS]),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(FFT_BINS as u32 * 4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: FFT_BINS as u32,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    Tex {
+        texture,
+        view,
+        w: FFT_BINS as u32,
+        h: 1,
     }
 }
 
@@ -617,7 +664,12 @@ impl Pipelines {
         });
         let bgl_mu = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mu"),
-            entries: &[ubo_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT)],
+            // `mu` (frozen MD2 block) and `mx` (MilkDrop 3 extension block) are always both bound; a shader that does
+            // not declare `mx` is unaffected because the layout is a superset of what it uses
+            entries: &[
+                ubo_entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT),
+                ubo_entry(BINDING_MILK_EXT, wgpu::ShaderStages::FRAGMENT),
+            ],
         });
         let bgl_warp_vs = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("warp_vs"),
@@ -1023,6 +1075,9 @@ pub struct Renderer {
     user_tex: HashMap<String, UserTex>,
     dummy_2d: Tex,
     dummy_3d: Tex,
+    /// `sampler_fft` ([`TexSource::Fft`]): the smoothed MilkDrop 3 shader FFT. Owned per renderer (a
+    /// [`Renderer::sibling`] has its own) and replaced whenever a frame carries `FrameInput::ext.fft`.
+    fft: Tex,
     /// Scratch attachment for the user warp shader's second output ([`with_uv_output`]); never read.
     warp_sink: Tex,
     warp_shader: Option<ShaderPass>,
@@ -1233,6 +1288,7 @@ impl Renderer {
         let rot = RotParams::randomize(&mut rng.fork(0x7072_6573));
         let dummy_2d = upload_2d(device, queue, 1, 1, &[0, 0, 0, 255], false, "dummy2d");
         let dummy_3d = upload_3d(device, queue, 1, &[0, 0, 0, 255], "dummy3d");
+        let fft = create_fft_tex(device, queue);
 
         let r = Renderer {
             device: device.clone(),
@@ -1251,6 +1307,7 @@ impl Renderer {
             user_tex: HashMap::new(),
             dummy_2d,
             dummy_3d,
+            fft,
             warp_sink: create_sink(device, w, h),
             warp_shader: None,
             comp_shader: None,
@@ -1496,7 +1553,14 @@ impl Renderer {
                 TexDim::D2 => wgpu::TextureViewDimension::D2,
                 TexDim::D3 => wgpu::TextureViewDimension::D3,
             };
-            entries.push(tex_entry(lactea_abi::texture_binding(i as u32), dim, true));
+            // R32Float is not filterable: the translated shader only `textureLoad`s the FFT texture (its sampler
+            // entry stays `Filtering` and is never paired with it in a `textureSample`)
+            let filterable = !matches!(t.source, TexSource::Fft);
+            entries.push(tex_entry(
+                lactea_abi::texture_binding(i as u32),
+                dim,
+                filterable,
+            ));
             entries.push(samp_entry(lactea_abi::sampler_binding(i as u32)));
         }
 
@@ -1978,6 +2042,10 @@ impl Renderer {
         target: Option<&wgpu::TextureView>,
     ) -> Result<(), RenderError> {
         self.check_input(input)?;
+        // before any pass is recorded: every shader of this frame (and of the old state of a blend) reads the new FFT
+        if let Some(fft) = &input.ext.fft {
+            self.record_fft_upload(encoder, fft);
+        }
         let rules = self.rules;
         let (w, h) = (self.cfg.width, self.cfg.height);
         let prev_i = self.main_idx;
@@ -2155,6 +2223,7 @@ impl Renderer {
                             encoder,
                             pass,
                             &mu,
+                            &input.ext,
                             main_view,
                             PassVerts::Warp(&verts, &vu),
                             &self.main[next_i].view,
@@ -2175,6 +2244,7 @@ impl Renderer {
                             encoder,
                             pass,
                             &mu,
+                            &input.ext,
                             main_view,
                             PassVerts::Mesh(&verts),
                             &self.main[next_i].view,
@@ -2299,6 +2369,7 @@ impl Renderer {
                         encoder,
                         pass,
                         &mu,
+                        &input.ext,
                         main_view,
                         PassVerts::Mesh(&verts),
                         &self.final_tex.view,
@@ -2359,6 +2430,39 @@ impl Renderer {
         self.main_idx = next_i;
         self.frames_since_resize += 1;
         Ok(())
+    }
+
+    /// Replace the FFT texture's contents ([`TexSource::Fft`]). Recorded as a buffer copy in `encoder` rather than
+    /// `queue.write_texture`: a queue write lands at the next submit, ahead of everything already recorded, so two
+    /// frames of one renderer recorded into one encoder would both see the last spectrum.
+    fn record_fft_upload(&self, encoder: &mut wgpu::CommandEncoder, fft: &[f32; FFT_BINS]) {
+        let staging = buffer_init(
+            &self.device,
+            "fft",
+            fft.as_slice(),
+            wgpu::BufferUsages::COPY_SRC,
+        );
+        encoder.copy_buffer_to_texture(
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(FFT_BINS as u32 * 4),
+                    rows_per_image: Some(1),
+                },
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.fft.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: FFT_BINS as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     fn tex_bind_group(&self, view: &wgpu::TextureView, sampler: &wgpu::Sampler) -> wgpu::BindGroup {
@@ -2485,6 +2589,7 @@ impl Renderer {
                 Some(u) => (u.tex.w, u.tex.h),
                 None => (1, 1),
             },
+            TexSource::Fft => (self.fft.w, self.fft.h),
         };
         [w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32]
     }
@@ -2566,6 +2671,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         pass: &ShaderPass,
         mu: &MilkUniforms,
+        ext: &ShaderExt,
         main_view: &wgpu::TextureView,
         verts: PassVerts<'_>,
         target: &wgpu::TextureView,
@@ -2578,6 +2684,7 @@ impl Renderer {
             &self.user_tex,
             PassBlend::Replace,
             mu,
+            ext,
             main_view,
             verts,
             target,
@@ -2596,6 +2703,7 @@ impl Renderer {
         user_tex: &HashMap<String, UserTex>,
         blend: PassBlend,
         mu: &MilkUniforms,
+        ext: &ShaderExt,
         main_view: &wgpu::TextureView,
         verts: PassVerts<'_>,
         target: &wgpu::TextureView,
@@ -2608,13 +2716,25 @@ impl Renderer {
             std::slice::from_ref(mu),
             wgpu::BufferUsages::UNIFORM,
         );
+        let mx_buf = buffer_init(
+            &self.device,
+            "mx",
+            std::slice::from_ref(&ext.uniforms()),
+            wgpu::BufferUsages::UNIFORM,
+        );
         let bg0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mu"),
             layout: &self.pipes.bgl_mu,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: mu_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: mu_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: BINDING_MILK_EXT,
+                    resource: mx_buf.as_entire_binding(),
+                },
+            ],
         });
 
         let mut pu = PassUniforms::default();
@@ -2667,6 +2787,7 @@ impl Renderer {
                     Some(u) => &u.tex.view,
                     None => &self.dummy_2d.view,
                 },
+                TexSource::Fft => &self.fft.view,
             };
             // the bound view must match the declared dimensionality
             let is3d = matches!(
@@ -2802,7 +2923,7 @@ impl Renderer {
                 (true, true) => PassBlend::InvSrcAlpha,
             };
             if dp.shaders {
-                let (pass, user_tex, q, blur, rand) = match dp.which {
+                let (pass, user_tex, q, blur, ext, rand) = match dp.which {
                     Which::New => {
                         let Some(pass) = self.warp_shader.as_ref() else {
                             continue;
@@ -2812,6 +2933,7 @@ impl Renderer {
                             &self.user_tex,
                             &input.q,
                             &input.blur,
+                            &input.ext,
                             input.warp_random.as_ref(),
                         )
                     }
@@ -2824,6 +2946,7 @@ impl Renderer {
                             &o.user_tex,
                             &bl.old.q,
                             &bl.old.blur,
+                            &bl.old.ext,
                             bl.old.warp_random.as_ref(),
                         )
                     }
@@ -2838,6 +2961,7 @@ impl Renderer {
                     &MilkUniformInputs {
                         q,
                         blur,
+                        ext,
                         ..MilkUniformInputs::for_frame(w, h, input, &self.rot, &rules, rand)
                     },
                     &mut rng,
@@ -2859,6 +2983,7 @@ impl Renderer {
                     user_tex,
                     mode,
                     &mu,
+                    ext,
                     src,
                     PassVerts::Mesh(&verts),
                     target,
@@ -2962,7 +3087,7 @@ impl Renderer {
                     (true, false) => PassBlend::SrcAlpha,
                     (true, true) => PassBlend::InvSrcAlpha,
                 };
-                let (pass, user_tex, q, blur, rand) = match dp.which {
+                let (pass, user_tex, q, blur, ext, rand) = match dp.which {
                     Which::New => {
                         let Some(pass) = self.comp_shader.as_ref() else {
                             continue;
@@ -2972,6 +3097,7 @@ impl Renderer {
                             &self.user_tex,
                             &input.q,
                             &input.blur,
+                            &input.ext,
                             input.comp_random.as_ref(),
                         )
                     }
@@ -2984,6 +3110,7 @@ impl Renderer {
                             &o.user_tex,
                             &bl.old.q,
                             &bl.old.blur,
+                            &bl.old.ext,
                             bl.old.comp_random.as_ref(),
                         )
                     }
@@ -2993,6 +3120,7 @@ impl Renderer {
                     &MilkUniformInputs {
                         q,
                         blur,
+                        ext,
                         ..MilkUniformInputs::for_frame(w, h, input, &self.rot, &rules, rand)
                     },
                     &mut rng,
@@ -3009,6 +3137,7 @@ impl Renderer {
                     user_tex,
                     mode,
                     &mu,
+                    ext,
                     main_view,
                     PassVerts::Mesh(&verts),
                     &self.final_tex.view,

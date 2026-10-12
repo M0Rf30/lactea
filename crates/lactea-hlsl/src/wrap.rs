@@ -103,12 +103,16 @@ fn declared_names(text: &str) -> std::collections::HashSet<&str> {
 /// projectM (`MilkdropShader::GetReferencedSamplers`, `TranspileHLSLShader`) takes every `sampler_<name>` /
 /// `texsize_<name>` token of the comment-stripped shader as a texture reference and emits the declarations itself, so
 /// `tex2D(sampler_pw_noise_lq, ..)` works without `sampler sampler_pw_noise_lq;`. MD2 rejects such a shader (undeclared
-/// identifier); following projectM, the text returned here is prepended to the user shader.
-pub(crate) fn implicit_declarations(user: &str) -> String {
+/// identifier); following projectM, the text returned here is prepended to the user shader. With `md3` the names the
+/// MD3 prelude declares (`sampler_fft`) count as declared.
+pub(crate) fn implicit_declarations(user: &str, md3: bool) -> String {
     let user = user.replace('\u{1}', "\n").replace("\r\n", "\n");
     let stripped = strip_comments(&user);
     let include = strip_comments(INCLUDE_FX);
     let mut declared = declared_names(&include);
+    if md3 {
+        declared.extend(declared_names(&MD3_PRELUDE));
+    }
     declared.extend(declared_names(&stripped));
     let mut seen = std::collections::HashSet::new();
     let mut out = String::new();
@@ -129,17 +133,64 @@ pub(crate) fn implicit_declarations(user: &str) -> String {
     out
 }
 
+/// The MilkDrop 3 prelude: what MD3 3.37 adds between `include.fx` and the per-pass `#define`s (docs/md3.md, shader
+/// inputs). Written from the documented behaviour, not copied: `_c14` and the `mouse*` names, `_qi.._qp` with the
+/// `q33..q64` macros, the FFT sampler and the `get_fft` / `get_fft_hz` macros.
+///
+/// * `get_fft` / `get_fft_hz` are macros (as in MD3) so argument expressions are substituted textually; there is no
+///   `sqrt` (BeatDrop's has one) and `get_fft_hz` assumes a 48 kHz capture (`/ 24000`).
+/// * Not declared on purpose: `get_fft_peak*`, `get_wave*`, `sampler_wave`, `HAS_FFT_PEAK` (BeatDrop only), `_c15..`
+///   (never uploaded by MD3) and the engine-private `_mxd3q*` accumulators of locked presets.
+static MD3_PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let mut s = String::from("float4 _c14;\n");
+    for (name, sel) in [
+        ("mouse", ""),
+        ("mouse_x", ".x"),
+        ("mouse_y", ".y"),
+        ("mouse_z", ".z"),
+        ("mouse_w", ".w"),
+        ("mouse_pos", ".xy"),
+    ] {
+        s.push_str(&format!("#define {name} _c14{sel}\n"));
+    }
+    // `qN` is component (N-1)%4 of register (N-1)/4; registers a..h hold q1..q32 (include.fx), i..p q33..q64
+    s.push_str("float4 _qi, _qj, _qk, _ql, _qm, _qn, _qo, _qp;\n");
+    for n in 33..=64u8 {
+        let reg = char::from(b'a' + (n - 1) / 4);
+        let comp = ["x", "y", "z", "w"][usize::from((n - 1) % 4)];
+        s.push_str(&format!("#define q{n} _q{reg}.{comp}\n"));
+    }
+    s.push_str("sampler2D sampler_fft;\n");
+    s.push_str("#define get_fft(pos) tex2D(sampler_fft, float2(clamp(pos, 0, 1), 0.5)).r\n");
+    s.push_str("#define get_fft_hz(freq) get_fft(clamp((freq) / 24000.0, 0, 1))\n");
+    s
+});
+
 /// The complete HLSL text MD2 hands to `D3DXCompileShader` (entry point `PS`):
 /// comment-stripped include.fx + per-kind `#define`s + the user shader with the `shader_body`
 /// surgery applied.
 ///
 /// Errors with [`TranslateError::Wrap`] when `shader_body`, its opening `{` or the closing `}` is missing.
 pub fn md2_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateError> {
+    wrapped_hlsl(kind, user, false)
+}
+
+/// [`md2_wrapped_hlsl`] for MilkDrop 3: the MD3 prelude (`_c14`/`mouse*`, `_qi.._qp`/`q33..q64`, `sampler_fft`,
+/// `get_fft`, `get_fft_hz`) sits between the comment-stripped include.fx and the per-pass `#define`s, as in MD3 3.37.
+/// Translate the result with [`translate_wrapped`](crate::translate_wrapped) and `Options { md3: true, .. }`.
+pub fn md3_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateError> {
+    wrapped_hlsl(kind, user, true)
+}
+
+fn wrapped_hlsl(kind: PassKind, user: &str, md3: bool) -> Result<String, TranslateError> {
     // lines are joined with LINEFEED_CONTROL_CHAR (1) in MD2 and converted to CRLF
     let user = user.replace('\u{1}', "\n").replace("\r\n", "\n");
     let mut text = strip_comments(INCLUDE_FX);
     if !text.ends_with('\n') {
         text.push('\n');
+    }
+    if md3 {
+        text.push_str(&MD3_PRELUDE);
     }
     text.push_str(match kind {
         PassKind::Warp => WARP_DEFINES,
@@ -201,6 +252,9 @@ pub fn default_warp_shader(decay: f32, wrap: bool) -> String {
 
 /// `CPlugin::GenCompPShaderText`: text MD2 synthesizes for a composite shader when the preset has
 /// a pixel-shader version but no `comp_N` lines. `ve_orient` is `nVideoEchoOrientation`.
+///
+/// With `md3_effects` the text follows MilkDrop 3 3.37 (docs/md3.md, shader inputs): `brighten` is
+/// `ret = sqrt(ret)` (MD2: `1 - (1-ret)*(1-ret)`) and `solarize` is `ret*(1-ret)*4` (MD2: `*2`).
 #[allow(clippy::too_many_arguments)]
 pub fn default_comp_shader(
     brightness: f32,
@@ -212,6 +266,7 @@ pub fn default_comp_shader(
     darken: bool,
     solarize: bool,
     invert: bool,
+    md3_effects: bool,
 ) -> String {
     let mut s = String::from("shader_body\n{\n");
     if ve_alpha > 0.001 {
@@ -242,13 +297,21 @@ pub fn default_comp_shader(
         ));
     }
     if brighten {
-        s.push_str("    ret = 1 - (1-ret) * (1-ret); //brighten\n");
+        s.push_str(if md3_effects {
+            "    ret = sqrt(ret); //brighten\n"
+        } else {
+            "    ret = 1 - (1-ret) * (1-ret); //brighten\n"
+        });
     }
     if darken {
         s.push_str("    ret *= ret; //darken\n");
     }
     if solarize {
-        s.push_str("    ret = ret*(1-ret)*2; //solarize\n");
+        s.push_str(if md3_effects {
+            "    ret = ret*(1-ret)*4; //solarize\n"
+        } else {
+            "    ret = ret*(1-ret)*2; //solarize\n"
+        });
     }
     if invert {
         s.push_str("    ret = 1 - ret; //invert\n");

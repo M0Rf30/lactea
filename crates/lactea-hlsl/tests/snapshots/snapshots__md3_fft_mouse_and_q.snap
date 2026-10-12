@@ -1,0 +1,86 @@
+---
+source: crates/lactea-hlsl/tests/snapshots.rs
+expression: out
+---
+@group(1) @binding(1) var tex_sampler_main: texture_2d<f32>;
+@group(1) @binding(2) var smp_sampler_main: sampler;
+@group(1) @binding(3) var tex_sampler_fft: texture_2d<f32>;
+@group(1) @binding(4) var smp_sampler_fft: sampler;
+@group(1) @binding(5) var tex_sampler_pw_fft: texture_2d<f32>;
+@group(1) @binding(6) var smp_sampler_pw_fft: sampler;
+
+const FFT_BINS: i32 = 512;
+
+fn fft_texel(t: texture_2d<f32>, i: i32, wrapped: bool) -> f32 {
+    var k = clamp(i, 0, FFT_BINS - 1);
+    if (wrapped) {
+        k = ((i % FFT_BINS) + FFT_BINS) % FFT_BINS;
+    }
+    return textureLoad(t, vec2<i32>(k, 0), 0).r;
+}
+
+fn fft_fetch(t: texture_2d<f32>, u: f32, linear: bool, wrapped: bool) -> vec4<f32> {
+    let n = f32(FFT_BINS);
+    var r: f32;
+    if (linear) {
+        let x = u * n - 0.5;
+        let f = floor(x);
+        let i0 = i32(f);
+        r = mix(fft_texel(t, i0, wrapped), fft_texel(t, i0 + 1, wrapped), x - f);
+    } else {
+        r = fft_texel(t, i32(floor(u * n)), wrapped);
+    }
+    return vec4<f32>(r, 1.0, 1.0, 1.0);
+}
+var<private> g_qj: vec4<f32>;
+fn f_PS_0(p__vDiffuse_1: vec4<f32>, p__uv_3: vec4<f32>, p__rad_ang_5: vec2<f32>, p__return_value_7: ptr<function, vec4<f32>>) {
+    var vDiffuse_2: vec4<f32> = p__vDiffuse_1;
+    var uv_4: vec4<f32> = p__uv_3;
+    var rad_ang_6: vec2<f32> = p__rad_ang_5;
+    var ret_8: vec3<f32> = vec3<f32>(0.0f);
+    var p_9: vec2<f32> = (mx.mouse.xy - uv_4.xy);
+    g_qj.w = (g_qj.w + mx.mouse.z);
+    let t_10 = vec2<f32>(clamp(uv_4.xy.x, 0.0f, 1.0f), 0.5f);
+    let t_11 = vec2<f32>(clamp(clamp(((440.0f * (1.0f + mx.q_hi[7].w)) / 24000.0f), 0.0f, 1.0f), 0.0f, 1.0f), 0.5f);
+    var bar_12: f32 = (((fft_fetch(tex_sampler_fft, t_10.x, true, false)).x * mx.q_hi[0].x) + (fft_fetch(tex_sampler_fft, t_11.x, true, false)).x);
+    let t_13 = vec2<f32>((uv_4.xy.x * 3.0f), 0.0f);
+    ret_8 = (((textureSample(tex_sampler_main, smp_sampler_main, (uv_4.xy + (p_9 * mx.mouse.w)))).xyz * (1.0f - bar_12)) + ((fft_fetch(tex_sampler_pw_fft, t_13.x, false, true)).x * g_qj.w));
+    (*p__return_value_7) = vec4<f32>(ret_8.xyz, vDiffuse_2.w);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    g_qj = mx.q_hi[1];
+    var rv: vec4<f32> = vec4<f32>();
+    f_PS_0(in.diffuse, in.uv, in.rad_ang, &rv);
+    return rv;
+}
+
+// interface: ShaderInterface {
+    textures: [
+        TextureBinding {
+            hlsl_name: "sampler_main",
+            source: Main,
+            filter: Linear,
+            address: Wrap,
+            dim: D2,
+        },
+        TextureBinding {
+            hlsl_name: "sampler_fft",
+            source: Fft,
+            filter: Linear,
+            address: Clamp,
+            dim: D2,
+        },
+        TextureBinding {
+            hlsl_name: "sampler_pw_fft",
+            source: Fft,
+            filter: Point,
+            address: Wrap,
+            dim: D2,
+        },
+    ],
+    texsize_slots: [],
+    max_blur_level: 0,
+}
+// texsize_params: []

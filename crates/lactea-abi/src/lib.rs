@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 pub const NUM_Q: usize = 32;
 /// Number of `t1`..`t8` per-object variables of custom waves and shapes.
 pub const NUM_T: usize = 8;
+/// `q` variables of MilkDrop 3 (`q1..q64`); the first [`NUM_Q`] live in [`MilkUniforms::q`], the rest in
+/// [`MilkExtUniforms::q_hi`].
+pub const NUM_Q_MD3: usize = 64;
+/// `t1..t16` per-object variables of MilkDrop 3 custom waves and shapes.
+pub const NUM_T_MD3: usize = 16;
+/// Bins of the MilkDrop 3 shader FFT texture ([`TexSource::Fft`]): a 512 x 1 `R32Float` texture.
+pub const FFT_BINS: usize = 512;
 /// Number of rotation matrices in [`MilkUniforms::rot`].
 pub const NUM_ROT: usize = 24;
 /// MilkDrop 2 targets ps_3_0: at most 16 samplers per pass. Also wgpu's default limit.
@@ -68,6 +75,31 @@ impl Default for MilkUniforms {
     }
 }
 
+/// MilkDrop 3 shader inputs that do not fit the frozen [`MilkUniforms`] block, at `@group(0) @binding(1)`
+/// (`mx` in [`WGSL_COMMON`]). Always bound by the renderer; all-default (`mouse = (-1, -1, 0, 0)`, zero `q_hi`)
+/// outside MilkDrop 3.
+///
+/// - `mouse` = `_c14`: `(x, y, held, released)`; `x = px/W`, `y = py/H` (top origin) and `-1, -1` when the cursor is
+///   outside the window; `held` is 1 while the left button is down, `released` 1 for the one frame after it.
+/// - `q_hi` = `_qi .. _qp`: `q33 == q_hi[0][0]`, `q64 == q_hi[7][3]`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct MilkExtUniforms {
+    /// `_c14` (mouse).
+    pub mouse: [f32; 4],
+    /// `_qi` .. `_qp`.
+    pub q_hi: [[f32; 4]; 8],
+}
+
+impl Default for MilkExtUniforms {
+    fn default() -> Self {
+        Self {
+            mouse: [-1.0, -1.0, 0.0, 0.0],
+            q_hi: [[0.0; 4]; 8],
+        }
+    }
+}
+
 /// Per-pass uniforms at `@group(1) @binding(0)`: `texsize_<name>` values for the textures a
 /// translated shader references, indexed by [`ShaderInterface::texsize_slots`].
 #[repr(C)]
@@ -97,6 +129,12 @@ struct MilkUniforms {
 };
 @group(0) @binding(0) var<uniform> mu: MilkUniforms;
 
+struct MilkExt {
+    mouse: vec4<f32>,
+    q_hi: array<vec4<f32>, 8>,
+};
+@group(0) @binding(1) var<uniform> mx: MilkExt;
+
 struct PassUniforms {
     texsize: array<vec4<f32>, 16>,
 };
@@ -121,6 +159,8 @@ pub const GROUP_PASS: u32 = 1;
 pub const BINDING_MILK_UNIFORMS: u32 = 0;
 /// Binding of [`PassUniforms`] in [`GROUP_PASS`].
 pub const BINDING_PASS_UNIFORMS: u32 = 0;
+/// Binding of [`MilkExtUniforms`] in [`GROUP_FRAME`].
+pub const BINDING_MILK_EXT: u32 = 1;
 /// Binding of texture `i` of [`ShaderInterface::textures`] in [`GROUP_PASS`].
 pub const fn texture_binding(i: u32) -> u32 {
     1 + 2 * i
@@ -193,6 +233,11 @@ pub enum TexSource {
     /// (`sampler_fw_clouds2` -> `"clouds2"`, `sampler_rand03_smalltiled` -> `"rand03_smalltiled"`).
     /// Resolution to an actual image (and MD2 `randXX` selection) is the engine's job.
     User(String),
+    /// MilkDrop 3 shader FFT (`sampler_fft`): a [`FFT_BINS`] x 1 `R32Float` texture holding the smoothed spectrum.
+    /// The translator lowers every lookup of such a sampler to a manual clamp + bilinear (or point) fetch with
+    /// `textureLoad`, because `R32Float` is not filterable without `FLOAT32_FILTERABLE`. Only produced for
+    /// translations made with the MD3 prelude; otherwise `sampler_fft` is the user texture `"fft"`.
+    Fft,
 }
 
 /// Sampler filter mode.
@@ -389,7 +434,7 @@ mod tests {
             "{WGSL_COMMON}\n@group(1) @binding(1) var t0: texture_2d<f32>;\n@group(1) @binding(2) var s0: sampler;\n\
              @fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32> {{\n\
                let m = mu.rot[3]; let r = vec4<f32>(in.uv.xy, 0.0, 1.0) * m;\n\
-               return vec4<f32>(textureSample(t0, s0, in.uv.xy).xyz * mu.c[2].x + r + pu.texsize[0].xyz, in.diffuse.w);\n}}\n"
+               return vec4<f32>(textureSample(t0, s0, in.uv.xy).xyz * mu.c[2].x + r + pu.texsize[0].xyz + mx.q_hi[7].xyz * mx.mouse.x, in.diffuse.w);\n}}\n"
         );
         let module = naga::front::wgsl::parse_str(&src).expect("parse");
         naga::valid::Validator::new(
@@ -409,6 +454,8 @@ mod tests {
         );
         assert_eq!(std::mem::size_of::<PassUniforms>(), 16 * 16);
         assert_eq!(std::mem::size_of::<MeshVertex>(), 4 * 12);
+        assert_eq!(std::mem::size_of::<MilkExtUniforms>(), 16 + 16 * 8);
+        assert_eq!(MilkExtUniforms::default().mouse, [-1.0, -1.0, 0.0, 0.0]);
     }
 
     #[test]

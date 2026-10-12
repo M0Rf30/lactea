@@ -8,6 +8,7 @@
 
 mod conv;
 mod expr;
+pub(crate) mod fft;
 mod intrinsics;
 mod stmt;
 mod undef;
@@ -45,7 +46,7 @@ pub(crate) struct Local {
 
 pub(crate) enum GKind {
     Sampler,
-    /// Maps onto a field of the frozen `MilkUniforms` (`mu`).
+    /// Maps onto a field of the frozen `MilkUniforms` (`mu`) or, for the MD3 names, of `MilkExtUniforms` (`mx`).
     Mapped(String),
     /// `float4 texsize_<name>;` -> `pu.texsize[slot]`
     PassTexsize,
@@ -106,6 +107,9 @@ pub(crate) struct Tr<'a> {
     /// projectM hlslparser behaviours (see `Options::projectm_flavor`): float literals rounded to 6 significant
     /// digits, asin/acos outside `[-1, 1]`.
     pub pm_flavor: bool,
+    /// The MD3 prelude is active (see `Options::md3`): `_c14` / `_qi.._qp` map onto `mx` and `fft` samplers are lowered
+    /// to `fft_fetch` calls.
+    pub md3: bool,
     /// The `*` being translated is a compound `*=` or `mul()`: hlslparser emits those as plain products (no `mult()`).
     pub plain_mul: bool,
     /// Variables Mesa compiles as NaN instead of undefined (see `undef.rs`); only filled for `Options::projectm_flavor`.
@@ -198,13 +202,16 @@ pub(crate) fn mp(s: &str) -> String {
     }
 }
 
-/// Names `include.fx` declares that live in `MilkUniforms`.
-pub(crate) fn builtin_uniform(name: &str) -> Option<String> {
+/// Names `include.fx` (and, with `md3`, the MD3 prelude) declares that live in `MilkUniforms` / `MilkExtUniforms`.
+pub(crate) fn builtin_uniform(name: &str, md3: bool) -> Option<String> {
     if let Some(n) = name.strip_prefix("_c")
         && let Ok(i) = n.parse::<usize>()
         && i < 14
     {
         return Some(format!("mu.c[{i}]"));
+    }
+    if md3 && name == "_c14" {
+        return Some("mx.mouse".into());
     }
     if let Some(n) = name.strip_prefix("_q")
         && n.len() == 1
@@ -212,6 +219,9 @@ pub(crate) fn builtin_uniform(name: &str) -> Option<String> {
         let b = n.as_bytes()[0];
         if (b'a'..=b'h').contains(&b) {
             return Some(format!("mu.q[{}]", b - b'a'));
+        }
+        if md3 && (b'i'..=b'p').contains(&b) {
+            return Some(format!("mx.q_hi[{}]", b - b'i'));
         }
     }
     match name {
@@ -250,7 +260,7 @@ pub(crate) fn builtin_uniform(name: &str) -> Option<String> {
 }
 
 impl<'a> Tr<'a> {
-    pub fn new(prog: &'a Program) -> Tr<'a> {
+    pub fn new(prog: &'a Program, md3: bool) -> Tr<'a> {
         let assigned = assigned_idents(prog);
         let mut globals: HashMap<String, GInfo> = HashMap::new();
         for (order, d) in prog.globals.iter().enumerate() {
@@ -262,7 +272,7 @@ impl<'a> Tr<'a> {
                 GKind::Sampler
             } else if matches!(d.ty, Ty::Texture) {
                 GKind::Private // unused texture object declarations
-            } else if let Some(m) = builtin_uniform(&d.name) {
+            } else if let Some(m) = builtin_uniform(&d.name, md3) {
                 if assigned.contains(&d.name) {
                     // HLSL lets shaders write to uniforms (they are per-invocation copies)
                     shadow = Some(m);
@@ -311,6 +321,7 @@ impl<'a> Tr<'a> {
             floor_mod: false,
             pm_flavor: false,
             plain_mul: false,
+            md3,
             undef_nan: HashSet::new(),
         }
     }

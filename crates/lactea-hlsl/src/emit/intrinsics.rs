@@ -350,6 +350,12 @@ impl Tr<'_> {
         let want = if kind == "grad" { 4 } else { 2 };
         self.need(name, args, want)?;
         let samp = self.sampler_of(&args[0], is3d)?;
+        if self.is_fft_sampler(&samp) {
+            if is3d {
+                return terr("`sampler_fft` is a 2D texture: `tex3D` is not valid on it");
+            }
+            return self.fft_lookup(&samp, args, kind);
+        }
         let cdim: u8 = if is3d { 3 } else { 2 };
         let t = format!("tex_{samp}");
         let s = format!("smp_{samp}");

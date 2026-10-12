@@ -66,6 +66,8 @@ pub struct PresetControl {
     previous_vol: f32,
     rng: StreamRng,
     on_request: Hook<SwitchRequest>,
+    /// MD3 `TimeBetweenPresetsRand` while the MD3 display-time rule is on (`None`: projectM's gaussian).
+    md3_time_rand: Option<f64>,
 }
 
 impl PresetControl {
@@ -92,6 +94,7 @@ impl PresetControl {
             previous_vol: 0.0,
             rng: StreamRng::new(seed, "preset_duration"),
             on_request: Hook::none(),
+            md3_time_rand: None,
         };
         c.preset_duration_a = c.sampled_preset_duration();
         c
@@ -104,6 +107,19 @@ impl PresetControl {
         f: Option<impl Fn(&SwitchRequest) + Send + Sync + 'static>,
     ) {
         self.on_request.set(f);
+    }
+
+    /// MilkDrop 3 display time (`CompatRules::md3_preset_time_rand`, `docs/md3.md`): with `Some(rand)` the
+    /// display time of a preset is `soft cut duration (BlendTimeAuto) + preset duration (TimeBetweenPresets) +
+    /// (r % 1000) * rand * 0.001` with `r` drawn from the seeded stream, instead of projectM's gaussian
+    /// (the easter egg is then ignored). `rand` is `TimeBetweenPresetsRand` (MD3 default 10 s); negative
+    /// values count as 0. Applies to presets started afterwards.
+    pub fn set_md3_time_rand(&mut self, rand: Option<f64>) {
+        self.md3_time_rand = rand.map(|r| r.max(0.0));
+    }
+    /// The MD3 display-time randomisation set by [`set_md3_time_rand`](Self::set_md3_time_rand).
+    pub fn md3_time_rand(&self) -> Option<f64> {
+        self.md3_time_rand
     }
 
     // ---- settings -------------------------------------------------------------------------
@@ -201,8 +217,14 @@ impl PresetControl {
     // ---- timing ---------------------------------------------------------------------------
 
     /// `TimeKeeper::sampledPresetDuration`: the preset duration, or (easter egg ≥ 0.001) a gaussian
-    /// sample with that mean and the easter egg as sigma, at least 1 s.
+    /// sample with that mean and the easter egg as sigma, at least 1 s. With
+    /// [`set_md3_time_rand`](Self::set_md3_time_rand) the MD3 formula replaces both.
     pub fn sampled_preset_duration(&mut self) -> f64 {
+        if let Some(rand) = self.md3_time_rand {
+            // `(rand() % 1000) * TimeBetweenPresetsRand * 0.001`: a 0.001 s grid below `rand`
+            let r = f64::from(self.rng.next32() % 1000);
+            return self.soft_cut_duration + self.preset_duration + r * rand * 0.001;
+        }
         if f64::from(self.easter_egg) < 0.001 {
             return self.preset_duration;
         }
@@ -275,6 +297,20 @@ impl PresetControl {
     ///   having risen by more than the hard-cut sensitivity since the previous frame and the preset
     ///   shown for longer than the hard-cut duration: `hard_cut = true`.
     pub fn update(&mut self, time: f64, vol: f32) -> Option<SwitchRequest> {
+        self.update_with_auto_cuts(time, vol, 0)
+    }
+
+    /// [`update`](Self::update) plus the instant preset changes MD3's auto hard cut asked for this
+    /// frame (`Engine::take_auto_cuts`, `docs/md3.md`). `auto_cuts > 0` returns a `hard_cut = true`
+    /// request even when the display time is also up (the cut wins; one request per call however many
+    /// cuts, the host loads one preset), independent of the projectM hard-cut settings and of the
+    /// preset's age. A locked control never emits a request, so a locked preset ignores auto cuts.
+    pub fn update_with_auto_cuts(
+        &mut self,
+        time: f64,
+        vol: f32,
+        auto_cuts: u32,
+    ) -> Option<SwitchRequest> {
         self.now = time;
         let mut request = None;
         if !self.notified {
@@ -289,6 +325,10 @@ impl PresetControl {
                 self.notified = true;
                 request = Some(SwitchRequest { hard_cut: true });
             }
+        }
+        if auto_cuts > 0 && !self.locked {
+            self.notified = true;
+            request = Some(SwitchRequest { hard_cut: true });
         }
         if self.smoothing && (self.now - self.smooth_start) / self.soft_cut_duration >= 1.0 {
             self.end_smoothing();
@@ -465,5 +505,68 @@ mod tests {
         let mut other = PresetControl::new(8);
         other.set_easter_egg(5.0);
         assert_ne!(other.sampled_preset_duration(), xs[0]);
+    }
+
+    #[test]
+    fn auto_cuts_request_a_hard_cut_independent_of_the_projectm_settings() {
+        let mut c = PresetControl::new(1);
+        c.set_easter_egg(0.0);
+        c.set_preset_duration(1e6);
+        c.start_preset(0.0);
+        // hard cuts are off and the preset is brand new: a cut is requested anyway
+        let r = c.update_with_auto_cuts(0.5, 0.0, 1);
+        assert_eq!(r, Some(SwitchRequest { hard_cut: true }));
+        // two cuts in one frame (mode 4) are still one request
+        c.start_preset(1.0);
+        assert_eq!(
+            c.update_with_auto_cuts(1.1, 0.0, 2),
+            Some(SwitchRequest { hard_cut: true })
+        );
+        // no cuts, no request
+        c.start_preset(2.0);
+        assert_eq!(c.update_with_auto_cuts(2.1, 0.0, 0), None);
+    }
+
+    #[test]
+    fn an_auto_cut_wins_over_the_display_time_and_a_lock_suppresses_it() {
+        let mut c = PresetControl::new(1);
+        c.set_easter_egg(0.0);
+        c.set_preset_duration(1.0);
+        c.start_preset(0.0);
+        assert_eq!(
+            c.update_with_auto_cuts(2.0, 0.0, 1),
+            Some(SwitchRequest { hard_cut: true })
+        );
+        c.start_preset(3.0);
+        c.set_preset_locked(true);
+        assert_eq!(c.update_with_auto_cuts(3.5, 0.0, 1), None);
+    }
+
+    #[test]
+    fn md3_display_time_adds_the_blend_time_and_a_seeded_random_part() {
+        let mut c = PresetControl::new(3);
+        c.set_preset_duration(16.0);
+        c.set_soft_cut_duration(2.7);
+        c.set_md3_time_rand(Some(10.0));
+        assert_eq!(c.md3_time_rand(), Some(10.0));
+        let xs: Vec<f64> = (0..500).map(|_| c.sampled_preset_duration()).collect();
+        // 2.7 + 16 + (0..=999) * 10 * 0.001 -> [18.7, 28.69]
+        assert!(xs.iter().all(|&x| (18.7..=28.69 + 1e-9).contains(&x)));
+        assert!(xs.iter().any(|&x| x > 25.0) && xs.iter().any(|&x| x < 22.0));
+        let mut d = PresetControl::new(3);
+        d.set_preset_duration(16.0);
+        d.set_soft_cut_duration(2.7);
+        d.set_md3_time_rand(Some(10.0));
+        let ys: Vec<f64> = (0..500).map(|_| d.sampled_preset_duration()).collect();
+        assert_eq!(xs, ys, "same seed, same samples");
+        // Rand = 0 is the exact window; the easter egg is ignored; a negative Rand counts as 0
+        c.set_md3_time_rand(Some(-4.0));
+        assert_eq!(c.md3_time_rand(), Some(0.0));
+        c.set_easter_egg(5.0);
+        assert!((c.sampled_preset_duration() - 18.7).abs() < 1e-12);
+        // off again: projectM's gaussian
+        c.set_md3_time_rand(None);
+        c.set_easter_egg(0.0);
+        assert_eq!(c.sampled_preset_duration(), 16.0);
     }
 }

@@ -28,6 +28,7 @@
 
 #![warn(missing_docs)]
 
+pub mod auto_cut;
 mod callbacks;
 mod control;
 mod engine;
@@ -85,6 +86,10 @@ pub struct EngineConfig {
     /// (projectM's default) warps the new preset's first frame from the previous active preset's
     /// finished image. The very first preset always starts black.
     pub start_clean: bool,
+    /// MilkDrop 3 `AutoHardCutMode` (0 = off, 1..=7, see [`auto_cut`]). Only honoured with
+    /// [`Compat::MilkDrop3`]; the other compat modes ignore it. [`Engine::set_auto_hard_cut_mode`] changes it
+    /// at runtime.
+    pub auto_hard_cut_mode: u8,
 }
 
 impl Default for EngineConfig {
@@ -101,6 +106,7 @@ impl Default for EngineConfig {
             fps: 60,
             preset_duration: 1e9,
             start_clean: false,
+            auto_hard_cut_mode: 0,
         }
     }
 }

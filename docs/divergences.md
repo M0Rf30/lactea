@@ -74,3 +74,12 @@ Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels
 | Item | projectM (default) | MilkDrop 2 / MilkDrop 3 |
 |---|---|---|
 | Joining of code lines (`md2_code_join`; init, per-frame, per-pixel, wave init / per-frame / per-point, shape init / per-frame) | lines joined with `\n`: an identifier split over two lines (`per_frame_22=k1 = is_` / `per_frame_23=beat*...;`) is two tokens and fails to compile | `CState::StripLinefeedCharsAndComments` (`state.cpp:1593`): the `\x01` separators are deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so the halves glue together (`k1 = is_beat*...;`). A block that is only blanks or strips to nothing compiles no code (`buf[0] == 0`). Shader text is not touched: it keeps its lines (`code_to_source`), `#define`s need them |
+
+## MilkDrop 3
+
+Rows of `Compat::MilkDrop3` against MilkDrop 2 / projectM; details in [`md3.md`](md3.md).
+
+| Item | projectM (default) | MilkDrop 2 | MilkDrop 3 |
+|---|---|---|---|
+| Auto hard cut (`md3_auto_hard_cut`; `EngineConfig::auto_hard_cut_mode`, `Engine::set_auto_hard_cut_mode`, F8 in the app, `--auto-hard-cut`) | none (projectM's own `hard_cut_*` volume-jump rule is a separate setting and stays) | none | modes 1..7 watch the previous frame's `bass` / `treb`: modes 1-6 request a blend-time-0 preset change (mode 4 can ask twice in a frame), mode 7 injects a random effect into the composite shader instead; independent of both hard-cut rules above |
+| Display time of a preset (`md3_preset_time_rand`; `PresetControl::set_md3_time_rand`) | gaussian (`easter_egg` sigma) around the preset duration | BeatDrop draws `uniform(0,1) * TimeBetweenPresetsRand`; `Compat::MilkDrop2` does not model it and keeps projectM's gaussian | `BlendTimeAuto + TimeBetweenPresets + (rand() % 1000) * TimeBetweenPresetsRand * 0.001` |

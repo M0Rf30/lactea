@@ -553,7 +553,7 @@ struct Pipelines {
     mesh_vs: wgpu::ShaderModule,
     /// `[linear wrap, linear clamp, point wrap, point clamp]` with mips, then the same four limited to level 0
     samplers: [wgpu::Sampler; 8],
-    /// MD3 sprite pipelines, built on first use.
+    /// MD3 sprite pipelines, built when the first sprite image is registered.
     sprite: std::sync::OnceLock<SpritePipes>,
 }
 
@@ -2018,6 +2018,8 @@ impl Renderer {
         mips: bool,
     ) -> Result<(), RenderError> {
         check_frames("sprite", w, h, frames)?;
+        // a sprite is about to be drawn: build the pipelines now, not as a hitch in the first frame that draws one
+        self.pipes.sprites(&self.device);
         let views = frames
             .iter()
             .map(|f| upload_2d(&self.device, &self.queue, w, h, f, mips, "sprite").view)

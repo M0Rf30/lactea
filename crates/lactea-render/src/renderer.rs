@@ -1288,7 +1288,7 @@ impl Renderer {
     }
 
     /// The rasteriser actually used for lines and points: the configured one, except that
-    /// `Compat::MilkDrop2` always draws D3D9-style thin quads.
+    /// `Compat::MilkDrop2` / `Compat::MilkDrop3` always draw D3D9-style thin quads.
     pub fn stroke_raster(&self) -> StrokeRaster {
         self.stroke_mode()
     }
@@ -1884,7 +1884,7 @@ impl Renderer {
     /// `target` must be a view of a `cfg.width x cfg.height` texture of `cfg.output_format`.
     ///
     /// Fails with [`RenderError::Invalid`] (recording nothing) if `input.warp_uv` does not match the mesh or
-    /// `input.md2_blend` is set without `Compat::MilkDrop2`.
+    /// `input.md2_blend` is set without `Compat::MilkDrop2` / `Compat::MilkDrop3`.
     pub fn render_frame(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1965,7 +1965,7 @@ impl Renderer {
         }
         if input.md2_blend.is_some() && !self.rules.md2_preset_blend {
             return Err(RenderError::Invalid(
-                "FrameInput.md2_blend needs Compat::MilkDrop2".to_owned(),
+                "FrameInput.md2_blend needs Compat::MilkDrop2 or Compat::MilkDrop3".to_owned(),
             ));
         }
         Ok(())
@@ -2308,7 +2308,7 @@ impl Renderer {
                 }
                 None => {
                     let b = self.build_noshader_comp(input);
-                    let wrap = if self.cfg.compat == Compat::MilkDrop2 {
+                    let wrap = if self.rules.noshader_comp_wrap {
                         Address::Wrap
                     } else {
                         Address::Clamp
@@ -3017,7 +3017,7 @@ impl Renderer {
                 );
             } else {
                 let b = self.build_noshader_comp(input);
-                let wrap = if self.cfg.compat == Compat::MilkDrop2 {
+                let wrap = if self.rules.noshader_comp_wrap {
                     Address::Wrap
                 } else {
                     Address::Clamp

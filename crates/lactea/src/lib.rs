@@ -67,7 +67,7 @@ pub struct EngineConfig {
     /// Seeds every random stream (shader `rand_*` / `rot_*`, hue phases, `rand()` of the
     /// expressions, random textures, noise textures). Same seed, same inputs: same frames.
     pub seed: u64,
-    /// projectM (default) or MilkDrop 2 behaviour where they differ.
+    /// projectM (default), MilkDrop 2 or MilkDrop 3 behaviour where they differ.
     pub compat: Compat,
     /// Added to warp UVs in texels (0 on modern APIs; MilkDrop 2 on D3D9 used 0.5).
     pub texel_offset: [f32; 2],

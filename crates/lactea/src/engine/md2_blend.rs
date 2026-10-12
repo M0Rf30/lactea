@@ -1,4 +1,4 @@
-//! MilkDrop 2's preset blend, CPU side (`Compat::MilkDrop2`, `CompatRules::md2_preset_blend`).
+//! MilkDrop 2's preset blend, CPU side (`Compat::MilkDrop2` / `Compat::MilkDrop3`, `CompatRules::md2_preset_blend`).
 //!
 //! Port of the parts of `third_party/md2` that make `m_bBlending` work:
 //!

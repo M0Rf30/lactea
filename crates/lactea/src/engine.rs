@@ -17,9 +17,9 @@ use lactea_preset::{
 use lactea_render::warp_mesh::{self, VertexVars, WarpAnim};
 use lactea_render::wavegen::{CustomWaveSampling, NUM_WAVEFORM_SAMPLES};
 use lactea_render::{
-    Compat, CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom,
-    RenderConfig, Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams,
-    WarpGpu, WavePoint,
+    CompiledShader, CustomWave as RenderWave, FrameInput, MeshGeometry, PassRandom, RenderConfig,
+    Renderer, ShapeInstance, TransitionBlender, TransitionKind, TransitionParams, WarpGpu,
+    WavePoint,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -75,7 +75,7 @@ struct Loaded {
     has_comp: bool,
     /// Frames rendered since the load.
     frames: u64,
-    /// MilkDrop 2's `CBlendableFloat` blend state of this preset's base values (`Compat::MilkDrop2` soft cuts).
+    /// MilkDrop 2's `CBlendableFloat` blend state of this preset's base values (MD2-family soft cuts).
     floats: BlendBase,
 }
 
@@ -316,8 +316,8 @@ impl Engine {
         self.active.as_ref().map(|s| s.loaded.name.as_str())
     }
 
-    /// Linear progress `0..=1` of the soft cut in progress, `None` when there is none. With
-    /// [`Compat::MilkDrop2`] this is MD2's `m_fBlendProgress` (`(GetTime() - start) / duration`, as of the last
+    /// Linear progress `0..=1` of the soft cut in progress, `None` when there is none. In the MD2 family
+    /// ([`crate::Compat::md2_family`]) this is MD2's `m_fBlendProgress` (`(GetTime() - start) / duration`, as of the last
     /// rendered frame; 0 before the first blend frame).
     pub fn transition_progress(&self) -> Option<f64> {
         if let Some(m) = &self.md2 {
@@ -565,9 +565,10 @@ impl Engine {
         name: &str,
         renderer: &mut Renderer,
     ) -> Result<(Loaded, PresetReport), EngineError> {
-        let flavor = match self.cfg.compat {
-            Compat::MilkDrop2 => Flavor::Md2,
-            Compat::ProjectM => Flavor::ProjectM,
+        let flavor = if self.cfg.compat.md2_family() {
+            Flavor::Md2
+        } else {
+            Flavor::ProjectM
         };
         let preset = Preset::parse_with(bytes, flavor)?;
         let mut report = PresetReport {
@@ -576,7 +577,6 @@ impl Engine {
             ..Default::default()
         };
         let gm = Arc::new(GlobalMemory::sharing_rng_with(&self.rng_owner));
-
         let env = self.init_env();
         let mut pf = PerFrame::new(&gm);
         let mut pp = PerPixel::new(&gm);
@@ -686,8 +686,7 @@ impl Engine {
         self.resolve_textures(renderer, &ifaces, &mut report);
         self.resolve_shape_images(renderer, &preset, &mut report);
 
-        let compat = self.cfg.compat;
-        let (warp_stream, comp_stream) = if compat == Compat::MilkDrop2 {
+        let (warp_stream, comp_stream) = if self.cfg.compat.rules().shared_shader_rand {
             // MD2 shares one random state between the passes.
             let shared = ShaderStream::new(self.cfg.seed, "shader_warp");
             (
@@ -737,13 +736,13 @@ impl Engine {
     }
 
     /// Translate the preset's shaders following the PSVERSION rules of projectM (MilkDrop 2 with
-    /// [`Compat::MilkDrop2`]).
+    /// [`crate::Compat::md2_family`]).
     fn build_shaders(
         &self,
         p: &Preset,
         report: &mut PresetReport,
     ) -> (Option<CompiledShader>, Option<CompiledShader>) {
-        let md2 = self.cfg.compat == Compat::MilkDrop2;
+        let md2 = self.cfg.compat.md2_family();
         // projectM lowers float `%` / `fmod` to GLSL `mod` (floor semantics); MD2/HLSL truncates. Its hlslparser also
         // parses, emits asin/acos and prints float literals differently from the D3DX compiler (`projectm_flavor`).
         let mut opts = HlslOptions::default();
@@ -1053,7 +1052,7 @@ impl Engine {
                     self.md2.as_mut(),
                 );
                 // `prepare_slot` builds `warp_uv` from the renderer's own mesh and `md2_blend` only with
-                // `Compat::MilkDrop2`, the two inputs the renderer can reject
+                // `Compat::md2_family`, the two inputs the renderer can reject
                 let _ = if blending {
                     act.renderer.render_frame_to_output(encoder, &fi)
                 } else {
@@ -1387,10 +1386,10 @@ fn eval_per_frame(
 /// The warp animation terms of the frame (`fWarpTime`, `fWarpScaleInv`, the four `f[]`).
 fn warp_anim(cx: &FrameCtx, base: &BaseValues) -> WarpAnim {
     let time = cx.clock.time as f32;
-    if cx.cfg.compat == Compat::MilkDrop2 {
-        WarpAnim::new(time, base.warp_anim_speed, base.warp_scale)
-    } else {
+    if cx.cfg.compat.rules().warp_anim_projectm {
         WarpAnim::projectm(time, base.warp_anim_speed, base.warp_scale)
+    } else {
+        WarpAnim::new(time, base.warp_anim_speed, base.warp_scale)
     }
 }
 
@@ -1448,7 +1447,7 @@ fn frame_head(
     wrap_snap: Option<f32>,
 ) -> FrameInput {
     let (cfg, audio, clock, progress) = (cx.cfg, cx.audio, cx.clock, cx.progress);
-    let md2 = cfg.compat == Compat::MilkDrop2;
+    let frame_vars = cfg.compat.rules().frame_vars_drive_post;
     let time = clock.time as f32;
     let mut fi = FrameInput {
         time: f64::from(time),
@@ -1486,7 +1485,7 @@ fn frame_head(
         None => pf.ctx.get(vars.wrap) > 0.0001,
     };
     fi.post.fshader = base.shader;
-    if md2 {
+    if frame_vars {
         fi.post.gamma = f32v(vars.gamma);
         fi.post.echo_zoom = f32v(vars.echo_zoom);
         fi.post.echo_alpha = f32v(vars.echo_alpha);
@@ -1546,7 +1545,7 @@ fn frame_head(
 
     // ---- main waveform -----------------------------------------------------------------
     let mw = &mut fi.main_wave;
-    let (mode_mod, thick, dots, additive) = if md2 {
+    let (mode_mod, thick, dots, additive) = if frame_vars {
         (
             18,
             pf.ctx.get(vars.wave_thick) != 0.0,
@@ -1558,7 +1557,7 @@ fn frame_head(
         // `waveMode % WaveformMode::Count` (16 modes incl. the Milkdrop2077 additions).
         (16, base.wave_thick, base.wave_dots, base.additive_waves)
     };
-    let mode_src = if md2 {
+    let mode_src = if frame_vars {
         pf.ctx.get(vars.wave_mode) as i32
     } else {
         base.wave_mode
@@ -1709,11 +1708,11 @@ fn finish_frame(
     last: &mut LastFrame,
     fi: &mut FrameInput,
 ) {
-    let md2 = cx.cfg.compat == Compat::MilkDrop2;
+    let shared = cx.cfg.compat.rules().shared_shader_rand;
     let time = cx.clock.time as f32;
-    let drop = !md2;
+    let drop = !shared;
     let (mut warp_r, mut comp_r) = (None, None);
-    if md2 {
+    if shared {
         // one shared stream: draw once per frame
         if let Some(s) = l.warp_stream.as_mut() {
             let p = s.frame(time, drop);

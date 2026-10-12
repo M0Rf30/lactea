@@ -41,6 +41,14 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | custom wave / shape slots that run | 4 each (`CustomWaveformCount`, `CustomShapeCount`; slots 4..15 are ignored) | 16 each |
 /// | warp shader `sampler_main` (first `main` sampler in name order) | filter linear, address from `bTexWrap` (`WarpedBlit` rebinds unit 0) | whatever the shader's sampler prefix says |
 /// | preset change (`Transition::Soft`) | image-space cross-fade of two independently rendered presets by one of six built-in transition shaders (`md2_preset_blend = false`) | MD2's own blend inside one frame pipeline: both states' equations run, per-vertex UVs blended by a random pattern, old/new shaders drawn as alpha-tiled passes (`md2_preset_blend = true`) |
+/// | gamma / echo / filter flags / main-wave mode and flags (`frame_vars_drive_post`) | the preset's initial values | the per-frame variable values |
+/// | shader random streams (`shared_shader_rand`) | separate warp / comp streams, constructor draws after `rand_preset` | one shared stream per preset |
+/// | warp animation terms (`warp_anim_projectm`) | projectM's `y` sign and GPU `pow` | MD2's |
+/// | `shapecode_N_image` key (`custom_shape_image`) | read | not a key (stays in `extra`) |
+/// | no-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
+///
+/// `MilkDrop3` is `MilkDrop2` plus the MilkDrop 3 deltas (see `docs/md3.md`); every MD3 delta is a field of
+/// [`CompatRules`], and [`Compat::md2_family`] is true for both variants.
 ///
 /// Not switchable (identical in both): blur chain, blur source (previous frame image), blur
 /// min/max "push apart" typo.
@@ -51,6 +59,9 @@ pub enum Compat {
     ProjectM,
     /// MilkDrop 2's behaviour (Direct3D 9 semantics).
     MilkDrop2,
+    /// MilkDrop 3 (3.37) behaviour: MilkDrop 2 / BeatDrop rules plus the MilkDrop 3 deltas. MD3 is closed source;
+    /// its behaviour is implemented from clean-room specs, see `docs/md3.md`.
+    MilkDrop3,
 }
 
 /// The individual behaviours selected by a [`Compat`] value (see the table there for the
@@ -162,6 +173,19 @@ pub struct CompatRules {
     /// `m_OldShaders`). projectM instead renders both presets to their own images and blends the finished images with
     /// one of six transition shaders ([`TransitionKind`](crate::TransitionKind)).
     pub md2_preset_blend: bool,
+    /// `gamma`, `echo_*`, `brighten` / `darken` / `solarize` / `invert` and the main wave's `wave_mode` /
+    /// `wave_thick` / `wave_usedots` / `wave_additive` take the per-frame variable values instead of the preset's
+    /// initial values (projectM reads the file values).
+    pub frame_vars_drive_post: bool,
+    /// The warp and composite shaders share one random stream per preset (drawn once per frame); projectM keeps one
+    /// stream per pass and consumes the constructor draws after `rand_preset`.
+    pub shared_shader_rand: bool,
+    /// The warp animation terms use projectM's `y` sign and GPU-style `pow` (`WarpAnim::projectm`) instead of MD2's.
+    pub warp_anim_projectm: bool,
+    /// `shapecode_N_image` (projectM addition) names a user texture a textured shape samples.
+    pub custom_shape_image: bool,
+    /// The no-shader composite pass samples the feedback image with the `Wrap` address mode; otherwise `Clamp`.
+    pub noshader_comp_wrap: bool,
 }
 
 impl Compat {
@@ -207,6 +231,11 @@ impl Compat {
                 custom_slots: 4,
                 warp_main_sampler_from_wrap: true,
                 md2_preset_blend: false,
+                frame_vars_drive_post: false,
+                shared_shader_rand: false,
+                warp_anim_projectm: true,
+                custom_shape_image: true,
+                noshader_comp_wrap: false,
             },
             Compat::MilkDrop2 => CompatRules {
                 vol_is_comma_bug: true,
@@ -247,8 +276,23 @@ impl Compat {
                 custom_slots: 16,
                 warp_main_sampler_from_wrap: false,
                 md2_preset_blend: true,
+                frame_vars_drive_post: true,
+                shared_shader_rand: true,
+                warp_anim_projectm: false,
+                custom_shape_image: false,
+                noshader_comp_wrap: true,
+            },
+            // The MilkDrop 3 deltas go here, one `CompatRules` field each.
+            Compat::MilkDrop3 => CompatRules {
+                ..Compat::MilkDrop2.rules()
             },
         }
+    }
+
+    /// MilkDrop 2 or MilkDrop 3: the modes that run the whole MilkDrop 2 code path (preset importer, shader
+    /// translation, soft-cut machinery). Individual behaviours are [`CompatRules`] fields, not this.
+    pub fn md2_family(self) -> bool {
+        matches!(self, Compat::MilkDrop2 | Compat::MilkDrop3)
     }
 }
 
@@ -349,3 +393,15 @@ impl std::fmt::Display for RenderError {
     }
 }
 impl std::error::Error for RenderError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn md2_family_is_md2_and_md3() {
+        assert!(!Compat::ProjectM.md2_family());
+        assert!(Compat::MilkDrop2.md2_family());
+        assert!(Compat::MilkDrop3.md2_family());
+    }
+}

@@ -1154,7 +1154,7 @@ mod tests {
             l: 0.9,
             rgba: [1.0; 4],
         };
-        for compat in [Compat::MilkDrop2, Compat::ProjectM] {
+        for compat in [Compat::MilkDrop2, Compat::MilkDrop3, Compat::ProjectM] {
             let rules = compat.rules();
             let l = motion_vector_lines(&mv, &g, &uv, 640, 360, &rules);
             assert_eq!(l.len() % 2, 0);
@@ -1188,7 +1188,7 @@ mod tests {
             l: 1.0,
             rgba: [1.0; 4],
         };
-        for compat in [Compat::MilkDrop2, Compat::ProjectM] {
+        for compat in [Compat::MilkDrop2, Compat::MilkDrop3, Compat::ProjectM] {
             let l = motion_vector_lines(&mv, &g, &uv, 640, 360, &compat.rules());
             for p in l.chunks(2) {
                 let d0 = (p[0][0].powi(2) + p[0][1].powi(2)).sqrt();

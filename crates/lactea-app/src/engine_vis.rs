@@ -68,6 +68,7 @@ impl EngineVisualizer {
             compat: match opts.compat {
                 CompatArg::Projectm => Compat::ProjectM,
                 CompatArg::Milkdrop2 => Compat::MilkDrop2,
+                CompatArg::Milkdrop3 => Compat::MilkDrop3,
             },
             output_format: format,
             sample_rate,

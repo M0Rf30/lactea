@@ -14,7 +14,8 @@
 // can allocate and are rejected with `LACTEA_STATUS_INVALID_ARGUMENT`.
 #define LACTEA_MAX_DIMENSION 16384
 
-// Which implementation to follow where projectM and MilkDrop 2 differ (`docs/divergences.md`).
+// Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ (`docs/divergences.md`,
+// `docs/md3.md`).
 enum LacteaCompat
 #if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : int32_t
@@ -24,6 +25,8 @@ enum LacteaCompat
   LACTEA_COMPAT_PROJECTM = 0,
   // Follow MilkDrop 2.
   LACTEA_COMPAT_MILKDROP2 = 1,
+  // Follow MilkDrop 3.
+  LACTEA_COMPAT_MILKDROP3 = 2,
 };
 #ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L

@@ -59,7 +59,7 @@ panic) is logged and skipped in the direction of travel. The window title shows
 --no-vsync             Mailbox/Immediate instead of Fifo
 --size WxH [--pixels]  initial window size, logical (HiDPI) units unless --pixels
 --fullscreen
---visualizer engine|scope   --seed N   --compat projectm|milkdrop2   --mesh WxH
+--visualizer engine|scope   --seed N   --compat projectm|milkdrop2|milkdrop3   --mesh WxH
 --texture-dir DIR      (repeatable; searched before the defaults)
 --capture-device NAME  cpal input (name, substring or id like alsa:default); implies cpal
 --audio-backend auto|pipewire|cpal     --pipewire-target NODE

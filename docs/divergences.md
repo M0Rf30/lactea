@@ -2,7 +2,9 @@
 
 lactea defaults to projectM behaviour (the measurement oracle) and implements the MilkDrop 2
 behaviour behind `Compat::MilkDrop2` (render) / `AnalysisMode::BeatDrop` (audio). MD2
-references are to `third_party/md2/`.
+references are to `third_party/md2/`. `Compat::MilkDrop3` is MilkDrop 2 plus the MilkDrop 3 deltas:
+every column below headed "MilkDrop 2" applies to it too, and its own differences are listed in
+[`md3.md`](md3.md).
 
 ## Render (`lactea-render`, `Compat`)
 
@@ -47,6 +49,8 @@ references are to `third_party/md2/`.
 | Hard cut / `Soft { seconds <= 0 }` while a blend runs | n/a | ends the blend at once (`Default()` clears `m_bBlending`), usual cut path |
 | `progress` / `m_fSnapPoint` / blend-frame `wrap` | n/a | blend frames: `progress` as above; sampler address `wrap > m_fSnapPoint` (snap point 0.5 / -0.01 / 1.01 by the shader flags); unblended MD2 frames keep `wrap > 0.0001` |
 | Shader translation failure during a blend | n/a | counts as "no shader" for the pass table and snap point (MD2 would draw its fallback shader) |
+| No-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
+| `shapecode_N_image` (`custom_shape_image`) | read (projectM addition) | not a key; the line stays in `Preset::extra` |
 
 Shared quirk kept without a switch (present in both): `GetSafeBlurMinMax` typo (`max = avg - 0.05`).
 Deliberately not copied: MD2's one-frame lag of comp-shader blur usage (`m_nHighestBlurTexUsedThisFrame`).
@@ -62,7 +66,7 @@ Deliberately not copied: MD2's one-frame lag of comp-shader blur usage (`m_nHigh
 Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels ignored. See
 `docs/audio.md` for the full table.
 
-## Preset parsing
+## Preset parsing and expressions
 
-None known: `lactea-preset` reproduces MD2's import (`state.cpp`) byte-for-byte; see
-`docs/preset.md` for the reproduced quirks.
+`lactea-preset` reproduces MD2's import (`state.cpp`) byte-for-byte (`docs/preset.md` lists the quirks);
+`Flavor::Md2` serves the whole MD2 family, `Flavor::ProjectM` is projectM's `PresetFileParser`.

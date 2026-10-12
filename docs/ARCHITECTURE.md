@@ -64,7 +64,7 @@ pass. Blur levels are computed after the warp pass but from the *previous* frame
 image before the warp.
 
 Where projectM and MD2 differ, lactea defaults to projectM (the measurement oracle) and keeps
-the MD2 behaviour behind `Compat::MilkDrop2`; every case is listed in `docs/divergences.md`.
+the MD2 behaviour behind `Compat::MilkDrop2` (`Compat::MilkDrop3` adds the MD3 deltas on top, `docs/md3.md`); every case is listed in `docs/divergences.md`.
 
 ## Fidelity ladder (each rung isolates one source of error)
 

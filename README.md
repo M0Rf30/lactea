@@ -14,8 +14,8 @@ GL, WebGPU). It ships as:
 ## Features
 
 - Reads the whole `.milk` format (versions 1 and 2, custom waves and shapes, per-frame and
-  per-vertex code, warp and composite shaders) with MilkDrop 2 or projectM semantics
-  (`Compat::{ProjectM, MilkDrop2}`).
+  per-vertex code, warp and composite shaders) with MilkDrop 2, MilkDrop 3 or projectM semantics
+  (`Compat::{ProjectM, MilkDrop2, MilkDrop3}`, see [`docs/md3.md`](docs/md3.md)).
 - Native expression engine, HLSL-to-WGSL shader translator and JPEG decoder; no C dependencies.
 - Soft and hard preset transitions, playlist/shuffle/history logic, projectM-style runtime parameters.
 - Deterministic by construction: same preset, audio and seed give the same pixels.

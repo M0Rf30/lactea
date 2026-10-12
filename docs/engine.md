@@ -3,7 +3,7 @@
 `crates/lactea` is the CPU side of MilkDrop 2's `RenderFrame` (`milkdropfs.cpp` + `state.cpp`):
 preset → expression contexts → per-frame / per-vertex / waves / shapes → `lactea-render`.
 It behaves like **projectM** (the measurement oracle) where projectM and MD2 differ
-(`Compat::ProjectM`, default); `Compat::MilkDrop2` keeps MD2's behaviour. Source read for
+(`Compat::ProjectM`, default); `Compat::MilkDrop2` keeps MD2's behaviour and `Compat::MilkDrop3` is MD2 plus the MilkDrop 3 deltas (`docs/md3.md`). Source read for
 behaviour, not transliterated: projectM `MilkdropPreset/*` (`PerFrameContext`, `PerPixelMesh`,
 `CustomWaveform`, `CustomShape`, `MilkdropShader`, `FinalComposite`, ...).
 
@@ -240,7 +240,7 @@ injects the previous `main` image. Frames 0..n-1 still run so megabuf and expres
 ```
 fdrender --preset P --audio WAV --out DIR [--size 640x360] [--mesh 48x36] [--fps 60] [--frames 300]
          [--seed 1] [--texel-offset 0,0] [--stages final,main,warped,blur1,blur2,blur3|all|none]
-         [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2]
+         [--vars] [--textures] [--texture-dir DIR] [--teacher REF] [--inject-noise REF] [--compat projectm|md2|md3]
 ```
 
 Same flags and output layout as `oracle/refrender` (`lactea_abi::dump`, producer

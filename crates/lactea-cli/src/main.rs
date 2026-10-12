@@ -89,7 +89,7 @@ struct Args {
     /// use the noise textures of an oracle dump directory (free run)
     #[arg(long)]
     inject_noise: Option<PathBuf>,
-    /// projectm (default) | md2
+    /// projectm (default) | md2 | md3
     #[arg(long, default_value = "projectm")]
     compat: String,
     /// line/point rasteriser: native | emulated | quads (default: the renderer's default)
@@ -243,7 +243,8 @@ fn run(args: &Args) -> Result<i32> {
     let compat = match args.compat.as_str() {
         "projectm" => Compat::ProjectM,
         "md2" => Compat::MilkDrop2,
-        o => bail!("--compat: expected projectm|md2, got {o:?}"),
+        "md3" => Compat::MilkDrop3,
+        o => bail!("--compat: expected projectm|md2|md3, got {o:?}"),
     };
     if width == 0 || height == 0 || args.fps == 0 {
         bail!("size and fps must be positive");

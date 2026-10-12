@@ -9,7 +9,6 @@ use super::Engine;
 use crate::PresetReport;
 use crate::textures::{Image, shape_image};
 use lactea_preset::Preset;
-use lactea_render::Compat;
 use std::collections::HashSet;
 
 impl Engine {
@@ -17,17 +16,18 @@ impl Engine {
     /// the first draw; whether a shape is textured can depend on its per-frame code, so every enabled
     /// shape with an `image=` counts). Names the provider cannot supply are reported in
     /// `unresolved_textures`; the renderer then draws a 1x1 black placeholder like projectM.
-    /// `Compat::MilkDrop2` has no such key (the preset parser leaves it in `extra`).
+    /// The MilkDrop 2 family has no such key (`CompatRules::custom_shape_image`; the preset parser leaves it in `extra`).
     pub(super) fn resolve_shape_images(
         &mut self,
         renderer: &mut lactea_render::Renderer,
         preset: &Preset,
         report: &mut PresetReport,
     ) {
-        if self.cfg.compat == Compat::MilkDrop2 {
+        let rules = self.cfg.compat.rules();
+        if !rules.custom_shape_image {
             return;
         }
-        let slots = self.cfg.compat.rules().custom_slots;
+        let slots = rules.custom_slots;
         let mut seen: HashSet<String> = HashSet::new();
         for shape in preset.shapes.iter().take(slots).filter(|s| s.enabled != 0) {
             let Some(im) = shape_image(&shape.image) else {

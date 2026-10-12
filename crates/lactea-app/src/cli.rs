@@ -36,13 +36,15 @@ pub enum AudioBackend {
     Cpal,
 }
 
-/// Which renderer a difference between projectM and MilkDrop 2 resolves to (engine only).
+/// Which renderer a difference between projectM, MilkDrop 2 and MilkDrop 3 resolves to (engine only).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum CompatArg {
     /// projectM behaviour (the measurement oracle; default).
     Projectm,
     /// MilkDrop 2 behaviour.
     Milkdrop2,
+    /// MilkDrop 3 behaviour (MilkDrop 2 plus the MD3 deltas, `docs/md3.md`).
+    Milkdrop3,
 }
 
 fn parse_size(s: &str) -> Result<(u32, u32), String> {

@@ -19,7 +19,7 @@
 //!    `ShowToUser_NoShaders`: video echo, gamma, brighten/darken/solarize/invert),
 //! 6. blit `final` to the host target (sRGB-compensated if needed).
 //!
-//! With `Compat::MilkDrop2` the engine may hand over [`Md2Blend`] data (`FrameInput::md2_blend`): MilkDrop 2's own
+//! With `Compat::MilkDrop2` / `Compat::MilkDrop3` the engine may hand over [`Md2Blend`] data (`FrameInput::md2_blend`): MilkDrop 2's own
 //! preset blend, where steps 2, 4 and 5 run once or twice (old and new shader, alpha-tiled) on a blended warp mesh.
 //!
 //! Where MilkDrop 2 and projectM differ, [`Compat`] picks the behaviour (default projectM).

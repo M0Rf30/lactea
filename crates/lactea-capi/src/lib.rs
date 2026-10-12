@@ -50,7 +50,8 @@ pub enum LacteaStatus {
     Panic = -4,
 }
 
-/// Which implementation to follow where projectM and MilkDrop 2 differ (`docs/divergences.md`).
+/// Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ (`docs/divergences.md`,
+/// `docs/md3.md`).
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LacteaCompat {
@@ -58,6 +59,8 @@ pub enum LacteaCompat {
     Projectm = 0,
     /// Follow MilkDrop 2.
     Milkdrop2 = 1,
+    /// Follow MilkDrop 3.
+    Milkdrop3 = 2,
 }
 
 /// Construction parameters. Fill with `lactea_config_default` and override fields.
@@ -357,6 +360,7 @@ unsafe fn engine_config(config: *const LacteaConfig) -> Option<EngineConfig> {
         cfg.seed = c.seed;
         cfg.compat = match c.compat {
             LacteaCompat::Milkdrop2 => Compat::MilkDrop2,
+            LacteaCompat::Milkdrop3 => Compat::MilkDrop3,
             LacteaCompat::Projectm => Compat::ProjectM,
         };
         cfg.sample_rate = c.sample_rate;

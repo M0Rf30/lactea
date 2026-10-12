@@ -1,6 +1,6 @@
 # lactea architecture and fidelity contract
 
-lactea is a pure-Rust MilkDrop 2 / projectM-compatible visualizer: a library that renders
+lactea is a pure-Rust MilkDrop 2/3 and projectM-compatible visualizer: a library that renders
 into any host-provided wgpu texture, plus a standalone app. Fidelity is **measured**, never
 eyeballed: every layer has an oracle and a numeric gate from day 0.
 

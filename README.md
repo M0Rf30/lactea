@@ -2,7 +2,7 @@
 
 # Lactea
 
-A pure-Rust MilkDrop 2 / projectM-compatible music visualizer built on wgpu (Vulkan, Metal, DX12,
+A pure-Rust MilkDrop 2/3 and projectM-compatible music visualizer built on wgpu (Vulkan, Metal, DX12,
 GL, WebGPU). It ships as:
 
 - **a library** (`lactea`) that renders into any wgpu texture the host provides. It opens no

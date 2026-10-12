@@ -67,7 +67,7 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
-/// lactea: MilkDrop 2 / projectM-compatible music visualizer.
+/// lactea: MilkDrop 2/3 and projectM-compatible music visualizer.
 ///
 /// Keys: N/Right/Space next preset, P/Left previous, R random, L lock/unlock auto-advance,
 /// F/F11 (or double-click) fullscreen, Esc/Q quit.

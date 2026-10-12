@@ -2,7 +2,7 @@
 Type=Application
 Name=Lactea
 GenericName=Music Visualizer
-Comment=MilkDrop 2 / projectM-compatible music visualizer
+Comment=MilkDrop 2/3 and projectM-compatible music visualizer
 Exec=lactea
 Icon=lactea
 Terminal=false

@@ -72,6 +72,8 @@ pub struct App {
     /// An MD3 auto hard cut was asked for by the last rendered frame; the next frame loads the next
     /// preset with a hard cut (ignored while the browser is locked).
     pending_auto_cut: bool,
+    /// `--screenshot` was written; a run that ends without it is an error.
+    screenshot_saved: bool,
 }
 
 /// Preset list from the CLI: `--preset` first, then every `--dir` (or the first existing default
@@ -125,13 +127,34 @@ fn auto_hard_cut_label(mode: u8) -> String {
     }
 }
 
+/// Explicit `--preset` / `--dir` arguments that do not exist are usage errors, reported before a
+/// window opens (a missing default directory is not: the idle preset is shown then).
+fn check_inputs(args: &Args) -> Result<(), String> {
+    if let Some(p) = &args.preset
+        && !p.is_file()
+    {
+        return Err(format!("--preset {}: no such file", p.display()));
+    }
+    if let Some(d) = args.dir.iter().find(|d| !d.is_dir()) {
+        return Err(format!("--dir {}: no such directory", d.display()));
+    }
+    Ok(())
+}
+
 pub fn run(args: Args) -> anyhow::Result<()> {
+    args.validate().map_err(anyhow::Error::msg)?;
+    check_inputs(&args).map_err(anyhow::Error::msg)?;
     let presets_list = collect_presets(&args);
     if presets_list.is_empty() && args.visualizer != VisualizerKind::Scope {
-        anyhow::bail!(
-            "no presets: pass --preset FILE or --dir DIR (no .milk files in the default directories {:?})",
-            presets::default_preset_dirs()
-        );
+        if args.dir.is_empty() && args.preset.is_none() {
+            log::warn!(
+                "no presets found (no --preset/--dir given; looked in the default directories {:?}): \
+                 showing the idle preset",
+                presets::default_preset_dirs()
+            );
+        } else {
+            log::warn!("no presets found: showing the idle preset");
+        }
     }
     log::info!("{} preset(s)", presets_list.len());
 
@@ -143,7 +166,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
             .collect(),
         None => VecDeque::new(),
     };
-    let audio = AudioFeed::open(&args);
+    let audio = AudioFeed::open(&args).map_err(anyhow::Error::msg)?;
     log::info!("audio input: {}", audio.describe());
 
     let event_loop = EventLoop::new()?;
@@ -154,10 +177,19 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let mut app = App::new(args, instance, presets_list, audio);
     app.script = script;
     event_loop.run_app(&mut app)?;
-    match app.error.take() {
-        Some(e) => Err(anyhow::anyhow!(e)),
-        None => Ok(()),
+    if let Some(e) = app.error.take() {
+        return Err(anyhow::anyhow!(e));
     }
+    if let Some(path) = &app.args.screenshot
+        && !app.screenshot_saved
+    {
+        anyhow::bail!(
+            "--screenshot {}: the run ended before frame {} was rendered",
+            path.display(),
+            app.args.screenshot_frame
+        );
+    }
+    Ok(())
 }
 
 impl App {
@@ -177,11 +209,21 @@ impl App {
         let deterministic = args.deterministic;
         let fps_cap = args.fps.or(if deterministic { Some(60) } else { None });
         let period = fps_cap.map(|f| Duration::from_secs_f64(1.0 / f.max(1) as f64));
+        let browser_seed = presets::browser_seed(
+            args.seed,
+            deterministic,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        if args.seed.is_none() && !deterministic {
+            log::info!("preset order seed {browser_seed} (--seed {browser_seed} reproduces it)");
+        }
         let mut presets = PresetBrowser::new(
             entries,
             args.shuffle,
             Duration::from_secs_f64(args.duration.max(0.0)),
-            args.seed as u64,
+            u64::from(browser_seed),
         );
         if args.compat.md3() {
             presets.set_md3_time(
@@ -223,6 +265,7 @@ impl App {
             refresh_mhz: None,
             refresh_checked: None,
             pending_auto_cut: false,
+            screenshot_saved: false,
         }
     }
 
@@ -279,7 +322,7 @@ impl App {
                     self.audio.sample_rate(),
                     textures,
                     &crate::engine_vis::EngineOptions {
-                        seed: self.args.seed,
+                        seed: self.args.engine_seed(),
                         fps: self.args.fps.unwrap_or(60),
                         preset_duration: self.args.duration,
                         compat: self.args.compat,
@@ -373,17 +416,16 @@ impl App {
 
     // ---- presets --------------------------------------------------------------------------
 
-    /// Read + load one preset, containing GPU validation errors and panics.
-    fn load_entry(run: &mut Running, entry: &PresetEntry, change: Change) -> Result<(), String> {
-        let bytes =
-            std::fs::read(&entry.path).map_err(|e| format!("{}: {e}", entry.path.display()))?;
+    /// Run `f` on the visualizer, containing GPU validation errors and panics.
+    fn guarded(
+        run: &mut Running,
+        f: impl FnOnce(&mut dyn Visualizer) -> Result<(), String>,
+    ) -> Result<(), String> {
         let scope = run
             .gfx
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            run.viz.load_preset(&bytes, &entry.name, change)
-        }));
+        let result = catch_unwind(AssertUnwindSafe(|| f(run.viz.as_mut())));
         let gpu_err = pollster::block_on(scope.pop());
         match result {
             Err(_) => Err("engine panicked while loading the preset".into()),
@@ -392,6 +434,20 @@ impl App {
                 Some(e) => Err(format!("GPU validation error: {e}")),
                 None => Ok(()),
             },
+        }
+    }
+
+    /// Read + load one preset, containing GPU validation errors and panics.
+    fn load_entry(run: &mut Running, entry: &PresetEntry, change: Change) -> Result<(), String> {
+        let bytes =
+            std::fs::read(&entry.path).map_err(|e| format!("{}: {e}", entry.path.display()))?;
+        Self::guarded(run, |viz| viz.load_preset(&bytes, &entry.name, change))
+    }
+
+    /// Nothing could be loaded: show the visualizer's idle preset rather than black.
+    fn show_idle(run: &mut Running) {
+        if let Err(e) = Self::guarded(run, |viz| viz.load_idle()) {
+            log::error!("{e}");
         }
     }
 
@@ -427,7 +483,13 @@ impl App {
         } else {
             self.presets.pick(nav)
         };
-        let Some(mut idx) = start else { return };
+        let Some(mut idx) = start else {
+            // an empty list (nothing found to play)
+            self.presets.stall();
+            Self::show_idle(run);
+            self.update_title(run, true);
+            return;
+        };
         // the very first preset starts at once; every other change blends (`--transition-duration`)
         let change = if first || force_cut || self.args.transition_duration <= 0.0 {
             Change::Cut
@@ -473,6 +535,12 @@ impl App {
                                 "none of the {} preset(s) could be loaded",
                                 self.presets.len()
                             );
+                            // no retry until the user navigates; with nothing on screen show the
+                            // idle preset instead of black
+                            self.presets.stall();
+                            if self.presets.current().is_none() {
+                                Self::show_idle(run);
+                            }
                             break;
                         }
                     }
@@ -506,7 +574,10 @@ impl App {
         let now = Instant::now();
         match action {
             Action::Quit => el.exit(),
-            Action::Navigate(nav) => self.switch(&mut run, nav, now),
+            Action::Navigate(nav) => {
+                self.presets.resume();
+                self.switch(&mut run, nav, now);
+            }
             Action::CycleAutoHardCut => match run.viz.auto_hard_cut_mode() {
                 None => log::info!(
                     "auto hard cut needs a MilkDrop 3 preset (--compat milkdrop3, or auto on one)"
@@ -603,6 +674,7 @@ impl App {
         };
         let preset = match (self.presets.current(), self.presets.current_entry()) {
             (Some(i), Some(e)) => format!("{}{compat} [{}/{}]", e.name, i + 1, self.presets.len()),
+            _ if self.presets.stalled() => "idle preset".to_string(),
             _ => "no preset".to_string(),
         };
         let hardcut = match run.viz.auto_hard_cut_mode() {
@@ -750,7 +822,7 @@ impl App {
         let auto_cut = std::mem::take(&mut self.pending_auto_cut)
             && !self.presets.locked()
             && self.presets.len() > 1;
-        if self.presets.current().is_none() && !self.presets.is_empty() {
+        if self.presets.first_load_due() {
             self.switch(&mut run, Nav::Next, now);
         } else if auto_cut {
             log::debug!("preset switch requested: auto hard cut");
@@ -812,6 +884,7 @@ impl App {
                     });
                     match saved {
                         Ok((w, h)) => {
+                            self.screenshot_saved = true;
                             log::info!(
                                 "screenshot of frame {} ({w}x{h}) saved to {}",
                                 self.frame,
@@ -924,5 +997,40 @@ mod tests {
         assert_eq!(seen, [0, 1, 2, 3, 4, 5, 6, 7, 0]);
         // out of range (the engine clamps, so it never reports it) restarts at off
         assert_eq!(next_auto_hard_cut(200), 0);
+    }
+
+    fn parse(args: &[&str]) -> Args {
+        use clap::Parser;
+        Args::try_parse_from(std::iter::once("lactea").chain(args.iter().copied())).unwrap()
+    }
+
+    /// A `--preset` that does not exist used to open a black window that retried every frame and
+    /// exited 0; it is now rejected before a window exists.
+    #[test]
+    fn missing_preset_or_dir_is_a_usage_error() {
+        let e = check_inputs(&parse(&["--preset", "/nonexistent/x.milk"])).unwrap_err();
+        assert_eq!(e, "--preset /nonexistent/x.milk: no such file");
+        let e = check_inputs(&parse(&["--dir", "/nonexistent"])).unwrap_err();
+        assert_eq!(e, "--dir /nonexistent: no such directory");
+        let here = std::env::temp_dir();
+        let here = here.to_str().unwrap();
+        assert!(check_inputs(&parse(&["--dir", here])).is_ok());
+        assert!(check_inputs(&parse(&[])).is_ok());
+    }
+
+    /// `--deterministic` promises a run that is a pure function of its inputs; an unreadable WAV
+    /// must not degrade to wall-clock time.
+    #[test]
+    fn unreadable_audio_wav_or_file_is_an_error() {
+        let wav = parse(&["--deterministic", "--audio-wav", "/nonexistent/a.wav"]);
+        let e = AudioFeed::open(&wav).err().expect("must fail");
+        assert!(e.starts_with("--audio-wav: "), "{e}");
+        let file = parse(&["--audio-file", "/nonexistent/a.mp3"]);
+        let e = AudioFeed::open(&file).err().expect("must fail");
+        assert!(e.starts_with("--audio-file: "), "{e}");
+        assert!(matches!(
+            AudioFeed::open(&parse(&["--no-audio"])),
+            Ok(AudioFeed::Silent)
+        ));
     }
 }

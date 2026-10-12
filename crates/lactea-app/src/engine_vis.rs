@@ -206,6 +206,17 @@ impl Visualizer for EngineVisualizer {
         }
     }
 
+    fn load_idle(&mut self) -> Result<(), String> {
+        match self.engine.load_idle_preset() {
+            Ok(report) => {
+                log::info!("no preset could be loaded: showing the built-in idle preset");
+                log_report(&report);
+                Ok(())
+            }
+            Err(e) => Err(format!("idle preset: {e}")),
+        }
+    }
+
     fn push_pcm(&mut self, interleaved: &[f32], channels: usize) {
         self.engine.push_pcm_f32(interleaved, channels);
     }

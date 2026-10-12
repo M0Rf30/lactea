@@ -172,6 +172,14 @@ pub unsafe extern "C" fn lactea_create_vulkan(
         cfg.output_format = format;
         match unsafe { imp::open_device(host) } {
             Ok((device, queue)) => {
+                if let Err(msg) = crate::check_dimensions(
+                    cfg.width,
+                    cfg.height,
+                    device.limits().max_texture_dimension_2d,
+                ) {
+                    crate::set_error(msg);
+                    return std::ptr::null_mut();
+                }
                 crate::build_engine(cfg, device, queue, None, Some(VulkanState { format }))
             }
             Err(e) => {
@@ -204,7 +212,7 @@ pub unsafe extern "C" fn lactea_render_to_vk_image(
     frame: u32,
     wait: bool,
 ) -> LacteaStatus {
-    guard(|| {
+    crate::guard_delivering(engine, || {
         let Some(e) = (unsafe { engine.as_mut() }) else {
             return fail(LacteaStatus::InvalidArgument, "engine is NULL");
         };

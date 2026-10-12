@@ -58,11 +58,16 @@ depends on a pinned git fork of symphonia, which crates.io does not accept.
 | F8 | cycle the MD3 auto hard cut mode off, 1 ... 7, off (MilkDrop 3 mode only: `--compat milkdrop3`, or `auto` on a MilkDrop 3 preset; logs `auto hard cut needs a MilkDrop 3 preset ...` otherwise) |
 
 Auto-advance every `--duration S` (default 30, 0 = never) unless locked; `--shuffle` picks the next
-preset at random. Every preset change after the first (auto-advance, N / P / R / arrows) is a **soft cut**:
+preset at random. The random stream (shuffle, R) is seeded from the clock, so the order differs on every launch;
+the log prints `preset order seed N`, and `--seed N` reproduces it (`--seed` also seeds the engine; `--deterministic`
+without `--seed` uses 1). Every preset change after the first (auto-advance, N / P / R / arrows) is a **soft cut**:
 the engine blends the old and the new preset over `--transition-duration S` seconds (default 3, projectM's
 `m_softCutDuration`; 0 = hard cuts) while both keep running; the first preset appears at once. A preset that fails to
 load (parse/compile error, GPU validation error, engine
-panic) is logged and skipped in the direction of travel. The window title shows
+panic) is logged and skipped in the direction of travel. When a whole round fails (nothing is showing yet) the app
+logs it once, shows the engine's built-in idle preset and does not retry until you navigate (N / P / R / arrows);
+with no presets found at all (no default directory, an empty directory) it also shows the idle preset.
+An explicit `--preset FILE` or `--dir DIR` that does not exist exits 1 before a window opens. The window title shows
 `preset [compat] [i/n] | LOCKED | hardcut<N> | audio status | fps` (`[compat]`, e.g. `[MilkDrop 3]`, only under `--compat auto`; `LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on). Every load also logs `preset <name>: compat <mode>` at info level.
 
 ### MD3 auto hard cuts (MilkDrop 3 mode)
@@ -95,15 +100,16 @@ host switches this on or off after each successful load, following the preset's 
 --no-vsync             Mailbox/Immediate instead of Fifo
 --size WxH [--pixels]  initial window size, logical (HiDPI) units unless --pixels
 --fullscreen
---visualizer engine|scope   --seed N   --compat auto|projectm|milkdrop2|milkdrop3   --mesh WxH
+--visualizer engine|scope   --seed N   --compat auto|projectm|milkdrop2|milkdrop3   --mesh WxH (both even)
 --texture-dir DIR      (repeatable; searched before the defaults)
---capture-device NAME  cpal input (name, substring or id like alsa:default); implies cpal
---audio-backend auto|pipewire|cpal     --pipewire-target NODE
---list-devices         cpal inputs/outputs + PipeWire sinks, then exit
---audio-file F [--loop] [--output-device NAME]   --audio-delay-ms MS
---audio-wav F --deterministic                    (needs both)
+--capture-device NAME  cpal input, or (Windows/macOS) output captured as loopback (name, substring or id)
+--audio-backend auto|pipewire|cpal|cpal-loopback     --pipewire-target NODE
+--list-devices         cpal inputs/outputs + PipeWire sinks (* = default, [loopback] = capturable output), then exit
+--audio-file F [--loop] [--output-device NAME]   [--audio-delay-ms MS] (needs --audio-file)
+--audio-wav F --deterministic                    (needs both; an unreadable WAV, like an unreadable --audio-file, exits 1)
 --no-audio
---exit-after S   --frames N   --screenshot F.png [--screenshot-frame N]   (testing/captures)
+--exit-after S   --frames N   --screenshot F.png [--screenshot-frame N]   (testing/captures; --screenshot-frame must be < --frames,
+                       and a run that ends before the screenshot is written exits 1)
 ```
 
 Logging: `RUST_LOG` (default `info`). `RUST_LOG=lactea=debug` adds per-second fps and audio
@@ -149,15 +155,46 @@ pipewire: capture stream node 81 <- 'lactea-test-sink' (fd_test_sink, node 84); 
 ```
 
 If the daemon goes away the thread reconnects every second. If PipeWire is unreachable at start the
-app falls back to cpal (`--audio-backend pipewire` makes it an error instead).
-`--pipewire-target NODE` sets `target.object` (WirePlumber falls back to the default sink for an
-unknown node).
+app falls back to cpal (`--audio-backend pipewire` or `--pipewire-target` make it an error instead).
+`--pipewire-target NODE` sets `target.object`; NODE is an exact `node.name` or `object.serial`. An
+unknown node is an error (`audio: FAILED (no PipeWire node ...)`), because WirePlumber would
+silently link the default sink instead. The log line names the node actually targeted.
 
 ### cpal (fallback, other OSes) — `src/audio/cpal_input.rs`
 
-Default input device, or `--capture-device NAME|ID` (exact id/name, then case-insensitive
-substring). 44.1 kHz stereo f32 is preferred when the device offers it, otherwise the default
-config is used and the visualizer gets that rate.
+Two kinds of capture device, chosen in `audio/devices.rs` (`default_capture_plan`):
+
+| kind | device | meaning |
+|---|---|---|
+| `input` | an input device | microphone, line in; on Linux also a Pulse/PipeWire monitor *source* |
+| `loopback` | an **output** device opened as an input | what that device plays |
+
+Loopback is what cpal 0.18 does when an output device is opened with `build_input_stream`: WASAPI
+sets `AUDCLNT_STREAMFLAGS_LOOPBACK` itself, CoreAudio builds a process tap plus aggregate device
+(macOS 14.6 or later; the first run asks for the audio-capture permission, and without it the
+stream delivers silence). ALSA and PulseAudio cannot open an output device for capture, so on Linux
+the cpal path stays input-only (PipeWire covers "what you hear" there). Selection:
+
+* `--audio-backend auto` (default) without PipeWire: **Windows/macOS** record the default output
+  device (`loopback`) and fall back to the default input device if that cannot be opened (a warning
+  says so); Linux records the default input device.
+* `--audio-backend cpal`: input devices only (the default input device), as before.
+* `--audio-backend cpal-loopback`: loopback of the default output, no fallback; an error on Linux.
+* `--capture-device NAME|ID` (exact id first, then case-insensitive substring of id/name/description)
+  searches the input devices, then on Windows/macOS the output devices. It cannot be combined with
+  `--audio-backend pipewire`.
+
+A duplex output device (headset, audio interface) cannot be captured as loopback on CoreAudio: cpal
+would record its input side. It is not offered as `[loopback]` and the default capture reports why.
+
+The log says which one is open: `audio: capturing Speakers [wasapi:...] (loopback; 2 ch, 48000 Hz,
+f32)`, and the title tag is `cpal-loopback` or `cpal`. An input capture prefers 44.1 kHz stereo f32
+when the device offers it, otherwise the default config is used and the visualizer gets that rate.
+A loopback always uses the output's own format: CoreAudio applies a requested rate to the physical
+device, which would reconfigure the user's speakers.
+
+Windows and macOS behaviour is not exercised by the Linux test suite: the selection logic
+(`default_capture_plan`, `loopback_unavailable`, name matching) is unit-tested, the device I/O is not.
 
 ### `--audio-file` — `src/audio/player.rs`
 

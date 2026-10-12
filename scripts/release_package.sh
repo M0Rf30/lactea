@@ -4,8 +4,9 @@
 #   scripts/release_package.sh linux|macos|windows [version]
 #
 # Writes dist/lactea-<version>-<platform>.tar.gz (.zip on windows) containing the app, the C library
-# (shared + static + import libs), include/lactea.h, the C examples, the desktop entry (linux) and the
-# README. `version` defaults to $VERSION, then `dev`. Used by .github/workflows/release.yml; running it
+# (shared + static + import libs), include/lactea.h, the C examples, the desktop entry (linux), the
+# README, LICENSE-MIT, LICENSE-APACHE and THIRD_PARTY_NOTICES.md. `version` defaults to $VERSION, then `dev`.
+# Used by .github/workflows/release.yml; running it
 # by hand after `cargo build --release -p lactea-app -p lactea-capi` is the local dry run of the
 # packaging step. CARGO_TARGET_DIR is honoured.
 set -euo pipefail
@@ -36,7 +37,7 @@ rm -rf "$dir" "dist/$name.tar.gz" "dist/$name.zip"
 mkdir -p "$dir/include" "$dir/examples"
 cp "$header" "$dir/include/"
 cp "$examples"/*.c "$dir/examples/"
-cp README.md "$dir/"
+cp README.md LICENSE-MIT LICENSE-APACHE THIRD_PARTY_NOTICES.md "$dir/"
 
 case "$platform" in
   linux)

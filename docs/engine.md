@@ -262,7 +262,8 @@ Same flags and output layout as `oracle/refrender` (`lactea_abi::dump`, producer
 `pcm_range(n, sr, fps)`, frame time exactly `n/fps`. `--texture-dir` default `oracle/build/texpack`
 (the pack the oracle used); JPEGs are decoded with the `image` crate (stb_image in projectM: ±1-2 code
 values). `--inject-noise REF` loads the oracle's `textures/noise*` (projectM's noise generation order is
-compiler-defined); `--teacher REF` implies it. Exit codes: 0 ok, 1 usage/IO, 2 preset load failure,
+compiler-defined); `--teacher REF` implies it. `--compat` takes projectm|md2|md3 (aliases milkdrop2, milkdrop3). Exit codes: 0 ok, 1 usage/IO (clap usage errors, a missing `--texture-dir`, `--switch-frame` not below `--frames`,
+transition flags without `--preset2`; `--help`/`--version` exit 0), 2 preset load failure,
 3 shader fallback (frames still rendered), 4 wgpu validation errors.
 
 Soft cuts (mirror of `refrender`'s transition flags): `--preset2 P --switch-frame N --soft-cut S [--start-clean 0|1]

@@ -36,8 +36,9 @@ GL, WebGPU). It ships as:
 | Rust library | `cargo add lactea` |
 
 Build prerequisites on Linux: Rust ≥ 1.88, `libasound2-dev` (cpal) and, for the default PipeWire
-capture, `libpipewire-0.3-dev` + `clang`. Without PipeWire (and on Windows/macOS) audio capture goes
-through cpal:
+capture, `libpipewire-0.3-dev` + `clang`. Without PipeWire audio capture goes through cpal: on
+Windows and macOS (14.6+) it records what the default output device plays (loopback), on Linux
+the default input device:
 
 ```sh
 cargo build --release -p lactea-app --no-default-features --features engine
@@ -53,7 +54,8 @@ lactea --dir /usr/share/projectM/presets
 lactea --audio-file song.flac --preset foo.milk
 ```
 
-Keys: N/→/Space next, P/← previous, R random, L lock, F/F11 fullscreen, Esc/Q quit. All options:
+Keys: N/→/Space next, P/← previous, R random, L lock, F/F11 fullscreen, D dump the pipeline stages as PNG, F8
+MD3 auto hard cut mode (`--compat milkdrop3`), Esc/Q quit. All options:
 [`docs/app.md`](docs/app.md). The compatibility mode (projectM or MilkDrop 3) is picked per preset
 automatically; `--compat projectm|milkdrop2|milkdrop3` fixes it.
 
@@ -136,14 +138,20 @@ projectM-equivalent calls (`lactea_push_pcm_i16/u8`, `lactea_set_mesh_size`, `la
 
 **Preset changes.** `lactea_load_preset` cuts at once; `lactea_load_preset_ex(e, bytes, len, name,
 seconds)` is the soft cut: `seconds > 0` blends the running and the new preset over that time
-(projectM's default is 3 s; `0` cuts; negative or NaN is `LACTEA_STATUS_INVALID_ARGUMENT`). A failed
+(projectM's default is 3 s; `0` cuts; negative or non-finite is `LACTEA_STATUS_INVALID_ARGUMENT`). A failed
 load leaves the running preset alone. The host learns *when* to change by polling
 `lactea_poll_switch_request(e, &is_hard_cut)` or through a callback, and *that a load failed*
-through a second one; both run on the calling thread inside the C call and must not call back into
-the same handle:
+through a second one. Both run on the calling thread, inside the C call that caused them (a request
+from `lactea_render*`, a failure from `lactea_load_*`) once that call has finished its work, so a
+callback may call back into the same handle, for example to load the next preset. Calls made from a
+callback only queue their own events; those arrive after the callback returns, never nested.
+`lactea_destroy(e)` from a callback is allowed and takes effect when the call that fired the
+callback returns; do not use the handle afterwards:
 
 ```c
-static void on_request(bool is_hard_cut, void *user) { /* pick the next preset, then: */ }
+static void on_request(bool is_hard_cut, void *user) { /* pick the next preset, then: */
+    /* lactea_load_preset_ex(engine, next, next_len, "next", 3.0);  (allowed here) */
+}
 static void on_failed(const char *preset, const char *message, void *user) { /* log, skip */ }
 lactea_set_switch_requested_callback(e, on_request, user);   /* fired from lactea_render*() */
 lactea_set_switch_failed_callback(e, on_failed, user);       /* fired from lactea_load_*() */

@@ -416,6 +416,50 @@ fn after_a_switch_a_preset_renders_as_in_a_fixed_engine() {
     }
 }
 
+/// A flat preset whose warp shader swizzles a parenthesised constructor: projectM's hlslparser takes `(float3(` as
+/// the start of a cast and cannot parse the `.xyz` after the closing parenthesis, MilkDrop 2's translator can.
+fn swizzled_constructor(r: f32, g: f32, b: f32) -> String {
+    format!(
+        "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=2\nPSVERSION_COMP=0\nfDecay=1\nfWaveAlpha=0\nfGammaAdj=1\n\
+         warp_1=`shader_body\nwarp_2=`{{\nwarp_3=`  ret = (float3({r}, {g}, {b})).xyz;\nwarp_4=`}}\n"
+    )
+}
+
+#[test]
+fn a_projectm_shader_translation_failure_falls_back_to_milkdrop2() {
+    let text = swizzled_constructor(0.0, 1.0, 0.0);
+    assert_eq!(compat_for_preset(text.as_bytes()), Compat::ProjectM);
+
+    // fixed modes are unchanged: projectM replaces the shader, MilkDrop 2 translates it
+    let mut fixed = rig!(cfg(Compat::ProjectM, false));
+    let r = fixed.load(&text, "s.milk", Transition::Cut);
+    assert_eq!(r.compat, Compat::ProjectM);
+    assert_eq!(r.shader_fallbacks.len(), 1);
+    let mut fixed2 = rig!(cfg(Compat::MilkDrop2, false));
+    assert!(
+        fixed2
+            .load(&text, "s.milk", Transition::Cut)
+            .shader_fallbacks
+            .is_empty()
+    );
+
+    let mut rig = rig!(cfg(Compat::ProjectM, true));
+    rig.load(&q40(1.0, 0.0, 0.0), "q.milk", Transition::Cut);
+    rig.run(3);
+    let r = rig.load(&text, "s.milk", Transition::Cut);
+    assert_eq!(r.compat, Compat::MilkDrop2);
+    assert_eq!(rig.engine.current_compat(), Compat::MilkDrop2);
+    assert!(r.shader_fallbacks.is_empty());
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.starts_with("fallback: projectM shader translation failed:")),
+        "{:?}",
+        r.warnings
+    );
+    assert!(near(px(&rig.run(2), 32, 24), GREEN));
+}
+
 /// A flat preset whose per-frame code splits the identifier `is_beat` over two code lines. MilkDrop 2 glues the
 /// lines together (`is_` + `beat`), projectM keeps them apart and rejects the code.
 fn split_identifier(r: f32, g: f32, b: f32) -> String {

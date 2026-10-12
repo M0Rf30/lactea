@@ -255,11 +255,7 @@ impl PerPixel {
         let mut ctx = Context::new(gm.clone());
         ctx.reset_vars();
         let v = PpVars::register(&mut ctx);
-        Self {
-            ctx,
-            v,
-            prog: None,
-        }
+        Self { ctx, v, prog: None }
     }
 
     /// MilkDrop 3: `q33..q64` join the context's variables.

@@ -125,7 +125,10 @@ fn cercle_is_a_circle_in_pixels_whose_radius_follows_the_width() {
             .zip(&inv)
             .map(|(a, b)| (a + b - 1.0).abs())
             .fold(0.0, f32::max);
-        assert!(worst < 0.03, "{w}x{h}: direction -1 is the inverse ({worst})");
+        assert!(
+            worst < 0.03,
+            "{w}x{h}: direction -1 is the inverse ({worst})"
+        );
     }
 }
 

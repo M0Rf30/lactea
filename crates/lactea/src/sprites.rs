@@ -642,7 +642,14 @@ mod tests {
             .collect::<String>();
         f(&mut cfg);
         let gm = md3_memory();
-        let (rt, warning) = SpriteRt::new(cfg, (256, 256), Vec::new(), (10.0, 100), &gm, &Compat::MilkDrop3.rules());
+        let (rt, warning) = SpriteRt::new(
+            cfg,
+            (256, 256),
+            Vec::new(),
+            (10.0, 100),
+            &gm,
+            &Compat::MilkDrop3.rules(),
+        );
         assert!(warning.is_none(), "{warning:?}");
         rt
     }
@@ -764,7 +771,14 @@ mod tests {
             name: "g.gif".into(),
             ..PresetSprite::default()
         };
-        let (mut s, _) = SpriteRt::new(cfg, (4, 4), vec![0.1, 0.2, 0.05], (10.0, 0), &gm, &Compat::MilkDrop3.rules());
+        let (mut s, _) = SpriteRt::new(
+            cfg,
+            (4, 4),
+            vec![0.1, 0.2, 0.05],
+            (10.0, 0),
+            &gm,
+            &Compat::MilkDrop3.rules(),
+        );
         let frame_at = |s: &mut SpriteRt, t: f64| s.frame(&inputs(t), (640, 360)).unwrap().frame;
         assert_eq!(frame_at(&mut s, 10.0), 0);
         assert_eq!(frame_at(&mut s, 10.12), 1);
@@ -784,7 +798,14 @@ mod tests {
             code: "x = (;\u{1}".into(),
             ..PresetSprite::default()
         };
-        let (mut s, warning) = SpriteRt::new(cfg, (4, 4), Vec::new(), (0.0, 0), &gm, &Compat::MilkDrop3.rules());
+        let (mut s, warning) = SpriteRt::new(
+            cfg,
+            (4, 4),
+            Vec::new(),
+            (0.0, 0),
+            &gm,
+            &Compat::MilkDrop3.rules(),
+        );
         assert!(warning.is_some());
         assert!(s.frame(&inputs(1.0), (640, 360)).is_some());
     }

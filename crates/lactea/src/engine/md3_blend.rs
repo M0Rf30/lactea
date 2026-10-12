@@ -912,13 +912,14 @@ impl super::Engine {
             }
         };
         let prev = renderer.take_shader_state();
-        let (mut new, mut report) = match self.build_loaded(&milk2.preset2, name, &mut renderer, milk2.has_sprite) {
-            Ok(v) => v,
-            Err(e) => {
-                self.spare = Some(renderer);
-                return Err(e);
-            }
-        };
+        let (mut new, mut report) =
+            match self.build_loaded(&milk2.preset2, name, &mut renderer, milk2.has_sprite) {
+                Ok(v) => v,
+                Err(e) => {
+                    self.spare = Some(renderer);
+                    return Err(e);
+                }
+            };
         let t = self.clock.now as f32;
         let geom = renderer.mesh_geometry();
         let aspect = (geom.aspect_x(), geom.aspect_y());
@@ -1375,7 +1376,9 @@ mod tests {
             return;
         };
         let half = |keys: &str| {
-            format!("MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\n{keys}fDecay=1\n")
+            format!(
+                "MILKDROP_PRESET_VERSION=201\nPSVERSION=2\nPSVERSION_WARP=0\nPSVERSION_COMP=0\n[preset00]\n{keys}fDecay=1\n"
+            )
         };
         let file = |p1: &str, p2: &str| {
             format!(

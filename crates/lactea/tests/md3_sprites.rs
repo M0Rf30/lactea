@@ -501,8 +501,12 @@ fn milk2_sprite_arrives_with_preset2_after_the_first_leg() {
     };
     step(&mut e);
     let text = milk2("sprite=1\n", "", "", &block("red.png"));
-    e.load_preset(text.as_bytes(), "pair.milk2", Transition::Soft { seconds: 2.7 })
-        .unwrap();
+    e.load_preset(
+        text.as_bytes(),
+        "pair.milk2",
+        Transition::Soft { seconds: 2.7 },
+    )
+    .unwrap();
     // leg A takes `blend_time_user` = 1 s = 60 frames
     let mut c = [0; 3];
     for _ in 0..40 {

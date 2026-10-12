@@ -224,6 +224,9 @@ pub struct WarpAnim {
     /// projectM computes `pow(zoom, ..)` in a GPU vertex shader, where a negative base gives NaN (`exp2(y*log2(x))`);
     /// MD2 does it on the CPU (`powf`, finite). `true` in [`WarpAnim::projectm`].
     pub gpu_pow: bool,
+    /// MilkDrop 3 adds the four warp `sin` / `cos` terms only when `|warp| > 0.0001`; MD2 always adds them
+    /// (`CompatRules::md3_warp_skip_tiny`).
+    pub skip_tiny_warp: bool,
     /// `fWarpTime = GetTime() * m_fWarpAnimSpeed`
     pub warp_time: f32,
     /// `fWarpScaleInv = 1 / m_fWarpScale`
@@ -245,6 +248,7 @@ impl WarpAnim {
         Self {
             y_flip: false,
             gpu_pow: false,
+            skip_tiny_warp: false,
             warp_time,
             scale_inv: 1.0 / warp_scale,
             f,
@@ -296,10 +300,12 @@ pub fn warp_vertex_uv(
     // warping
     let wt = anim.warp_time;
     let si = anim.scale_inv;
-    u += v.warp * 0.0035 * (wt * 0.333 + si * (vx * f[0] - wy * f[3])).sin();
-    vv += v.warp * 0.0035 * (wt * 0.375 - si * (vx * f[2] + wy * f[1])).cos();
-    u += v.warp * 0.0035 * (wt * 0.753 - si * (vx * f[1] - wy * f[2])).cos();
-    vv += v.warp * 0.0035 * (wt * 0.825 + si * (vx * f[0] + wy * f[3])).sin();
+    if !anim.skip_tiny_warp || v.warp.abs() > 0.0001 {
+        u += v.warp * 0.0035 * (wt * 0.333 + si * (vx * f[0] - wy * f[3])).sin();
+        vv += v.warp * 0.0035 * (wt * 0.375 - si * (vx * f[2] + wy * f[1])).cos();
+        u += v.warp * 0.0035 * (wt * 0.753 - si * (vx * f[1] - wy * f[2])).cos();
+        vv += v.warp * 0.0035 * (wt * 0.825 + si * (vx * f[0] + wy * f[3])).sin();
+    }
 
     // rotation
     let u2 = u - v.cx;
@@ -453,6 +459,38 @@ mod tests {
             du > 0.0 && du < 0.0141 && dv < 0.0141,
             "warp displacement bounded by 2*0.0035: {du} {dv}"
         );
+    }
+
+    /// MilkDrop 3: the four warp terms are added only when `|warp| > 0.0001` (T4: 0.0001 skips, 0.0002 adds
+    /// them with the factor `0.0002 * 0.0035`); MD2 adds them for any warp.
+    #[test]
+    fn tiny_warp_skips_the_terms_under_md3() {
+        let g = MeshGeometry::new(4, 4, 64, 64).unwrap();
+        let md2 = WarpAnim::new(1.0, 1.0, 1.0);
+        let md3 = WarpAnim {
+            skip_tiny_warp: true,
+            ..md2
+        };
+        let uv = |warp: f32, anim: &WarpAnim| {
+            warp_vertex_uv(
+                &g,
+                7,
+                &VertexVars {
+                    warp,
+                    ..Default::default()
+                },
+                anim,
+                [0.0; 2],
+            )
+        };
+        let base = uv(0.0, &md3);
+        assert_eq!(uv(0.0001, &md3), base, "|warp| <= 1e-4: skipped");
+        assert_eq!(uv(-0.0001, &md3), base);
+        assert_ne!(uv(0.0001, &md2), base, "MD2 adds the terms");
+        let big = uv(0.0002, &md3);
+        assert_eq!(big, uv(0.0002, &md2), "above the threshold both add them");
+        assert_ne!(big, base);
+        assert_eq!(uv(1.0, &md3), uv(1.0, &md2));
     }
 
     /// `projectm_vertex` is projectM's `InitializeMesh` row for the mirrored mesh row: row 0 (bottom) is

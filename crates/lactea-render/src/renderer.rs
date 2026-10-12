@@ -16,6 +16,7 @@ use crate::stroke::{self, LineRule};
 use crate::uniforms::{self, MilkUniformInputs, RotParams};
 use crate::warp_mesh::{self, MeshGeometry, VertexVars, WarpAnim};
 use crate::wavegen;
+use crate::wavegen_md3;
 use lactea_abi::dump::Stage;
 use lactea_abi::{
     Address, FRAGMENT_ENTRY, Filter, MeshVertex, MilkUniforms, NoiseTex, PassUniforms,
@@ -3209,10 +3210,12 @@ impl Renderer {
         for (si, s) in f.shapes.iter().enumerate() {
             // a textured shape with an `image=` samples that user texture; its texture aspect is 1
             let image = s.image.as_ref().filter(|_| s.textured);
-            let g = match image {
-                Some(_) => geom::shape_geometry_tex(s, asp_y, 1.0),
-                None => geom::shape_geometry(s, asp_y),
-            };
+            let g = geom::shape_geometry_tex_max(
+                s,
+                asp_y,
+                if image.is_some() { 1.0 } else { asp_y },
+                rules.max_shape_sides,
+            );
             let am = f
                 .md2_blend
                 .as_ref()
@@ -3370,7 +3373,7 @@ impl Renderer {
             } else {
                 (f.borders.ib_rgba, f.borders.ib_rgba[3])
             };
-            if label_a > 0.001 {
+            if label_a > 0.001 && !f.borders.hidden {
                 let c = geom::conv_color_raw(rules, size_rgba);
                 let (ob, ib) = (f.borders.ob_size, f.borders.ib_size);
                 let mut tris = if rules.pm_border_mesh {
@@ -3384,6 +3387,47 @@ impl Renderer {
                 b.flat(Blend::SrcAlpha, &tris);
             }
         }
+    }
+
+    /// One `DrawWave` pass of the MD2 family: the MD2 port, or MilkDrop 3's 17 modes (`md3_wave_modes`).
+    fn main_wave_raw(
+        &self,
+        m: &crate::frame::MainWave,
+        wl: &[f32],
+        wr: &[f32],
+        spec_l: &[f32],
+        spec_r: &[f32],
+        f: &FrameInput,
+        aspect: (f32, f32),
+        blending: bool,
+    ) -> Option<wavegen::WaveGeom> {
+        if self.rules.md3_wave_modes {
+            return wavegen_md3::main_wave_geometry_md3_raw(
+                m,
+                wl,
+                wr,
+                spec_l,
+                f.time as f32,
+                [f.bass, f.mid, f.treb],
+                f.imm_abs,
+                self.cfg.width,
+                aspect,
+                blending,
+            );
+        }
+        wavegen::main_wave_geometry_raw(
+            m,
+            wl,
+            wr,
+            spec_l,
+            spec_r,
+            f.time as f32,
+            [f.bass, f.mid, f.treb],
+            f.imm_abs,
+            self.cfg.width,
+            aspect,
+            blending,
+        )
     }
 
     /// `DrawWave` while MD2 blends two presets: the new wave (`it == 0`) and, if the wave mode changed, the old
@@ -3401,19 +3445,7 @@ impl Renderer {
     ) -> Option<wavegen::WaveGeom> {
         let mw = &f.main_wave;
         let call = |m: &crate::frame::MainWave| {
-            wavegen::main_wave_geometry_raw(
-                m,
-                wl,
-                wr,
-                &mw.spectrum[0],
-                &mw.spectrum[1],
-                f.time as f32,
-                [f.bass, f.mid, f.treb],
-                f.imm_abs,
-                self.cfg.width,
-                aspect,
-                true,
-            )
+            self.main_wave_raw(m, wl, wr, &mw.spectrum[0], &mw.spectrum[1], f, aspect, true)
         };
         let new = call(mw)?;
         let mut out = new.clone();
@@ -3460,18 +3492,18 @@ impl Renderer {
         }
         let (wl, wr) = wavegen::prepare_main_waveform(mw);
         let geometry = match f.md2_blend.as_ref() {
-            None => wavegen::main_wave_geometry(
-                mw,
-                &wl,
-                &wr,
-                &mw.spectrum[0],
-                &mw.spectrum[1],
-                f.time as f32,
-                [f.bass, f.mid, f.treb],
-                f.imm_abs,
-                self.cfg.width,
-                aspect,
-            ),
+            None => self
+                .main_wave_raw(
+                    mw,
+                    &wl,
+                    &wr,
+                    &mw.spectrum[0],
+                    &mw.spectrum[1],
+                    f,
+                    aspect,
+                    false,
+                )
+                .filter(|g| g.alpha >= 0.004),
             Some(bl) => self.main_wave_geometry_blend(f, bl, &wl, &wr, aspect),
         };
         let Some(g) = geometry else {

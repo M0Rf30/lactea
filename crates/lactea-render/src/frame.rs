@@ -135,6 +135,9 @@ pub struct Borders {
     pub ib_size: f32,
     /// `var_pf_ib_r/g/b/a`.
     pub ib_rgba: [f32; 4],
+    /// Skip both borders (`DrawSprites` border gate of MilkDrop 3: hidden during blends with `DisableBox`, never drawn
+    /// for a double preset).
+    pub hidden: bool,
 }
 
 /// Motion vector field: `var_pf_mv_x/y/dx/dy/l/r/g/b/a`.
@@ -157,7 +160,8 @@ pub struct MotionVectors {
 /// Main waveform (`DrawWave` inputs).
 #[derive(Clone, Debug)]
 pub struct MainWave {
-    /// `var_pf_wave_mode` (`% NUM_WAVES` is applied by the engine; modes 0..=8 are drawn).
+    /// `var_pf_wave_mode` as the renderer should draw it: the engine applies the compat mode's wrap (`% 18` MD2,
+    /// `% 16` projectM, the C remainder `% 17` of MilkDrop 3, where a negative value draws nothing visible).
     pub mode: i32,
     /// `var_pf_wave_r/g/b` and `var_pf_wave_a`.
     pub rgba: [f32; 4],
@@ -198,7 +202,7 @@ pub struct MainWave {
 /// One evaluated custom-shape instance (`CShape` after per-frame code for that instance).
 #[derive(Clone, Debug)]
 pub struct ShapeInstance {
-    /// `var_pf_sides` (clamped to 3..=100 by the renderer).
+    /// `var_pf_sides` (clamped to `3..=CompatRules::max_shape_sides` by the renderer).
     pub sides: i32,
     /// `var_pf_x`, projectM / MD2 compute the fan centre `x * 2.0 - 1.0` in double and round to `f32` once, so
     /// `x` / `y` stay in the equation VM's `f64` (0..1, y=1 top).
@@ -329,6 +333,7 @@ impl Default for Borders {
             ob_rgba: [0.0; 4],
             ib_size: 0.01,
             ib_rgba: [0.25, 0.25, 0.25, 0.0],
+            hidden: false,
         }
     }
 }

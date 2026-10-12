@@ -58,6 +58,7 @@ mod transition;
 pub mod uniforms;
 pub mod warp_mesh;
 pub mod wavegen;
+pub mod wavegen_md3;
 
 pub use blend::{Md2Blend, Md2OldPass, cosine_interp};
 pub use config::{Compat, CompatRules, CompiledShader, RenderConfig, RenderError, StrokeRaster};

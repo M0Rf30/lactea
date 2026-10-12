@@ -1121,6 +1121,199 @@ fn checked_geometry(cfg: &RenderConfig) -> Result<MeshGeometry, RenderError> {
     MeshGeometry::new(cfg.mesh[0], cfg.mesh[1], cfg.width, cfg.height)
 }
 
+/// Persistent resources of the GPU warp UV readback ([`Renderer::gpu_warp_vertex_uv`]) for a `w x h` vertex grid.
+///
+/// The readback only depends on a frame's `warp_gpu` and texel offset, not on any image, so it is submitted as its
+/// own small submission at the end of the frame that produced those inputs and only waited for (this submission
+/// alone, never the frame's main work) by the next frame's motion vector pass.
+struct UvReadback {
+    w: u32,
+    h: u32,
+    vertices: wgpu::Buffer,
+    uniforms: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    out: wgpu::Buffer,
+    bytes_per_row: u32,
+    /// The submitted readback of the previous frame's `warp_gpu` and the texel offset it was evaluated with.
+    pending: Option<(wgpu::SubmissionIndex, [f32; 2])>,
+}
+
+impl UvReadback {
+    fn new(device: &wgpu::Device, pipes: &Pipelines, w: u32, h: u32) -> Self {
+        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warp uv verts"),
+            size: u64::from(w) * u64::from(h) * std::mem::size_of::<WarpVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warp uv uniforms"),
+            size: std::mem::size_of::<WarpVsUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("warp uv readback"),
+            layout: &pipes.bgl_warp_vs,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            }],
+        });
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("warp uv readback"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bytes_per_row = padded_bytes_per_row(w * 16);
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warp uv readback"),
+            size: u64::from(bytes_per_row * h),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        Self {
+            w,
+            h,
+            vertices,
+            uniforms,
+            bind_group,
+            texture,
+            view,
+            out,
+            bytes_per_row,
+            pending: None,
+        }
+    }
+
+    /// Evaluate the vertex stage over `verts` into the readback buffer. The writes land ahead of this submission
+    /// and behind every earlier one, so a readback still in flight is never disturbed.
+    fn submit(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipes: &Pipelines,
+        verts: &[WarpVertex],
+        vu: &WarpVsUniforms,
+        toff: [f32; 2],
+    ) {
+        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(verts));
+        queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(vu));
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("warp uv readback"),
+        });
+        {
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("warp uv readback"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            rp.set_pipeline(&pipes.warp_uv_readback);
+            rp.set_bind_group(0, &self.bind_group, &[]);
+            rp.set_vertex_buffer(0, self.vertices.slice(..));
+            rp.draw(0..self.w * self.h, 0..1);
+        }
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &self.out,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.bytes_per_row),
+                    rows_per_image: Some(self.h),
+                },
+            },
+            wgpu::Extent3d {
+                width: self.w,
+                height: self.h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.pending = Some((queue.submit(Some(enc.finish())), toff));
+    }
+
+    /// Wait for the pending readback and return the UVs in lactea mesh index order. On an error the buffer may be
+    /// left mapped: the caller drops the whole `UvReadback`.
+    fn collect(
+        &mut self,
+        device: &wgpu::Device,
+        geom: &MeshGeometry,
+    ) -> Result<Vec<[f32; 2]>, RenderError> {
+        let (submission, _) = self
+            .pending
+            .take()
+            .ok_or_else(|| RenderError::Readback("no warp uv readback submitted".to_owned()))?;
+        let slice = self.out.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .map_err(|e| RenderError::Readback(format!("{e:?}")))?;
+        let mapped = match rx.try_recv() {
+            Ok(r) => r,
+            Err(_) => {
+                device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .map_err(|e| RenderError::Readback(format!("{e:?}")))?;
+                rx.recv()
+                    .map_err(|e| RenderError::Readback(e.to_string()))?
+            }
+        };
+        mapped.map_err(|e| RenderError::Readback(e.to_string()))?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|e| RenderError::Readback(e.to_string()))?;
+        let mut out = vec![[0.0f32; 2]; (self.w * self.h) as usize];
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let o = (y * self.bytes_per_row + x * 16) as usize;
+                let f = |k: usize| {
+                    f32::from_le_bytes([
+                        data[o + k],
+                        data[o + k + 1],
+                        data[o + k + 2],
+                        data[o + k + 3],
+                    ])
+                };
+                out[geom.index(x, y)] = [f(0), f(4)];
+            }
+        }
+        drop(data);
+        self.out.unmap();
+        Ok(out)
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Renderer
 // ---------------------------------------------------------------------------------------
@@ -1163,6 +1356,8 @@ pub struct Renderer {
     prev_warp_uv: Option<Vec<[f32; 2]>>,
     /// The previous frame's warp vertex-shader inputs, to evaluate its UVs on the GPU (motion vector lookups).
     prev_warp_gpu: Option<crate::frame::WarpGpu>,
+    /// Persistent readback of the GPU's warp UVs ([`Renderer::gpu_warp_vertex_uv`]).
+    uv_readback: Option<UvReadback>,
     /// projectM's motion vector mesh (stale vertices, index count).
     mv_state: MotionVectorState,
     frames_since_resize: u32,
@@ -1393,6 +1588,7 @@ impl Renderer {
             old_shaders: None,
             prev_warp_uv: None,
             prev_warp_gpu: None,
+            uv_readback: None,
             mv_state: MotionVectorState::default(),
             frames_since_resize: 0,
             main_wave_tail: Default::default(),
@@ -1467,8 +1663,7 @@ impl Renderer {
             .map(|(i, &(bw, bh))| create_target(d, bw, bh, &format!("blur{i}")))
             .collect();
         self.main_idx = 0;
-        self.prev_warp_uv = None;
-        self.prev_warp_gpu = None;
+        self.forget_prev_warp();
         self.mv_state.reset();
         self.frames_since_resize = 0;
         self.clear_all();
@@ -1485,8 +1680,7 @@ impl Renderer {
         self.geom = MeshGeometry::new(mesh[0], mesh[1], self.cfg.width, self.cfg.height)?;
         self.cfg.mesh = mesh;
         self.warp_indices = warp_index_buffer(&self.device, &self.geom, &self.rules);
-        self.prev_warp_uv = None;
-        self.prev_warp_gpu = None;
+        self.forget_prev_warp();
         self.mv_state.reset();
         Ok(())
     }
@@ -1502,8 +1696,7 @@ impl Renderer {
     /// registers its own). Noise textures are kept.
     pub fn reset_images(&mut self) {
         self.main_idx = 0;
-        self.prev_warp_uv = None;
-        self.prev_warp_gpu = None;
+        self.forget_prev_warp();
         self.mv_state.reset();
         self.main_wave_tail = Default::default();
         self.frames_since_resize = 0;
@@ -1959,121 +2152,65 @@ impl Renderer {
         m.min(3)
     }
 
-    /// The GPU's own per-vertex warp UVs (`warp_vs` evaluated on the device, lactea mesh index order). projectM's
-    /// motion vector lookup reads the interpolation of *these* (`RG16F` UV map written by the warp pass), so the CPU
-    /// port of the formula (`warp_mesh`) differs from it by the GPU's `pow` / `sin` / `cos` approximations and fusion.
-    fn gpu_warp_vertex_uv(&self, wg: &crate::frame::WarpGpu) -> Result<Vec<[f32; 2]>, RenderError> {
+    /// Forget the previous frame's warp grid, vertex inputs and their pending UV readback.
+    fn forget_prev_warp(&mut self) {
+        self.prev_warp_uv = None;
+        self.prev_warp_gpu = None;
+        if let Some(rb) = &mut self.uv_readback {
+            rb.pending = None;
+        }
+    }
+
+    /// Submit the UV readback of `prev_warp_gpu` (the vertex inputs of the frame just recorded), or drop the pending
+    /// one if there are none.
+    fn submit_uv_readback(&mut self) {
+        let Some(wg) = self.prev_warp_gpu.as_ref() else {
+            if let Some(rb) = &mut self.uv_readback {
+                rb.pending = None;
+            }
+            return;
+        };
         let (w, h) = (self.geom.gx + 1, self.geom.gy + 1);
         let verts = geom::build_warp_gpu_vertices(&self.geom, &wg.vars);
-        let mut vu = self.warp_vs_uniforms(wg, self.texel_offset_uv(), 1.0);
+        let toff = self.texel_offset_uv();
+        let mut vu = self.warp_vs_uniforms(wg, toff, 1.0);
         vu.diffuse = [w as f32, h as f32, 0.0, 0.0];
-        let vs_bg = self.warp_vs_bind_group(&vu);
-        let vb = buffer_init(
-            &self.device,
-            "warp uv verts",
-            &verts,
-            wgpu::BufferUsages::VERTEX,
-        );
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("warp uv readback"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bpr = padded_bytes_per_row(w * 16);
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("warp uv readback"),
-            size: u64::from(bpr * h),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("warp uv readback"),
-            });
-        {
-            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("warp uv readback"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            rp.set_pipeline(&self.pipes.warp_uv_readback);
-            rp.set_bind_group(0, &vs_bg, &[]);
-            rp.set_vertex_buffer(0, vb.slice(..));
-            rp.draw(0..w * h, 0..1);
+        if !matches!(&self.uv_readback, Some(rb) if rb.w == w && rb.h == h) {
+            self.uv_readback = Some(UvReadback::new(&self.device, &self.pipes, w, h));
         }
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(enc.finish()));
-        let slice = buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| RenderError::Readback(format!("{e:?}")))?;
-        rx.recv()
-            .map_err(|e| RenderError::Readback(e.to_string()))?
-            .map_err(|e| RenderError::Readback(e.to_string()))?;
-        let data = slice
-            .get_mapped_range()
-            .map_err(|e| RenderError::Readback(e.to_string()))?;
-        let mut out = vec![[0.0f32; 2]; (w * h) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let o = (y * bpr + x * 16) as usize;
-                let f = |k: usize| {
-                    f32::from_le_bytes([
-                        data[o + k],
-                        data[o + k + 1],
-                        data[o + k + 2],
-                        data[o + k + 3],
-                    ])
-                };
-                out[self.geom.index(x, y)] = [f(0), f(4)];
-            }
+        if let Some(rb) = &mut self.uv_readback {
+            rb.submit(&self.device, &self.queue, &self.pipes, &verts, &vu, toff);
         }
-        drop(data);
-        buf.unmap();
-        Ok(out)
+    }
+
+    /// The GPU's own per-vertex warp UVs of `prev_warp_gpu` (`warp_vs` evaluated on the device, lactea mesh index
+    /// order). projectM's motion vector lookup reads the interpolation of *these* (`RG16F` UV map written by the warp
+    /// pass), so the CPU port of the formula (`warp_mesh`) differs from it by the GPU's `pow` / `sin` / `cos`
+    /// approximations and fusion.
+    ///
+    /// Normally the readback was submitted at the end of the previous frame ([`Renderer::submit_uv_readback`]); it
+    /// is only recorded here (and waited for) when that frame did not draw motion vectors or the texel offset
+    /// changed since.
+    fn gpu_warp_vertex_uv(&mut self) -> Result<Vec<[f32; 2]>, RenderError> {
+        let toff = self.texel_offset_uv();
+        let submitted = self
+            .uv_readback
+            .as_ref()
+            .and_then(|rb| rb.pending.as_ref())
+            .is_some_and(|(_, t)| *t == toff);
+        if !submitted {
+            self.submit_uv_readback();
+        }
+        let Some(rb) = self.uv_readback.as_mut() else {
+            return Err(RenderError::Readback(
+                "no previous warp vertex inputs".to_owned(),
+            ));
+        };
+        let uv = rb.collect(&self.device, &self.geom);
+        if uv.is_err() {
+            self.uv_readback = None;
+        }
+        uv
     }
 
     fn texel_offset_uv(&self) -> [f32; 2] {
@@ -2249,10 +2386,8 @@ impl Renderer {
                 0.001
             };
         if mv_visible && !(rules.mv_skip_first_frame && self.frames_since_resize == 0) {
-            let gpu_uv = if rules.warp_uv_on_gpu {
-                self.prev_warp_gpu
-                    .as_ref()
-                    .and_then(|wg| self.gpu_warp_vertex_uv(wg).ok())
+            let gpu_uv = if rules.warp_uv_on_gpu && self.prev_warp_gpu.is_some() {
+                self.gpu_warp_vertex_uv().ok()
             } else {
                 None
             };
@@ -2612,6 +2747,12 @@ impl Renderer {
             }
             (Some(src), slot) => *slot = Some(src.clone()),
             (None, slot) => *slot = None,
+        }
+        // the next frame's motion vector pass reads this frame's GPU UVs: start them now if it is likely to
+        if rules.warp_uv_on_gpu && mv_visible {
+            self.submit_uv_readback();
+        } else if let Some(rb) = &mut self.uv_readback {
+            rb.pending = None;
         }
         self.main_idx = next_i;
         self.frames_since_resize += 1;

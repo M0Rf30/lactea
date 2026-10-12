@@ -166,3 +166,14 @@ rules; translation of every effect (alone and all six together) on three typical
 never under projectM / MD2 / mode 0, the runtime setter, a cut reaching `PresetControl` as a hard-cut request,
 output of every effect against its HLSL (+-3/255) on a `(uv.x, uv.y, 0.25)` composite, toggling off,
 accumulation, injection into a preset without composite text, mode 7 changing the running picture without a cut.
+
+Visual check (looked at the frames, `fdrender --compat md3`, `martin - blue haze MilkDrop2077rmx.milk` of the MD3
+pack, 320x180, frame 99 of each variant with the effect's text inserted as above): solarize turns the white core
+dark and folds the mid-tones into saturated green / yellow rims; split mirrors the picture about the vertical
+centre line; multiplicate tiles it into a mirrored kaleidoscope; rotate transposes it (the diagonal stretch of
+`uv.yx`); flip turns it by 180 degrees; invert gives the colour negative. With `--auto-hard-cut 7` on the same
+preset and a synthetic loud-treble stream, frames 129 of seeds 2-5 show the accumulated random effects (mirror
+symmetry, inversion, solarized rims, 4-way kaleidoscope) while the unmodified run shows the plain picture. These
+were compared against the HLSL of the effects, **not** against an MD3 reference shot: the Wine oracle cannot
+trigger a mode (needs a loud-treble audio stream and a `settings.ini` mode), so the on-screen look of MD3's own
+injection is unverified.

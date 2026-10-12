@@ -74,3 +74,14 @@ Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels
 | Item | projectM (default) | MilkDrop 2 / MilkDrop 3 |
 |---|---|---|
 | Joining of code lines (`md2_code_join`; init, per-frame, per-pixel, wave init / per-frame / per-point, shape init / per-frame) | lines joined with `\n`: an identifier split over two lines (`per_frame_22=k1 = is_` / `per_frame_23=beat*...;`) is two tokens and fails to compile | `CState::StripLinefeedCharsAndComments` (`state.cpp:1593`): the `\x01` separators are deleted without a replacement and `//` / `\\` comments are dropped up to the next separator, so the halves glue together (`k1 = is_beat*...;`). A block that is only blanks or strips to nothing compiles no code (`buf[0] == 0`). Shader text is not touched: it keeps its lines (`code_to_source`), `#define`s need them |
+
+## MilkDrop 3 (`Compat::MilkDrop3`)
+
+Differences of MilkDrop 3 from MilkDrop 2 (the second column of the sections above); details in [`md3.md`](md3.md).
+
+| Item | projectM (default) | MilkDrop 2 | MilkDrop 3 |
+|---|---|---|---|
+| Main waveform modes (`md3_wave_modes`) | projectM's 16 `WaveformMode`s (`% 16`, preset's initial value) | `wavegen::main_wave_geometry` port: modes 0..8 (`% 18`), left+right averaged in most modes; 9..17 draw nothing | 17 modes `0..=16` selected by the C remainder `(int)wave_mode % 17`; one channel per formula (`wavegen_md3`); mode 9 has a zero second strip, 13 reads the spectrum past the right channel, 14 halves `rad` / `ang`, 16 is the triangle spinning with `-0.2 t`; BeatDrop's mode 17 is mode 0; a negative remainder draws 480 zero vertices |
+| Custom-shape `sides` (`max_shape_sides`) | `3..=100` | `3..=100` | `3..=500` (`sides + 2` fan vertices) |
+| Warp `sin` / `cos` terms (`md3_warp_skip_tiny`) | always added (GPU vertex shader) | always added | added only if `\|warp\| > 0.0001` |
+| Borders during a preset blend (`md3_border_gate`, `EngineConfig::md3_disable_box`) | drawn | drawn | not drawn while blending when `DisableBox` is on (default) |

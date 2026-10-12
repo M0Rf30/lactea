@@ -38,6 +38,7 @@ in the file, exactly like a build without the license.
 | Blend patterns of MD3 soft cuts (30 patterns) | Not yet |
 | Sprites (`[SPRITE1_BEGIN]` blocks, layers, blend modes, GIF) | Not yet |
 | `.wave` / `.shape` files (single custom wave / shape import and export) | Supported (library/engine API; no app UI) |
+| Main waveform modes 0..16, shape sides up to 500, warp-term skip, border gate of blends | Supported (see "Main waveform and render deltas") |
 | Locked shaders (`MD31` / `MD32`) | Not supported: the placeholder shader in the file runs |
 
 Feature slices add their sections below, each with the `CompatRules` fields it introduced.
@@ -93,3 +94,67 @@ concern and not implemented here: a host should call `import_custom_wave(8, byte
   them when rendering.
 - Under `Compat::ProjectM` only 4 custom slots run (`CompatRules::custom_slots`), so an import into slot >= 4
   edits the preset but draws nothing; hosts that send dropped files to slot 8 need a MilkDrop-family compat.
+
+## Main waveform and render deltas
+
+Rules: `md3_wave_modes`, `max_shape_sides` (100 / 100 / **500**), `md3_warp_skip_tiny`, `md3_border_gate`
+(`CompatRules`, true only for MD3 except `max_shape_sides`), plus `EngineConfig::md3_disable_box` (default
+`true`, MD3's `DisableBox`).
+
+**Main waveform** (`lactea_render::wavegen_md3`). The mode is `(int)wave_mode % 17` of the per-frame variable
+`wave_mode` (`md3_wave_mode`: C truncation, `INT_MIN` for NaN / overflow, C remainder, so `17 -> 0`, `20 -> 3`,
+`16.9 -> 16`, `-17 -> 0`, `-1` and `-18` stay negative). The MD2 port (`wavegen::main_wave_geometry`, modes 0..8, no
+mode 9..17) is untouched; MD3 has its own geometry function because even the modes that exist in both read other
+channels:
+
+| mode | MD3 |
+|---|---|
+| 0 | circle, right channel only, +1 closing vertex unless blending; the first 24 vertices cross-fade into the next 240 samples |
+| 1, 2, 3, 5 | as MD2 (alpha tables by texture width: modes 2 / 5 x 0.07 / 0.09 / 0.11 / 0.13 for 256 / 512 / 1024 / 2048, mode 3 `0.075 / 0.15 / 0.22 / 0.33 x 1.3 x treble^2`; other widths get no table gain) |
+| 4 | script with momentum, `y` from the left channel only |
+| 6, 7 | angled line(s), left channel (7: left over right, `sep = (y/2+0.5)^2`) |
+| 8 | spectrum line, `0.1 ln(L[2i] + L[2i+1])` (left bins only, no 0.5) |
+| 9 | "large" line, amplitude 1.0 (4x mode 6); the second strip (`nBreak = N`, `2N` vertices) stays at the origin, so dots / thick draw 240 points at the screen centre |
+| 10 | X: lines at fixed angles -0.75 / +0.75, `wave_mystery` ignored |
+| 11 | two vertical lines at `x -0.45 / +0.45` after clipping |
+| 12 | skewed spiral, alpha x 1.25, the final alpha enters the angle |
+| 13 | star: right channel, tail `R[360 + i]` runs past the 576 samples into the left spectrum (`i >= 216`) |
+| 14 | flower: `rad` and `ang` really halved (BeatDrop's `==` is a no-op), the cross-fade reuses the same sample, `cos(3.1416)` mirrors the position |
+| 15 | lasso: left only, no zero guard on `ang` (`tan(t/ang)` spikes), no `wave_x`, no aspect in `x`, alpha x 1.25 |
+| 16 | triangle, right channel, spin `-0.2 t` (BeatDrop: `+0.2 t`), no clamps |
+
+BeatDrop's mode 17 (fireworks) does not exist: it is mode 0. A mode outside `0..=16` (a negative remainder, or an
+old preset's value in the second pass of a blend: the old mode is *not* wrapped) draws 480 zero vertices with the plain
+`wave_a` alpha (no volume scaling, no clamp): invisible lines, centre dots with `wave_usedots`. The tail is the MD2 one
+(blend of the old and new mode when the mode changed, cosine mix, colour, `y = -y`, `SmoothWave`, four thick / dot passes
+from a texture width of 512). `wave_mystery` wraps into `[-1, 1)` for modes 0, 1 and 4 only. Modes 8 and 13 read
+`MainWave::spectrum`, i.e. whatever the audio analysis mode provides; the MD3 spectrum scale (`eq[k] * |FFT|`) belongs
+to the audio slice, the geometry here is exact for any input.
+
+**Other deltas.**
+- Shape `sides`: `clamp(int(sides), 3, 500)` (`sides + 2` fan vertices; MD2 / projectM 3..100).
+- Warp UV: the four warp `sin` / `cos` terms are added only for `|warp| > 0.0001` (`WarpAnim::skip_tiny_warp`,
+  CPU mesh path; projectM's GPU vertex stage is not used by MD2 / MD3).
+- Borders (`DrawSprites` gate): while a preset blend runs and `DisableBox` is on, `ob_*` / `ib_*` are not drawn
+  (`FrameInput::borders.hidden`, set by the engine's blend frame). "Never in a double preset" belongs to the `.milk2`
+  slice, which sets the same field.
+- Not applicable here (documented, no code): texture size snapping to a multiple of 16 and the absence of anisotropic
+  filtering (the host picks the render size; the renderer's samplers are already linear / point only), `_c1` zeros
+  (the MD2 rule `c1_is_zero = false` stays, no shader reads it), the simple waveform being hidden when audio capture is
+  stopped (the engine has no capture state; it always draws), the `m_bScreenDependentRenderMode` branches (the port
+  never had them).
+
+**Verification.** `wavegen_md3` unit tests reproduce the Annex B vectors of the spec for every mode (tolerance 1e-4,
+1e-3 for modes 10, 15, 16): vertices at the sampled indices, vertex counts, `nBreak`, alpha tables, the
+`wave_mystery` wrap, mode selection, the zero strip of mode 9, the invalid-mode zero vertices. `lactea` test
+`md3_core_render` renders through the engine: modes 9..16 draw under MD3 and nothing under MD2, `nWaveMode=17` equals 0
+pixel for pixel, 500-side shape area, border gate on / off / MD2. Smoke run on the MD3 pack (`fdrender --compat md3`,
+30 frames, 320x180, `synth128.wav`): of the 58 `.milk` presets with `nWaveMode >= 9`, 22 still have `wave_a >= 0.004` at
+frame 30 (the rest zero it in per-frame code and use custom waves), and 20 of those render differently from
+`--compat md2` (which draws nothing for these modes): mode 9 (8 of 9 presets), 11 (6 of 6), 10 (1), 13 (1), 15 (4 of
+5; the two presets that do not differ were not investigated). projectM and MD2 renders of 5 corpus presets (and a
+soft cut) are bit-identical to the foundation branch.
+
+**Open questions** (spec Annex B section 10, not resolved here): spectrum scaling of modes 8 / 13 and the mode-13
+spike on loud bass, mode 9 with dots / thick on real D3D, the exact alpha of an unmapped mode, mode 14 / 16 direction
+against the real program. They need Wine screenshots (`~/M0Rf30/md3-re/oracle/md3shot.sh`).

@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **web:** Browser showcase on GitHub Pages ([#20](https://github.com/M0Rf30/lactea/pull/20))
 
 
+## [0.2.2] - 2026-10-13
+
+### Added
+
+- **web:** Browser showcase on GitHub Pages ([#20](https://github.com/M0Rf30/lactea/pull/20))
+
+
 ## [0.2.1] - 2026-10-13
 
 ### Fixed

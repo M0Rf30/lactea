@@ -1,5 +1,6 @@
-//! BeatDrop's shader FFT (`plugin.cpp`, `DoCustomSoundAnalysis`): the 1024-bin spectrum and the waveform behind
-//! `sampler_fft` / `sampler_wave` (`get_fft`, `get_fft_peak`, `get_wave` in BeatDrop shaders).
+//! BeatDrop's shader FFT: the 1024-bin spectrum and the waveform behind `sampler_fft` / `sampler_wave` (`get_fft`,
+//! `get_fft_peak`, `get_wave` in BeatDrop shaders). A port of `plugin.cpp:11621-11729` (the analysis) and `:11700-11750`
+//! (the texture fill) of BeatDrop-Music-Visualizer (OfficialIncubo, master; BSD-3, see `THIRD_PARTY_NOTICES.md`).
 //!
 //! It is an analysis of its own and does not touch [`Analyzer`](crate::Analyzer): the last 2048 sample frames of each
 //! channel go through a raised-cosine envelope and a 2048-point transform (no equalisation); the mono magnitude is
@@ -9,7 +10,7 @@
 //! the C++ promotes (`.25 + decay * .75`, `exp(-1 / fps / .3)`).
 //!
 //! `m_nFFTShaderScaling` and `m_nFFTShaderNoiseFloor` come from BeatDrop's `.ini`; the compiled-in defaults
-//! (`.175`, `.03`) are used.
+//! (`.175`, `.03`, `plugin.h:429-430`) are used.
 
 use crate::fft::{Fft, FftStyle};
 

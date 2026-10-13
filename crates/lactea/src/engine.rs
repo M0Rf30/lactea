@@ -1082,11 +1082,15 @@ impl Engine {
         Ok((loaded, report))
     }
 
+    /// What the expression contexts see while a preset's init code runs. Under MilkDrop 2 that includes the host's
+    /// mouse, keys and clock: BeatDrop loads them (`LoadPerFrameEvallibVars`) before it executes the init code
+    /// (`state.cpp:1794`).
     fn init_env(&self) -> Env {
         let (w, h) = (self.cfg.width, self.cfg.height);
         let (ax, ay) = warp_mesh::aspect_xy(w, h);
+        let time = self.last_time.unwrap_or(0.0);
         Env {
-            time: self.last_time.unwrap_or(0.0) as f32,
+            time: time as f32,
             fps: self.cfg.fps as f32,
             frame: self.last_frame_no,
             progress: self.clock.progress_a() as f32,
@@ -1094,6 +1098,12 @@ impl Engine {
             pixels: [w, h],
             aspect: [ax, ay],
             inv_aspect: [1.0 / ax, 1.0 / ay],
+            md2: self
+                .cfg
+                .compat
+                .rules()
+                .md2_input_vars
+                .then(|| self.md2_in.vars_now(time)),
             ..Default::default()
         }
     }
@@ -1300,9 +1310,14 @@ impl Engine {
         report: &mut PresetReport,
     ) {
         let mut wanted: Vec<(String, String)> = Vec::new(); // (render name, projectM sampler name)
+        // BeatDrop's `sampler_wave` is the renderer's own texture (`m_lpWaveTexture`), never an image of the host
+        let own_wave = self.cfg.compat.rules().md2_shader_inputs;
         for iface in ifaces {
             for t in &iface.textures {
                 if let TexSource::User(name) = &t.source {
+                    if own_wave && name == "wave" {
+                        continue;
+                    }
                     if wanted.iter().any(|(n, _)| n == name) {
                         continue;
                     }
@@ -1505,12 +1520,13 @@ impl Engine {
             clock.time as f32,
         );
         // BeatDrop's host inputs (MilkDrop 2): the mouse / keys / clock for the expressions and `_c14.._c16`, and
-        // one step of the shader FFT with the active state's `FFTAttack` / `FFTDecay` (not blended during a soft cut)
+        // one step of the shader FFT with the active state's `FFTAttack` / `FFTDecay` (blended while a soft cut runs)
         let rules = self.cfg.compat.rules();
         let md2f = (rules.md2_input_vars || rules.md2_shader_inputs).then(|| {
-            let fft = self.active.as_ref().map_or((0.5, 0.7), |a| {
-                let b = &a.loaded.preset.base;
-                (b.fft_attack, b.fft_decay)
+            let fft = self.active.as_mut().map_or((0.5, 0.7), |a| {
+                a.loaded
+                    .floats
+                    .fft_params(&a.loaded.preset.base, clock.time as f32)
             });
             self.md2_in.begin_frame(
                 audio,

@@ -109,7 +109,7 @@ documented behaviour, nothing copied from MD3) declares:
 `get_fft*` are macros like in MD3, so the argument expression is pasted textually (once) into the `clamp` and nested
 macros (`get_fft(mouse_x)`, `get_fft(bass > 0.5 ? .25 : .75)`) work. Not declared under `md3`, on purpose: `get_fft_peak*`,
 `get_wave*`, `HAS_FFT_PEAK` and `_c15..` (BeatDrop's prelude declares them, next section; MD3 never uploads `_c15..`), and the BeatDrop
-names `sysTime*`, `mouse_clicked`, `aspect_sd` (neither prelude declares them). The prelude's `sampler_fft` counts as declared for the
+names `sysTime*`, `mouse_clicked`, `aspect_sd` and its other aliases (BeatDrop's prelude declares them, next section; this one does not). The prelude's `sampler_fft` counts as declared for the
 implicit `sampler_<name>` declarations.
 
 **Decisions**
@@ -175,35 +175,66 @@ only static scenes compare pixel for pixel):
 
 Switched on by `CompatRules::md2_shader_inputs` (MD2 true; projectM and MD3 false). Ignored when `md3` is set; with it off every translation is
 unchanged. `beatdrop_wrapped_hlsl(kind, user)` assembles the text like the MD3 one: comment-stripped `include.fx`, the prelude, the per-pass
-`#define`s, the wrapped user text (`translate_wrapped` needs the same flag). **The macro names and definitions are RECONSTRUCTED from BeatDrop's
-documented behaviour (`docs/divergences.md`, "Audio and shader inputs"): BeatDrop's `include.fx` additions are not on disk, so nothing is copied.**
-Declared: `float4 _c14, _c15, _c16; sampler2D sampler_fft; sampler2D sampler_wave;` and
+`#define`s, the wrapped user text (`translate_wrapped` needs the same flag). The prelude is exactly BeatDrop's `include.fx` additions on top of MilkDrop 2's
+(BeatDrop-Music-Visualizer, OfficialIncubo, master; BSD-3, see `THIRD_PARTY_NOTICES.md`): `crates/lactea-hlsl/src/wrap.rs` is a port of them.
+Declared: `float4 _c14` (mouse), `_c15` (hour, minute, second, totalSeconds), `_c16` (year, month, day, weekday 1-7) (`include.fx:18-20`),
+`sampler2D sampler_fft; sampler2D sampler_wave;`, `#define HAS_FFT_PEAK 1`, the macros below and the real HLSL functions below, and the aliases further down.
 
 | Macro | Definition |
 |---|---|
-| `HAS_FFT_PEAK` | `1` |
-| `get_fft(x)` | `sqrt(tex2D(sampler_fft, float2((x), 0.25)).r)`: spectrum row, `v = .25`, **with `sqrt`** |
-| `get_fft_hz(hz)` | `get_fft((hz) / 22050.0)` (a 44.1 kHz capture, bins up to Nyquist; MD3 divides by 24000) |
-| `get_fft_peak(x)` | `sqrt(tex2D(sampler_fft, float2((x), 0.75)).r)`: peak-hold row, `v = .75` |
-| `get_fft_peak_hz(hz)` | `get_fft_peak((hz) / 22050.0)` |
-| `get_wave(x)` | `tex2D(sampler_wave, float2((x), 0.25)).r`: left waveform row |
+| `mouse` | `_c14` |
+| `mouse_x` / `mouse_y` | `_c14.x` / `_c14.y` |
+| `mouse_pos` | `_c14.xy` |
+| `mouse_clicked` / `mouse_released` | `_c14.z` / `_c14.w` |
+| `sysTime` / `sysDate` | `_c15` / `_c16` |
+| `sysTimeHour` / `sysTimeMinute` / `sysTimeSecond` / `sysTimeTotalSeconds` | `_c15.x` / `.y` / `.z` / `.w` |
+| `sysDateYear` / `sysDateMonth` / `sysDateDay` / `sysDateWeekday` | `_c16.x` / `.y` / `.z` / `.w` |
 
-A macro the user shader itself declares or defines (a type keyword or `#define` directly before the name) is left out, so a user
-`float get_fft(float x)` is not rewritten by the function-like macro. `sampler_fft` / `sampler_wave` count as declared for the implicit sampler declarations.
+(`include.fx:119-135`.) The audio helpers are **functions**, not macros (`include.fx:187-231`):
 
-* **Constants** (ABI untouched): `_c14` = `mx.mouse` = `(x, y, +-lastX, +-lastY)` with `x = mousex`, `y` top-origin (`1 - mousey`, `-1` outside the window), the third
-  component `lastX` while the button is held else `-lastX`, the fourth `lastY` on the click frame else `-lastY` (the last press position, `y` top-origin;
-  `milkdropfs.cpp:5317`); `_c15` = `(hour, minute, second, totalSeconds)` and `_c16` = `(year, month, day, weekday)`, carried in `mx.q_hi[0]` / `mx.q_hi[1]`
-  (unused outside MD3). The engine side is `crates/lactea/src/md2_inputs.rs`.
-* **Textures.** The roots `fft` and `wave` both resolve to `TexSource::Fft`: one engine `R32Float` texture of `BEATDROP_FFT_BINS` (1024) x 4 texels, rows
-  smoothed spectrum, peak hold, left wave, right wave (`BEATDROP_WAVE_SAMPLES` = 480 valid texels). `sampler_fft` is a 1024 x 2 window (rows 0..2),
-  `sampler_wave` a 480 x 2 window (rows 2..4), so `v = .25` / `.75` hit the row centres. Default clamp + bilinear, prefixes as usual.
-* **Lowering.** `R32Float` is not filterable, so every `tex2D`, `tex2Dlod`, `tex2Dbias`, `tex2Dproj` (`xy / w`) and `tex2Dgrad` on those samplers becomes
-  `bd_fetch(tex_<sampler>, uv, w, row0, linear, wrapped)` (`emit/fft.rs`): both coordinates matter, filter and address apply per axis inside the 2-row window
-  (D3D9's rule for a `1024 x 2` / `480 x 2` `R32F` texture), the result is `(r, 1, 1, 1)`, LOD / bias / gradients are evaluated but change nothing.
+| Function | Definition |
+|---|---|
+| `float get_fft(float pos)` | `sqrt(tex2D(sampler_fft, float2(saturate(pos), .25)).x)`: spectrum row |
+| `float get_fft_hz(float freq)` | `get_fft(freq / 22050.0)` (MD3 divides by 24000) |
+| `float get_fft_peak(float pos)` | the same with `v = .75`: peak-hold row |
+| `float get_fft_peak_hz(float freq)` | `get_fft_peak(freq / 22050.0)` |
+| `float get_wave(float pos)` | mono average `(left + right) * 0.5` of the rows `v = .25` / `.75` of `sampler_wave` |
+| `float get_wave_left(float pos)` / `get_wave_right(float pos)` | the left (`v = .25`) / right (`v = .75`) row |
+
+The remaining additions of BeatDrop's `include.fx` are in the prelude too, as the file has them:
+
+| Name | Definition |
+|---|---|
+| `aspect_sd` | `_c1` (`include.fx:104`: the screen-dependent aspect; MilkDrop 2 already declares `_c1` and the renderer uploads it, `(1, h/w, ..)` for a landscape target) |
+| `SAMPLER1D` / `SAMPLER2D` / `SAMPLER3D` | `sampler1D` / `sampler2D` / `sampler3D` (`include.fx:142-144`); a sampler declared with one counts as declared for the implicit `sampler_<name>` declarations |
+| `texture1D` / `texture2D` / `texture3D` | `tex1D` / `tex2D` / `tex3D` (`include.fx:145-147`) |
+| `trunc(x)` | `((x) < 0 ? ceil((x)) : floor((x)))` (`include.fx:150`): a macro, so the argument is pasted twice; the translator lowers it to a component-wise `select` of `ceil` / `floor` instead of its `trunc` intrinsic (same values, `-0.0` and NaN included) |
+| `tex1d`, `texcube` / `texCube` | `tex1D`, `texCUBE` (`include.fx:151, 154-155`; `tex2d` / `tex3d` are in MilkDrop 2's file already). The translator has no lowering for `tex1D` / `texCUBE`: such a shader falls back as before, only the name in the error differs |
+
+(`texture2D` / `texture3D` were type spellings of the translator's own; under the BeatDrop prelude they are `tex2D` / `tex3D` calls, as in BeatDrop.)
+
+**Shadowing (a deliberate deviation).** D3DX would reject a redefinition, so a user shader that declares or `#define`s any prelude name keeps its own; a prelude
+function built on a dropped one (`get_fft_hz` on `get_fft`, `get_fft_peak_hz` on `get_fft_peak`) is dropped with it. `sampler_fft` / `sampler_wave` count as
+declared for the implicit sampler declarations.
+
+* **Constants** (ABI untouched): `_c14` = `mx.mouse` = `(mouseX or -1, 1 - mouseY or -1, +-lastX, +-lastY)`: the third component is `lastX` while the button is held else
+  `-lastX`, the fourth `lastY` on the click frame else `-lastY` (`milkdropfs.cpp:5317`); `_c15` / `_c16` as above (`milkdropfs.cpp:5319-5320`), carried in
+  `mx.q_hi[0]` / `mx.q_hi[1]` (unused outside MD3). The engine side is `crates/lactea/src/md2_inputs.rs`.
+* **Textures** (`plugin.cpp:2404-2408` creation, `:3554-3569` binding, `:5212-5237` sampler state). Two separate textures: `sampler_fft` is
+  `MY_FFT_SHADER_SAMPLES` (1024, `plugin.h:70`) x 2 `R32Float` (row 0 smoothed spectrum, row 1 peak hold), `sampler_wave` is `NUM_WAVEFORM_SAMPLES` (480) x 2
+  `R32Float` (row 0 left, row 1 right), so `v = .25` / `.75` hit the row centres. Default clamp + bilinear unless a `fw_/fc_/pw_/pc_` prefix says otherwise; never
+  anisotropic (`milkdropfs.cpp:5227`). `lactea-abi` is frozen and has no `TexSource` for the wave texture, so the translator reports `sampler_fft` as
+  `TexSource::Fft` and `sampler_wave` as the user texture `TexSource::User("wave")`; the renderer (`Renderer::engine_wave`) answers `User("wave")` with its own 480 x 2
+  texture before consulting host textures, and under MilkDrop 2 the engine never asks the host's texture provider for `"wave"`.
+* **`texsize_`**: `texsize_fft` = `(1024, 2, 1/1024, 1/2)`, `texsize_wave` = `(480, 2, 1/480, 1/2)`, the real sizes. (The real BeatDrop looks `texsize_*` up only among
+  disk / noise / blur textures, `plugin.cpp:3786-3840`, so there they would be unresolved: ours is a superset.)
+* **Lowering.** `R32Float` is not filterable without `FLOAT32_FILTERABLE`, so every `tex2D`, `tex2Dlod`, `tex2Dbias`, `tex2Dproj` (`xy / w`) and `tex2Dgrad` on those two
+  samplers becomes the WGSL helper `bd_fetch(tex_<sampler>, uv, linear, wrapped)` (`emit/fft.rs`), which reproduces D3D9 bilinear / point + clamp / wrap by hand
+  with `textureLoad` (it uses `textureDimensions`, so both textures share it). Direct `tex2D(sampler_fft, ...)` calls by users work (`v` selects the row). Both coordinates
+  matter, filter and address apply per axis inside the 2-row texture, the result is `(r, 1, 1, 1)`, LOD / bias / gradients are evaluated but change nothing.
 * The values come from `lactea_audio::BeatDropShaderFft` (`docs/audio.md`) and the preset's `FFTAttack` / `FFTDecay`; the renderer side is in `docs/render.md`.
-* tests: `tests/beatdrop.rs` (prelude text and order, a user `get_fft` winning, the spectrum / waveform lookups, `_c14.._c16` mapping, nothing changes without the
-  option); the texture layout constants are checked equal across `lactea-audio`, `lactea-hlsl`, `lactea-render`.
+* tests: `tests/beatdrop.rs` (prelude text and order, a user `get_fft` / `trunc` winning, the spectrum / waveform lookups, `_c14.._c16` mapping, `aspect_sd`, the sampler /
+  texture aliases, `trunc`, nothing changes without the option).
 
 ## Verification
 
@@ -246,7 +277,7 @@ All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X]
   int literals (`7/2`) follows the integer rule above.
 * `sampler_pw_noise_lq` etc. need no declaration: `translate` declares the `sampler_*` / `texsize_*` names a shader uses
   without declaring them (projectM does; MD2 rejects such a shader as "undefined identifier" and falls back).
-* ABI note: `TexSource::Fft` is produced with `Options::md3` (`fft`) or `Options::beatdrop` (`fft` and `wave`); otherwise `fft` / `wave` are reported as
+* ABI note: `TexSource::Fft` is produced with `Options::md3` (`fft`) or `Options::beatdrop` (`fft` only; `wave` stays `User("wave")`, answered by the renderer); otherwise `fft` / `wave` are reported as
   `User("fft")` / `User("wave")`. `include.fx` here has no `_c14.._c16` (mouse / BeatDrop system
   time and date); with `md3` the prelude adds `_c14` (mouse, `MilkExtUniforms`), `_c15..` stay absent (MD3 never uploads them); with `beatdrop` it adds `_c14.._c16`.
 * Undefined variables (`Options::projectm_flavor`, `emit/undef.rs`): a variable read before it is written is undefined in

@@ -320,14 +320,17 @@ neutral, so output stays bit-identical.
 Off under projectM (`sampler_fft` stays an unresolved user texture) and MilkDrop 3 (own prelude); the engine computes the values (`docs/hlsl.md`
 "BeatDrop prelude", `docs/audio.md` `BeatDropShaderFft`), the renderer transports them.
 
-* **Texture.** With the rule on, the renderer's FFT texture is `BEATDROP_FFT_BINS` (1024) x `BEATDROP_ROWS` (4) `R32Float` instead of 512 x 1; rows:
-  smoothed spectrum, peak hold, left wave, right wave (the wave rows are 480 texels wide, `BEATDROP_WAVE_SAMPLES`, zero past that).
-  `ShaderExt::beatdrop: Option<Arc<BeatDropTexture>>` replaces the whole texture before any pass is recorded (`record_beatdrop_upload`, a
-  staging copy in the frame's encoder like the MD3 upload); `None` keeps it; `ShaderExt::fft` is ignored under the rule. Renderer-global: the old
-  state's `beatdrop` is ignored. `texsize` of an `Fft` binding is `(width, 2, ..)`, because shaders see `sampler_fft` as rows 0..2 and `sampler_wave` as rows 2..4.
+* **Textures.** With the rule on, the renderer's FFT texture is `BEATDROP_FFT_BINS` (1024) x 2 `R32Float` instead of 512 x 1 (row 0 smoothed spectrum, row 1 peak hold;
+  BeatDrop `plugin.cpp:2404-2408`, `MY_FFT_SHADER_SAMPLES` = 1024 in `plugin.h:70`), and a second, separate `BEATDROP_WAVE_SAMPLES` (480) x 2 `R32Float` texture holds the
+  waveform (row 0 left, row 1 right; `NUM_WAVEFORM_SAMPLES`). `BEATDROP_ROWS` no longer exists. The wave texture has no `TexSource` in the frozen ABI: the translator
+  names it the user texture `"wave"` and `Renderer::engine_wave` answers `User("wave")` with it before host textures are consulted (the engine never asks the host's
+  texture provider for `"wave"` under MilkDrop 2). `ShaderExt::beatdrop: Option<Arc<BeatDropTexture>>` replaces both textures before any pass is recorded
+  (`record_beatdrop_upload`, staging copies in the frame's encoder like the MD3 upload); packed upload order: spectrum row, peak row, wave L, wave R
+  (`BeatDropTexture::texels`); `None` keeps them; `ShaderExt::fft` is ignored under the rule. Renderer-global: the old state's `beatdrop` is ignored.
+  `texsize_fft` = `(1024, 2, ..)` and `texsize_wave` = `(480, 2, ..)`, the real sizes.
 * **Constants.** `_c14` is `ShaderExt::mouse`; `_c15` (`hour, minute, second, totalSeconds`) and `_c16` (`year, month, day, weekday`) travel in
   `ShaderExt::time_date`, written into `MilkExtUniforms::q_hi[0..2]` (`None` leaves `q_hi` as it is). The `lactea-abi` layout is unchanged. The old state of
   a blend carries the same frame values.
 * tests: `crates/lactea/tests/md2_inputs.rs`, `crates/lactea-hlsl/tests/beatdrop.rs`.
 * `CompatRules::md2_input_vars` (MD2 true; projectM / MD3 false) is the expression-side twin: it only makes the engine register `mousex .. totalseconds` in the preset's
-  contexts (`docs/eel.md`); the renderer does not read it. `md2_shader_inputs` also selects the 1024 x 4 FFT texture size at `Renderer::new`.
+  contexts (`docs/eel.md`); the renderer does not read it. `md2_shader_inputs` also selects the 1024 x 2 FFT texture size at `Renderer::new` and creates the 480 x 2 wave texture.

@@ -18,7 +18,9 @@
 //! * `fft` / `wave` samplers resolve to user textures of that name; the host supplies them or a
 //!   placeholder. With [`Options::md3`] (MilkDrop 3) the MD3 prelude is added after `include.fx` ([`md3_wrapped_hlsl`]:
 //!   `_c14`/`mouse*`, `_qi.._qp`/`q33..q64`, `sampler_fft`, `get_fft`, `get_fft_hz`) and `fft` becomes
-//!   [`TexSource::Fft`], whose lookups are lowered to manual `textureLoad` clamp/bilinear fetches.
+//!   [`TexSource::Fft`], whose lookups are lowered to manual `textureLoad` clamp/bilinear fetches. With
+//!   [`Options::beatdrop`] (BeatDrop) the prelude is BeatDrop's own `include.fx` additions ([`beatdrop_wrapped_hlsl`])
+//!   and both `sampler_fft` and `sampler_wave` are read the same way.
 //!
 //! See `docs/hlsl.md` in the repository (<https://github.com/M0Rf30/lactea>) for the full list.
 #![warn(missing_docs)]
@@ -37,7 +39,6 @@ mod wrap;
 use lactea_abi::{PassKind, ShaderInterface, TexDim, TexSource};
 use std::fmt;
 
-pub use emit::fft::{BEATDROP_FFT_BINS, BEATDROP_WAVE_SAMPLES};
 pub use iface::rand_slot;
 pub use wrap::{
     beatdrop_wrapped_hlsl, default_comp_shader, default_warp_shader, md2_wrapped_hlsl,
@@ -120,12 +121,14 @@ pub struct Options {
     /// names. [`translate_wrapped`] needs the same flag for text from [`md3_wrapped_hlsl`]. Default `false`: the
     /// output is then identical to a translator without MD3 support.
     pub md3: bool,
-    /// BeatDrop / MilkDrop 2 shader inputs: [`translate`] adds the BeatDrop prelude (`_c14` mouse, `_c15` / `_c16`
-    /// time and date, `sampler_fft` / `sampler_wave`, `get_fft`, `get_fft_hz`, `get_fft_peak*`, `get_wave`; see
-    /// [`beatdrop_wrapped_hlsl`]), the root names `fft` and `wave` resolve to [`TexSource::Fft`] (one engine texture:
-    /// 1024 x 2 spectrum rows then 480 x 2 waveform rows, `textureLoad` bilinear fetches) and `_c14.._c16` map onto
-    /// `mx.mouse`, `mx.q_hi[0]`, `mx.q_hi[1]` (the extension block's MD3-only members are free outside MilkDrop 3).
-    /// Ignored when [`md3`](Self::md3) is set. Default `false`.
+    /// BeatDrop / MilkDrop 2 shader inputs: [`translate`] adds the BeatDrop prelude (BeatDrop's `include.fx` additions:
+    /// `_c14` mouse, `_c15` / `_c16` time and date and the `mouse*` / `sysTime*` / `sysDate*` names over them,
+    /// `sampler_fft` / `sampler_wave`, `get_fft`, `get_fft_hz`, `get_fft_peak*`, `get_wave*`; see
+    /// [`beatdrop_wrapped_hlsl`]), the root name `fft` resolves to [`TexSource::Fft`] (`MY_FFT_SHADER_SAMPLES` x 2),
+    /// `wave` stays the user texture `"wave"` (`NUM_WAVEFORM_SAMPLES` x 2, which the engine's renderer answers itself;
+    /// the frozen ABI has no source of its own), both are read with manual `textureLoad` bilinear fetches, and
+    /// `_c14.._c16` map onto `mx.mouse`, `mx.q_hi[0]`, `mx.q_hi[1]` (the extension block's MD3-only members are free
+    /// outside MilkDrop 3). Ignored when [`md3`](Self::md3) is set. Default `false`.
     pub beatdrop: bool,
     /// Emulate Mesa's backward inter-shader code motion (`nir_opt_varyings`), which projectM's GL path goes through:
     /// a sum, difference or quotient of an interpolated input (`uv`, `rad`, `hue_shader`, ...) and a convergent value
@@ -318,7 +321,12 @@ pub fn translate_wrapped(
         wgsl.push_str(&lactea_abi::WGSL_COMMON.replacen(TAIL, &tail, 1));
     }
     wgsl.push_str(&bindings);
-    if iface.textures.iter().any(|t| t.source == TexSource::Fft) {
+    // BeatDrop's `sampler_wave` is the user texture `wave` (the frozen ABI has no source for it); it is read with the
+    // same helper as `sampler_fft`
+    if iface.textures.iter().any(|t| {
+        t.source == TexSource::Fft
+            || (opts.prelude().beatdrop() && t.source == TexSource::User("wave".into()))
+    }) {
         wgsl.push_str(&emit::fft::helper_wgsl(opts.prelude()));
     }
     wgsl.push_str(&e.body);

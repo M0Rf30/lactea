@@ -314,3 +314,198 @@ fn get_fft_does_not_exist_in_projectm() {
         "projectM has no BeatDrop prelude"
     );
 }
+
+/// `include.fx:213-231`: `get_wave` is the mean of both rows of `sampler_wave`, `get_wave_left` / `get_wave_right`
+/// read one row each; `plugin.cpp:11731-11748` fills the rows with the waveform over 128.
+#[test]
+fn get_wave_is_the_mono_average_of_the_two_channels() {
+    // a constant signal: left 0.5, right -0.25 (so the average, 0.125, differs from either channel)
+    let pcm: Vec<f32> = (0..1200).flat_map(|_| [0.5f32, -0.25]).collect();
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    let report = r.load(&preset(
+        "ret = float3(get_wave_left(0.5), get_wave_right(0.5) + 0.5, get_wave(0.5) + 0.5);",
+        "",
+    ));
+    assert!(report.shader_fallbacks.is_empty(), "{report:?}");
+    assert!(
+        !report.unresolved_textures.contains(&"wave".to_string()),
+        "`sampler_wave` is the engine's own texture: {report:?}"
+    );
+    r.engine.push_pcm_f32(&pcm, 2);
+    r.render(0.0);
+    r.render(1.0 / 60.0);
+    let p = r.pixel(16, 12);
+    assert!(near(p[0], 0.5), "left {p:?}");
+    assert!(near(p[1], 0.25), "right {p:?}");
+    assert!(near(p[2], 0.625), "mono mean of the rows {p:?}");
+}
+
+/// A direct `tex2D` of `sampler_fft` is a bilinear fetch of the 1024 x 2 texture: row 0 is the spectrum `get_fft`
+/// takes the square root of, row 1 the peak hold of `get_fft_peak`.
+#[test]
+fn direct_tex2d_of_sampler_fft_agrees_with_the_helpers() {
+    let tone: Vec<f32> = (0..2048)
+        .flat_map(|i| {
+            let s = 0.5 * (std::f32::consts::FRAC_PI_2 * i as f32).sin();
+            [s, s]
+        })
+        .collect();
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    let report = r.load(&preset(
+        "ret = float3(get_fft(0.5), sqrt(tex2D(sampler_fft, float2(0.5, 0.25)).x), \
+         sqrt(tex2D(sampler_fft, float2(0.5, 0.75)).x) - get_fft_peak(0.5) + 0.5);",
+        "",
+    ));
+    assert!(report.shader_fallbacks.is_empty(), "{report:?}");
+    for f in 0..8 {
+        r.engine.push_pcm_f32(&tone, 2);
+        r.render(f64::from(f) / 60.0);
+    }
+    let p = r.pixel(16, 12);
+    assert!(p[0] > 100, "the tone is there {p:?}");
+    assert!(p[0].abs_diff(p[1]) <= 2, "row 0 {p:?}");
+    assert!(near(p[2], 0.5), "row 1 {p:?}");
+}
+
+/// `texsize_fft` / `texsize_wave` report the real texture sizes: 1024 x 2 and 480 x 2.
+#[test]
+fn texsize_fft_and_texsize_wave_report_the_real_sizes() {
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    let report = r.load(&preset(
+        "ret = float3(texsize_fft.x / 2048.0, texsize_wave.x / 1920.0, texsize_wave.y / 8.0) \
+         + float3(0, texsize_fft.w - 0.5, texsize_wave.w - 0.5);",
+        "",
+    ));
+    assert!(report.shader_fallbacks.is_empty(), "{report:?}");
+    r.render(0.0);
+    r.render(1.0 / 60.0);
+    let p = r.pixel(16, 12);
+    assert!(near(p[0], 0.5), "1024 / 2048 {p:?}");
+    assert!(near(p[1], 0.25), "480 / 1920, and 1 / 2 - 0.5 {p:?}");
+    assert!(near(p[2], 0.25), "2 / 8, and 1 / 2 - 0.5 {p:?}");
+}
+
+/// `include.fx:120-135`: `mouse*` and `sysTime*` / `sysDate*` are macros over `_c14` / `_c15` / `_c16`.
+#[test]
+fn the_mouse_and_clock_macros_read_the_constants() {
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    let report = r.load(&preset(
+        "ret = float3(mouse_pos.x, sysTimeMinute / 60.0, sysDateDay / 31.0) * 0.5 \
+         + float3(mouse.y, sysTime.z / 120.0, sysDate.y / 24.0);",
+        "",
+    ));
+    assert!(report.shader_fallbacks.is_empty(), "{report:?}");
+    r.engine.set_mouse(MouseState {
+        position: Some([0.5, 0.5]),
+        left_down: false,
+    });
+    r.engine.set_date_time(DateTime {
+        minute: 30,
+        second: 60 - 1,
+        day: 31,
+        month: 12,
+        ..NOON
+    });
+    r.render(0.0);
+    r.render(1.0 / 60.0);
+    let p = r.pixel(16, 12);
+    // x: 0.5 * 0.5 + (top-origin) y 0.5; minute: 0.5 * 0.5 + 59 / 120; day: 1 * 0.5 + 12 / 24
+    assert!(near(p[0], 0.75), "mouse {p:?}");
+    assert!(near(p[1], 0.25 + 59.0 / 120.0), "time {p:?}");
+    assert!(near(p[2], 1.0), "date {p:?}");
+}
+
+/// `milkdropfs.cpp:616, 838` and `state.cpp:1682-1800`: `monitor` starts from the init code's value, keeps what the
+/// per-frame code wrote from frame to frame, and starts over (0, or the init code's value) when the preset is loaded
+/// again.
+#[test]
+fn monitor_starts_from_the_init_code_persists_and_resets_on_a_new_load() {
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    let body = "ret = tex2D(sampler_main, uv).xyz;";
+    let counting = preset(
+        body,
+        "per_frame_init_1=monitor = 5;\nper_frame_1=monitor = monitor + 1;\n",
+    );
+    r.load(&counting);
+    assert_eq!(r.engine.monitor(), 5.0, "the init code's value");
+    r.render(0.0);
+    assert_eq!(
+        r.engine.monitor(),
+        6.0,
+        "frame 0 starts from the init value"
+    );
+    r.render(1.0 / 60.0);
+    r.render(2.0 / 60.0);
+    assert_eq!(
+        r.engine.monitor(),
+        8.0,
+        "a value written in a frame is the next frame's start"
+    );
+
+    // loading compiles again: the variable starts over from the init code, it does not carry on
+    r.load(&counting);
+    assert_eq!(r.engine.monitor(), 5.0);
+    r.render(3.0 / 60.0);
+    assert_eq!(r.engine.monitor(), 6.0);
+
+    // another preset: its own `monitor`, reset to 0 (BeatDrop zeroes it with the other built-ins on a recompile)
+    r.load(&preset(body, "per_frame_1=monitor = monitor + 0.5;\n"));
+    assert_eq!(r.engine.monitor(), 0.0);
+    r.render(4.0 / 60.0);
+    r.render(5.0 / 60.0);
+    assert_eq!(r.engine.monitor(), 1.0);
+    r.load(&preset(body, ""));
+    assert_eq!(r.engine.monitor(), 0.0, "never mentioned");
+}
+
+/// `state.cpp:1794`: BeatDrop loads the per-frame variables (mouse, keys, clock) before it runs the init code, so the
+/// init code sees them.
+#[test]
+fn init_code_reads_the_host_inputs() {
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    r.engine.set_mouse(MouseState {
+        position: Some([0.25, 0.25]),
+        left_down: false,
+    });
+    r.engine.set_date_time(NOON);
+    r.load(&preset(
+        "ret = tex2D(sampler_main, uv).xyz;",
+        "per_frame_init_1=monitor = year + hour; q1 = mousey; q2 = milliseconds;\nper_frame_1=q3 = monitor;\n",
+    ));
+    assert_eq!(r.engine.monitor(), 2026.0 + 23.0);
+    r.render(0.0);
+    assert_eq!(r.var("q1"), Some(0.75), "mousey, bottom origin");
+    assert_eq!(r.var("q2"), Some(250.0));
+    assert_eq!(r.var("q3"), Some(2049.0));
+}
+
+/// `include.fx:104, 142-147, 150`: `aspect_sd` is `_c1` (the aspect itself while the screen-dependent mode is off),
+/// `trunc` the ceil / floor macro and `SAMPLER2D` / `texture2D` the sampler type and `tex2D`.
+#[test]
+fn the_remaining_include_additions_work_in_a_preset() {
+    let mut r = rig!(Compat::MilkDrop2, 32, 24);
+    let report = r.load(&preset(
+        "ret = float3(aspect_sd.y, trunc(-1.7) * -0.5, trunc(float2(-2.9, 2.9)).y * 0.25);",
+        "",
+    ));
+    assert!(report.shader_fallbacks.is_empty(), "{report:?}");
+    r.render(0.0);
+    r.render(1.0 / 60.0);
+    let p = r.pixel(16, 12);
+    assert!(near(p[0], 0.75), "aspect_sd.y of a 32 x 24 target {p:?}");
+    assert!(near(p[1], 0.5), "trunc(-1.7) = -1 {p:?}");
+    assert!(near(p[2], 0.5), "trunc(2.9) = 2 {p:?}");
+
+    let report = r.load(&preset(
+        "ret = texture2D(sampler_main, uv).xyz * 0 + float3(aspect_sd.x, 0.5, 0.25);",
+        "",
+    ));
+    assert!(report.shader_fallbacks.is_empty(), "{report:?}");
+    r.render(2.0 / 60.0);
+    r.render(3.0 / 60.0);
+    let p = r.pixel(16, 12);
+    assert!(
+        near(p[0], 1.0) && near(p[1], 0.5) && near(p[2], 0.25),
+        "{p:?}"
+    );
+}

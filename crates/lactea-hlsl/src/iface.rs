@@ -37,8 +37,10 @@ pub(crate) fn noise_source(root: &str) -> Option<NoiseTex> {
 }
 
 /// Source of a texture root name. With the MD3 prelude `fft` is the engine-owned shader FFT texture; with the BeatDrop
-/// prelude `fft` and `wave` both are (one engine texture holds the spectrum rows and the waveform rows); without a
-/// prelude `fft` is just a user texture named `fft` (which the host may or may not supply).
+/// prelude it is BeatDrop's `m_lpFFTTexture` (1024 x 2) and `wave` is its `m_lpWaveTexture` (480 x 2), which the frozen
+/// ABI has no source of its own for: `wave` stays [`TexSource::User`] and the engine's renderer answers it from its
+/// own texture (the host is never asked for an image of that name). Without a prelude `fft` is just a user texture
+/// named `fft` (which the host may or may not supply).
 pub(crate) fn source_of_root(root: &str, prelude: impl Into<Prelude>) -> TexSource {
     let prelude = prelude.into();
     match root {
@@ -47,7 +49,6 @@ pub(crate) fn source_of_root(root: &str, prelude: impl Into<Prelude>) -> TexSour
         "blur2" => TexSource::Blur(2),
         "blur3" => TexSource::Blur(3),
         "fft" if prelude.md3() || prelude.beatdrop() => TexSource::Fft,
-        "wave" if prelude.beatdrop() => TexSource::Fft,
         r => match noise_source(r) {
             Some(n) => TexSource::Noise(n),
             None => TexSource::User(r.to_string()),
@@ -117,7 +118,9 @@ pub fn rand_slot(root: &str, max_slot: u8, strict: bool) -> Option<usize> {
 /// Source for a `texsize_<name>` parameter. Mirrors CacheParams: random textures are matched by
 /// slot number, everything else by name. The size of a source that no sampler of this shader
 /// binds is still returned (MD2 would only warn). With `md3`, `texsize_fft` names the shader FFT texture (MD3 3.37
-/// leaves it unresolved, i.e. zero; reporting the real source lets the host answer 512 x 1).
+/// leaves it unresolved, i.e. zero; reporting the real source lets the host answer 512 x 1). With the BeatDrop prelude
+/// `texsize_fft` / `texsize_wave` name its two textures (BeatDrop looks `texsize_*` up among the disk and noise
+/// textures only, so there they stay unresolved; the real sizes are 1024 x 2 and 480 x 2).
 pub(crate) fn texsize_source(
     param: &str,
     bindings: &[TextureBinding],
@@ -263,6 +266,30 @@ mod tests {
         assert_eq!(
             texsize_source("texsize_fft", &[], true, (99, true)),
             TexSource::Fft
+        );
+        // BeatDrop: `fft` is the engine's texture, `wave` the user texture name its renderer answers; same defaults
+        let f = resolve_sampler("sampler_fft", TexDim::D2, false, Prelude::BeatDrop);
+        assert_eq!(
+            (f.source, f.filter, f.address, f.dim),
+            (TexSource::Fft, Filter::Linear, Address::Clamp, TexDim::D2)
+        );
+        let w = resolve_sampler("sampler_wave", TexDim::D2, false, Prelude::BeatDrop);
+        assert_eq!(
+            (w.source, w.filter, w.address, w.dim),
+            (
+                TexSource::User("wave".into()),
+                Filter::Linear,
+                Address::Clamp,
+                TexDim::D2
+            )
+        );
+        assert_eq!(
+            texsize_source("texsize_fft", &[], Prelude::BeatDrop, (99, true)),
+            TexSource::Fft
+        );
+        assert_eq!(
+            texsize_source("texsize_wave", &[], Prelude::BeatDrop, (99, true)),
+            TexSource::User("wave".into())
         );
     }
 }

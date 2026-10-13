@@ -9,35 +9,34 @@
 use lactea_abi::{FFT_BINS, MilkExtUniforms};
 use std::sync::Arc;
 
-/// Texels per row of BeatDrop's spectrum rows (`MY_FFT_SHADER_SAMPLES`); equals `lactea_hlsl::BEATDROP_FFT_BINS`.
+/// Texels per row of BeatDrop's `sampler_fft` (`MY_FFT_SHADER_SAMPLES`); equals `lactea_audio::SHADER_FFT_BINS`.
 pub const BEATDROP_FFT_BINS: usize = 1024;
-/// Valid texels of BeatDrop's waveform rows (`NUM_WAVEFORM_SAMPLES`); equals `lactea_hlsl::BEATDROP_WAVE_SAMPLES`.
+/// Texels per row of BeatDrop's `sampler_wave` (`NUM_WAVEFORM_SAMPLES`); equals `lactea_audio::SHADER_WAVE_SAMPLES`.
 pub const BEATDROP_WAVE_SAMPLES: usize = 480;
-/// Rows of the BeatDrop texture: smoothed spectrum, peak hold, left wave, right wave.
-pub const BEATDROP_ROWS: usize = 4;
 
-/// BeatDrop's `sampler_fft` (1024 x 2: smoothed spectrum, peak hold) and `sampler_wave` (480 x 2: left, right, signal
-/// scaled to `-1..1`), uploaded as the rows of one [`BEATDROP_FFT_BINS`] x [`BEATDROP_ROWS`] `R32Float` texture.
+/// BeatDrop's two shader textures, both `R32F` with two rows (`plugin.cpp`, `m_lpFFTTexture` / `m_lpWaveTexture`,
+/// refilled every frame by `DoCustomSoundAnalysis`): `sampler_fft` is [`BEATDROP_FFT_BINS`] x 2 (row 0 the smoothed
+/// spectrum, row 1 the peak hold) and `sampler_wave` [`BEATDROP_WAVE_SAMPLES`] x 2 (row 0 left, row 1 right, the
+/// waveform divided by 128). The renderer keeps them as two textures of their own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BeatDropTexture {
-    /// Row 0: `m_fFFTSmoothed`.
+    /// Row 0 of `sampler_fft`: `m_fFFTSmoothed`.
     pub spectrum: [f32; BEATDROP_FFT_BINS],
-    /// Row 1: `m_fFFTPeak`.
+    /// Row 1 of `sampler_fft`: `m_fFFTPeak`.
     pub peak: [f32; BEATDROP_FFT_BINS],
-    /// Rows 2 and 3: left and right waveform.
+    /// Rows 0 (left) and 1 (right) of `sampler_wave`.
     pub wave: [[f32; BEATDROP_WAVE_SAMPLES]; 2],
 }
 
 impl BeatDropTexture {
-    /// The texels in upload order (`BEATDROP_FFT_BINS * BEATDROP_ROWS` floats, rows of `BEATDROP_FFT_BINS`; the
-    /// waveform rows are zero past [`BEATDROP_WAVE_SAMPLES`]).
+    /// The texels in upload order: the two rows of `sampler_fft` ([`BEATDROP_FFT_BINS`] each), then the two rows of
+    /// `sampler_wave` ([`BEATDROP_WAVE_SAMPLES`] each): `2 * (BEATDROP_FFT_BINS + BEATDROP_WAVE_SAMPLES)` floats.
     pub fn texels(&self) -> Vec<f32> {
-        let mut t = vec![0.0f32; BEATDROP_FFT_BINS * BEATDROP_ROWS];
-        t[..BEATDROP_FFT_BINS].copy_from_slice(&self.spectrum);
-        t[BEATDROP_FFT_BINS..2 * BEATDROP_FFT_BINS].copy_from_slice(&self.peak);
-        for (r, w) in self.wave.iter().enumerate() {
-            let at = (2 + r) * BEATDROP_FFT_BINS;
-            t[at..at + BEATDROP_WAVE_SAMPLES].copy_from_slice(w);
+        let mut t = Vec::with_capacity(2 * (BEATDROP_FFT_BINS + BEATDROP_WAVE_SAMPLES));
+        t.extend_from_slice(&self.spectrum);
+        t.extend_from_slice(&self.peak);
+        for w in &self.wave {
+            t.extend_from_slice(w);
         }
         t
     }

@@ -51,10 +51,16 @@ mouse is a shader input and its grammar has no `mouse.x`):
 * The engine does no I/O: the host sets them through `Engine::set_mouse`, `set_ctrl_keys` and `set_date_time` (until the host supplies a clock the date reads 0 and the
   time of day follows the frame clock, `totalseconds` = frame time mod 86400). They are sampled once per rendered frame (`md2_inputs.rs`) and shared by every state drawn
   that frame. Shape / wave code does not get them.
-* `monitor` is an ordinary variable of the per-frame context (init and per-frame code read / write it, per-vertex code cannot see it; `Engine::monitor()` reads it back).
-  It is treated as **persistent** in every compat mode: `milkdropfs.cpp:616` reloads `monitor_after_init_code` at the start of each frame, which by its name reads as "reset to
-  the post-init value", but `:838` stores the per-frame result back into that member after the code ran, and `plugin.cpp:353-356` documents that a value written in one frame
-  persists to the next; the name is the only ambiguity, the data flow persists.
+* During an MD2 preset blend `blend_vars` mixes them as BeatDrop does (`milkdropfs.cpp:916-930`, BeatDrop-Music-Visualizer, OfficialIncubo, master): `mousex` / `mousey` and the nine
+  date variables are mixed (`mix*new + mix2*old`), `mousedown` / `mouseclick` snap at the snap point (old value while `mix < snap`), `ctrl*` are not blended. The preset's
+  per-frame INIT code sees the current host inputs (mouse, keys, clock; the click edge is never set during a load): BeatDrop calls `LoadPerFrameEvallibVars(this)` before executing
+  the init code (`state.cpp:1794`).
+* `monitor` lives in the **per-frame** context only (`state.cpp:328`; not per-vertex, `milkdropfs.cpp:824` is commented out; `plugin.cpp:353-356`: readable / writable in preset init and
+  per-frame code, a value written on one frame persists to the next). Mechanism: `milkdropfs.cpp:616` reloads `*var_pf_monitor = pState->monitor_after_init_code` at the start of every
+  frame (`:613`: "leave this as it was set in the per-frame INIT code") and `:838` stores `monitor_after_init_code = *var_pf_monitor` after the per-frame code ran, so the value
+  persists. `state.cpp:1682-1684` resets it to 0 whenever the code is recompiled (a preset load), `:1800` sets it from the init code's value after the init code ran. Here it is an
+  ordinary variable of the per-frame context that nothing resets between frames (a fresh context, hence 0, per load): frame 0 starts from the init code's value, a new load starts
+  over; `Engine::monitor()` reads it back (test `monitor_starts_from_the_init_code_persists_and_resets_on_a_new_load`, `crates/lactea/tests/md2_inputs.rs`).
 
 ## Known projectm-eval quirks reproduced on purpose
 

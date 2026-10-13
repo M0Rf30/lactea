@@ -5,6 +5,9 @@
 [workspace]
 changelog_path = "./CHANGELOG.md"
 changelog_config = "cliff.toml"
+# The crates share one CHANGELOG.md: only `lactea` writes it (with every crate's commits), otherwise
+# each lockstep crate appends its own copy of the release entry.
+changelog_update = false
 git_release_enable = false
 git_tag_enable = false
 publish_allow_dirty = false
@@ -15,6 +18,20 @@ name = "lactea"
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
 version_group = "lactea"
+changelog_update = true
+changelog_include = [
+    "lactea-abi",
+    "lactea-eel",
+    "lactea-preset",
+    "lactea-jpeg",
+    "lactea-audio",
+    "lactea-hlsl",
+    "lactea-render",
+    "lactea-host",
+    "lactea-capi",
+    "lactea-app",
+    "lactea-cli",
+]
 
 [[package]]
 name = "lactea-abi"

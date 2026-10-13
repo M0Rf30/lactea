@@ -150,6 +150,47 @@ impl Md2Inputs {
             .push_pcm_f32(interleaved, channels);
     }
 
+    /// `m_mouseX` / `m_mouseY`: `((2 x / w - 1) / 2) + .5` and `((1 - 2 y / h) / 2) + .5` inside the window (the
+    /// vertical axis starts at the bottom), `-1` outside.
+    fn cursor(&self) -> (f32, f32) {
+        match self.mouse.position {
+            Some([u, v]) => (((2.0 * u - 1.0) / 2.0) + 0.5, ((1.0 - 2.0 * v) / 2.0) + 0.5),
+            None => (-1.0, -1.0),
+        }
+    }
+
+    /// The expression variables of one sample (`milkdropfs.cpp:688-705`).
+    fn vars(&self, (x, y): (f32, f32), down: bool, click: bool, date: &DateTime) -> Md2Vars {
+        let flag = |b: bool| if b { 1.0 } else { 0.0 };
+        Md2Vars {
+            mouse: [f64::from(x), f64::from(y), flag(down), flag(click)],
+            ctrl: [
+                flag(self.ctrl.left),
+                flag(self.ctrl.right),
+                flag(self.ctrl.down),
+                flag(self.ctrl.up),
+            ],
+            date: [
+                f64::from(date.year),
+                f64::from(date.month),
+                f64::from(date.day),
+                f64::from(date.weekday),
+                f64::from(date.hour),
+                f64::from(date.minute),
+                f64::from(date.second),
+                f64::from(date.millisecond),
+                f64::from(date.total_seconds()),
+            ],
+        }
+    }
+
+    /// The variables `LoadPerFrameEvallibVars` sets before a preset's init code runs (`state.cpp:1794`): the inputs as
+    /// they are now, no click edge (it exists only in a rendered frame) and the clock of `time`.
+    pub fn vars_now(&self, time: f64) -> Md2Vars {
+        let date = self.date.unwrap_or_else(|| DateTime::from_frame_time(time));
+        self.vars(self.cursor(), self.mouse.left_down, false, &date)
+    }
+
     /// Sample the frame: mouse and keys, the clock, and (`shader_fft`) one step of the shader FFT with the state's
     /// `FFTAttack` / `FFTDecay`.
     pub fn begin_frame(
@@ -160,11 +201,7 @@ impl Md2Inputs {
         (attack, decay): (f32, f32),
         shader_fft: bool,
     ) -> Md2Frame {
-        // `m_mouseX = ((2 x / w - 1) / 2) + .5` and `m_mouseY = ((1 - 2 y / h) / 2) + .5` inside the window, -1 outside
-        let (x, y) = match self.mouse.position {
-            Some([u, v]) => (((2.0 * u - 1.0) / 2.0) + 0.5, ((1.0 - 2.0 * v) / 2.0) + 0.5),
-            None => (-1.0, -1.0),
-        };
+        let (x, y) = self.cursor();
         let down = self.mouse.left_down;
         let click = down && !self.prev_down;
         self.prev_down = down;
@@ -182,27 +219,7 @@ impl Md2Inputs {
 
         let date = self.date.unwrap_or_else(|| DateTime::from_frame_time(time));
         let total = date.total_seconds();
-        let flag = |b: bool| if b { 1.0 } else { 0.0 };
-        let vars = Md2Vars {
-            mouse: [f64::from(x), f64::from(y), flag(down), flag(click)],
-            ctrl: [
-                flag(self.ctrl.left),
-                flag(self.ctrl.right),
-                flag(self.ctrl.down),
-                flag(self.ctrl.up),
-            ],
-            date: [
-                f64::from(date.year),
-                f64::from(date.month),
-                f64::from(date.day),
-                f64::from(date.weekday),
-                f64::from(date.hour),
-                f64::from(date.minute),
-                f64::from(date.second),
-                f64::from(date.millisecond),
-                f64::from(total),
-            ],
-        };
+        let vars = self.vars((x, y), down, click, &date);
         let time_date = [
             [
                 f32::from(date.hour),
@@ -260,15 +277,12 @@ mod tests {
         i.begin_frame(&AudioFrame::default(), 60.0, 0.0, (0.5, 0.7), false)
     }
 
-    /// The texture layout is spelled out in three crates (the analyser, the renderer's texture, the shader lowering);
-    /// they must agree or `get_fft` / `get_wave` read the wrong texels.
+    /// The texture layout is spelled out in two crates (the analyser and the renderer's textures); they must agree
+    /// or `get_fft` / `get_wave` read the wrong texels.
     #[test]
     fn the_beatdrop_texture_layout_agrees_across_crates() {
-        assert_eq!(lactea_hlsl::BEATDROP_FFT_BINS, SHADER_FFT_BINS);
         assert_eq!(lactea_render::BEATDROP_FFT_BINS, SHADER_FFT_BINS);
-        assert_eq!(lactea_hlsl::BEATDROP_WAVE_SAMPLES, SHADER_WAVE_SAMPLES);
         assert_eq!(lactea_render::BEATDROP_WAVE_SAMPLES, SHADER_WAVE_SAMPLES);
-        assert_eq!(lactea_render::BEATDROP_ROWS, 4);
     }
 
     /// `mousex` / `mousey` are bottom-origin, `mouseclick` lasts one frame, `_c14` carries the press position with
@@ -326,5 +340,72 @@ mod tests {
             f.vars.date[4..],
             [23.0, 59.0, 58.0, 250.0, f64::from(86_398.25f32)]
         );
+    }
+
+    /// `plugin.cpp:11731-11748`: `sampler_wave` holds `fWaveform[ch][i] / 128` for the first `NUM_WAVEFORM_SAMPLES`
+    /// samples of the 576-sample capture, left in row 0 and right in row 1; the upload order is the two rows of
+    /// `sampler_fft` and then the two of `sampler_wave`.
+    #[test]
+    fn the_wave_rows_are_the_first_480_samples_over_128() {
+        let mut audio = AudioFrame::default();
+        for k in 0..audio.wave[0].len() {
+            audio.wave[0][k] = k as f32;
+            audio.wave[1][k] = -(k as f32) / 2.0;
+        }
+        let mut i = Md2Inputs::new();
+        let f = i.begin_frame(&audio, 60.0, 0.0, (0.5, 0.7), true);
+        let t = f.texture.expect("the shader FFT is on");
+        for k in 0..SHADER_WAVE_SAMPLES {
+            assert_eq!(t.wave[0][k], k as f32 / 128.0, "left {k}");
+            assert_eq!(t.wave[1][k], -(k as f32) / 2.0 / 128.0, "right {k}");
+        }
+        let texels = t.texels();
+        assert_eq!(texels.len(), 2 * (SHADER_FFT_BINS + SHADER_WAVE_SAMPLES));
+        let wave_at = 2 * SHADER_FFT_BINS;
+        assert_eq!(texels[wave_at + 479], 479.0 / 128.0);
+        assert_eq!(
+            texels[wave_at + SHADER_WAVE_SAMPLES + 479],
+            -479.0 / 2.0 / 128.0
+        );
+        // without the shader FFT there is no texture (and the analyser is not stepped)
+        assert!(
+            i.begin_frame(&audio, 60.0, 0.0, (0.5, 0.7), false)
+                .texture
+                .is_none()
+        );
+    }
+
+    /// `state.cpp:1794`: the init code of a preset being loaded sees the current inputs, but the click edge belongs to
+    /// the next rendered frame.
+    #[test]
+    fn init_code_sees_the_current_inputs_and_leaves_the_click_edge_alone() {
+        let mut i = Md2Inputs::new();
+        i.set_mouse(MouseState {
+            position: Some([0.25, 0.25]),
+            left_down: true,
+        });
+        i.set_ctrl_keys(CtrlKeys {
+            up: true,
+            ..CtrlKeys::default()
+        });
+        i.set_date_time(Some(DateTime {
+            year: 2026,
+            month: 10,
+            day: 13,
+            weekday: 2,
+            hour: 1,
+            minute: 2,
+            second: 3,
+            millisecond: 500,
+        }));
+        let v = i.vars_now(0.0);
+        assert_eq!(v.mouse, [0.25, 0.75, 1.0, 0.0]);
+        assert_eq!(v.ctrl, [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(v.date[0], 2026.0);
+        assert_eq!(v.date[7], 500.0);
+        assert_eq!(v.date[8], f64::from(3723.5f32));
+        let f = i.begin_frame(&AudioFrame::default(), 60.0, 0.0, (0.5, 0.7), false);
+        assert_eq!(f.vars.mouse[3], 1.0, "the peek did not eat the press");
+        assert_eq!(f.vars.date, v.date);
     }
 }

@@ -279,16 +279,21 @@ pub struct CompatRules {
     /// image it is already drawn on), so additive and alpha modes are twice as strong with `SpriteBurn=1` as with 0.
     /// Measured against MD3 under Wine (docs/md3.md, sprites).
     pub md3_sprite_burn_twice: bool,
-    /// BeatDrop's shader inputs under MilkDrop 2: the shader prelude (`_c14` mouse, `_c15` / `_c16` time and date,
-    /// `sampler_fft` / `sampler_wave`, `get_fft*`, `get_wave`), the engine-fed spectrum / waveform texture and the
-    /// BeatDrop shader-FFT analyser (RMS-normalised 2048-window FFT with FPS-independent attack / decay and a peak
-    /// hold). Off under projectM (`sampler_fft` stays an unresolved user texture, so projectM-compat output is
-    /// untouched) and MilkDrop 3 (its own prelude, [`md3_shader_prelude`](Self::md3_shader_prelude)).
+    /// BeatDrop's shader inputs under MilkDrop 2 (`include.fx` and `plugin.cpp` of BeatDrop-Music-Visualizer): the
+    /// shader prelude (`_c14` mouse, `_c15` / `_c16` time and date, `sampler_fft` / `sampler_wave`, the `get_fft*` /
+    /// `get_wave*` functions), the engine-fed textures (two separate `R32Float` textures: `sampler_fft` 1024 x 2 and
+    /// `sampler_wave` 480 x 2) and the BeatDrop shader-FFT analyser (RMS-normalised 2048-window FFT with
+    /// FPS-independent attack / decay and a peak hold). Off under projectM (`sampler_fft` stays an unresolved user
+    /// texture, so projectM-compat output is untouched) and MilkDrop 3 (its own prelude,
+    /// [`md3_shader_prelude`](Self::md3_shader_prelude)).
     pub md2_shader_inputs: bool,
     /// BeatDrop's expression variables for host input and the clock: `mousex mousey mousedown mouseclick`,
     /// `ctrllt ctrlrt ctrldn ctrlup` and `year month day weekday hour minute second milliseconds totalseconds`, set
-    /// by the engine every frame in the per-frame and per-vertex contexts. MilkDrop 3 has none of them (its mouse is
-    /// shader-only and `mouse.x` does not compile), so it turns this off.
+    /// by the engine every frame in the per-frame and per-vertex contexts (the date variables per-frame only). During a
+    /// preset blend the mouse position and the date variables are mixed, `mousedown` / `mouseclick` snap and `ctrl*`
+    /// are not blended (`milkdropfs.cpp:916-930`); a preset's per-frame init code already sees the current values
+    /// (`state.cpp:1794`). MilkDrop 3 has none of them (its mouse is shader-only and `mouse.x` does not compile), so it
+    /// turns this off.
     pub md2_input_vars: bool,
 }
 

@@ -44,40 +44,69 @@ impl Renderer {
         );
     }
 
-    /// [`record_fft_upload`](Self::record_fft_upload) for BeatDrop's [`crate::BeatDropTexture`] (the whole texture).
+    /// [`record_fft_upload`](Self::record_fft_upload) for BeatDrop's [`crate::BeatDropTexture`]: the two rows of
+    /// `sampler_fft` in one copy, the two rows of `sampler_wave` in one copy each (a row of `NUM_WAVEFORM_SAMPLES`
+    /// floats is not a multiple of the 256-byte row pitch a two-row copy needs).
     pub(super) fn record_beatdrop_upload(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         data: &crate::BeatDropTexture,
     ) {
+        let Some(wave) = &self.wave else {
+            return;
+        };
         let texels = data.texels();
         let staging = buffer_init(
             &self.device,
-            "fft",
+            "beatdrop",
             texels.as_slice(),
             wgpu::BufferUsages::COPY_SRC,
         );
-        encoder.copy_buffer_to_texture(
-            wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.fft.w * 4),
-                    rows_per_image: Some(self.fft.h),
+        let copy = |encoder: &mut wgpu::CommandEncoder,
+                    tex: &Tex,
+                    first_texel: usize,
+                    y: u32,
+                    rows: u32| {
+            encoder.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: (first_texel * 4) as u64,
+                        // the pitch of a copy of several rows must be a multiple of 256 bytes; one row has none
+                        bytes_per_row: (rows > 1).then_some(tex.w * 4),
+                        rows_per_image: (rows > 1).then_some(rows),
+                    },
                 },
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.fft.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: self.fft.w,
-                height: self.fft.h,
-                depth_or_array_layers: 1,
-            },
-        );
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: tex.w,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        copy(encoder, &self.fft, 0, 0, 2);
+        let wave_at = 2 * crate::BEATDROP_FFT_BINS;
+        copy(encoder, wave, wave_at, 0, 1);
+        copy(encoder, wave, wave_at + crate::BEATDROP_WAVE_SAMPLES, 1, 1);
+    }
+
+    /// BeatDrop's `sampler_wave` as the translator hands it over: the user texture `"wave"` under
+    /// `CompatRules::md2_shader_inputs` (the frozen ABI has no [`TexSource`] for it, so it cannot be told from a
+    /// host-supplied image by its source; BeatDrop binds `m_lpWaveTexture` to the root name `wave` before looking
+    /// for an image, and so does this). `None` for every other source.
+    pub(super) fn engine_wave(&self, src: &TexSource) -> Option<&Tex> {
+        match src {
+            TexSource::User(name) if self.rules.md2_shader_inputs && name == "wave" => {
+                self.wave.as_ref()
+            }
+            _ => None,
+        }
     }
 
     pub(super) fn tex_bind_group(
@@ -232,12 +261,13 @@ impl Renderer {
                 let t = &self.noise[n.index()];
                 (t.w, t.h)
             }
-            TexSource::User(name) => match user_tex.get(&name.to_ascii_lowercase()) {
-                Some(u) => (u.tex.w, u.tex.h),
-                None => (1, 1),
+            TexSource::User(name) => match self.engine_wave(src) {
+                Some(w) => (w.w, w.h),
+                None => match user_tex.get(&name.to_ascii_lowercase()) {
+                    Some(u) => (u.tex.w, u.tex.h),
+                    None => (1, 1),
+                },
             },
-            // BeatDrop's `sampler_fft` is 1024 x 2 and `sampler_wave` 480 x 2 (the shared texture has four rows)
-            TexSource::Fft if self.rules.md2_shader_inputs => (self.fft.w, 2),
             TexSource::Fft => (self.fft.w, self.fft.h),
         };
         [w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32]
@@ -435,9 +465,12 @@ impl Renderer {
                 TexSource::Blur(k) if (1..=3).contains(k) => &self.blur[*k as usize * 2 - 1].view,
                 TexSource::Blur(_) => &self.dummy_2d.view,
                 TexSource::Noise(n) => &self.noise[n.index()].view,
-                TexSource::User(name) => match user_tex.get(&name.to_ascii_lowercase()) {
-                    Some(u) => u.view_at(self.anim_time),
-                    None => &self.dummy_2d.view,
+                TexSource::User(name) => match self.engine_wave(&t.source) {
+                    Some(w) => &w.view,
+                    None => match user_tex.get(&name.to_ascii_lowercase()) {
+                        Some(u) => u.view_at(self.anim_time),
+                        None => &self.dummy_2d.view,
+                    },
                 },
                 TexSource::Fft => &self.fft.view,
             };

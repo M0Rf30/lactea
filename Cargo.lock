@@ -1272,7 +1272,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "lactea"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "gif",
  "image",
@@ -1291,7 +1291,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-abi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "naga",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-app"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-audio"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lactea-abi",
  "serde_json",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-capi"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ash",
  "cbindgen",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-compare"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1376,11 +1376,11 @@ dependencies = [
 
 [[package]]
 name = "lactea-eel"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "lactea-eel-oracle"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cc",
  "lactea-eel",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-hlsl"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "image",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-host"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "image",
  "lactea",
@@ -1416,15 +1416,15 @@ dependencies = [
 
 [[package]]
 name = "lactea-jpeg"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "lactea-preset"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "lactea-render"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytemuck",
  "image",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "lactea-testutil"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lactea-render",
  "pollster",

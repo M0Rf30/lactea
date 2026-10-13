@@ -28,7 +28,7 @@ jobs:
     name: tag matches Cargo.toml
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: compare
         run: |
           set -euo pipefail
@@ -44,7 +44,7 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: system libraries
@@ -55,7 +55,7 @@ jobs:
         run: cargo build --locked --release -p lactea-app -p lactea-capi
       - name: package
         run: scripts/release_package.sh linux
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: dist/*.tar.gz
@@ -69,7 +69,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # PipeWire is Linux-only; audio capture goes through cpal (WASAPI loopback).
@@ -79,7 +79,7 @@ jobs:
           cargo build --locked --release -p lactea-capi
       - name: package
         run: scripts/release_package.sh windows
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-x86_64
           path: dist/*.zip
@@ -90,7 +90,7 @@ jobs:
     needs: verify
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: build
@@ -99,7 +99,7 @@ jobs:
           cargo build --locked --release -p lactea-capi
       - name: package
         run: scripts/release_package.sh macos
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos-arm64
           path: dist/*.tar.gz
@@ -113,14 +113,17 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - name: release notes
+        run: scripts/release_notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
       - name: checksums
         run: cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body_path: ${{ runner.temp }}/notes.md

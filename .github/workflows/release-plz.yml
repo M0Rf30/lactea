@@ -25,7 +25,7 @@ jobs:
       group: release-plz-release
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -39,13 +39,16 @@ jobs:
 
   release-pr:
     name: release PR
+    # After `release`: on the push of a merged release PR, a parallel release-pr still sees the
+    # registry one version behind and reopens a release PR for the version being published.
+    needs: release
     runs-on: ubuntu-latest
     if: github.repository == 'M0Rf30/lactea' && vars.RELEASE_PLZ_ENABLED == 'true'
     concurrency:
       group: release-plz-pr-${{ github.ref }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false

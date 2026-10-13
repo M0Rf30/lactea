@@ -11,15 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **web:** Browser showcase on GitHub Pages ([#20](https://github.com/M0Rf30/lactea/pull/20))
+- **web:** browser showcase on GitHub Pages ([#20](https://github.com/M0Rf30/lactea/pull/20)): playlist, drag-and-drop presets and textures, file / microphone / synthetic audio
 
+### Fixed
+
+- **web:** the wasm32 build no longer hangs on the motion-vector UV readback under WebGPU; it uses the CPU warp UVs
 
 ## [0.2.1] - 2026-10-13
 
 ### Fixed
 
-- **md2:** Port BeatDrop's shader inputs from source, dedup the release changelog
-
+- **md2:** BeatDrop shader inputs ported from source: BeatDrop's `include.fx` prelude, separate `sampler_fft` (1024x2) and `sampler_wave` (480x2) textures, host vars and FFT coefficients blended over soft cuts
+- **hlsl:** the remaining `include.fx` aliases (`aspect_sd`, `SAMPLER*D`, `texture*D`, `trunc`, `tex1d`, `texcube`)
+- **capi:** no dead-code warning for `VulkanState::format` on Apple targets
 
 ## [0.2.0] - 2026-10-13
 
@@ -73,78 +77,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- Auto compat, md3 hardening, perf, fidelity and ux improvements
-- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
+- **md3:** MilkDrop 3 (3.37) support behind `Compat::MilkDrop3`: `.milk2` double presets, 30 MD3 blend patterns, preset sprites (11 blend modes, layers, GIF), `get_fft` / mouse / `q33`-`q64` shader inputs, the ns-eel2 expression dialect, wave modes 0-16, 500-side shapes, `.wave` / `.shape` import and export, auto hard-cut modes 1-7 ([#7](https://github.com/M0Rf30/lactea/pull/7))
+- **md3:** the `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch shader uniforms (and the `MXD3QX1..16` / `MXD3QS1..12` prelude macros) are computed per frame instead of being undeclared ([#11](https://github.com/M0Rf30/lactea/pull/11))
+- **app:** `--compat auto` is the default: MD3 files are detected by content, and a preset falls back to MilkDrop 2 when projectM fails to compile its shaders ([#9](https://github.com/M0Rf30/lactea/pull/9))
+- **app:** `--shader-override-warp` / `--shader-override-comp HANDLE=FILE`, as in `fdrender` ([#11](https://github.com/M0Rf30/lactea/pull/11))
+
+### Changed
+
+- **perf:** output-identical renderer and VM work, 22-47 % fewer instructions ([#9](https://github.com/M0Rf30/lactea/pull/9))
+- **md2:** code lines are joined without a separator, as in MilkDrop 2 ([#7](https://github.com/M0Rf30/lactea/pull/7))
 
 ### Fixed
 
-- **lactea:** Fall back to milkdrop 2 when projectm cannot translate a shader
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- Auto compat, md3 hardening, perf, fidelity and ux improvements
-- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- Auto compat, md3 hardening, perf, fidelity and ux improvements
-- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- Auto compat, md3 hardening, perf, fidelity and ux improvements
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- Auto compat, md3 hardening, perf, fidelity and ux improvements
-- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- Auto compat, md3 hardening, perf, fidelity and ux improvements
-
-
-## [0.1.2] - 2026-10-12
-
-### Added
-
-- Add MilkDrop 3 support (Compat::MilkDrop3)
-- **md3:** Compute the _mxd3q* audio-envelope / beat-latch uniforms
-
-
-### Added
-
-- `lactea`: the MilkDrop 3 `_mxd3qxa.._d` / `_mxd3qsa.._c` audio-envelope / beat-latch shader uniforms (and the
-  `MXD3QX1..16` / `MXD3QS1..12` prelude macros) are computed per frame and uploaded instead of being undeclared.
-- `lactea` app: `--shader-override-warp` / `--shader-override-comp HANDLE=FILE`, as in `fdrender`.
+- **lactea:** in auto compat, a preset whose shader projectM cannot translate is retried under MilkDrop 2 ([#10](https://github.com/M0Rf30/lactea/pull/10))
+- **md3:** robustness fixes and projectM fidelity fixes ([#9](https://github.com/M0Rf30/lactea/pull/9))
 
 ## [0.1.1] - 2026-10-12
 
@@ -176,7 +122,3 @@ First public release.
 - Fidelity tooling: instrumented projectM reference build (`oracle/`), `fdrender`, corpus runner and
   reports; method and numbers in `docs/fidelity.md`.
 - Release pipeline: binaries for Linux, Windows and macOS; crates.io publishing with release-plz.
-
-[Unreleased]: https://github.com/M0Rf30/lactea/compare/v0.1.1...HEAD
-[0.1.1]: https://github.com/M0Rf30/lactea/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/M0Rf30/lactea/releases/tag/v0.1.0

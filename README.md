@@ -248,8 +248,8 @@ Architecture and contracts: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Versions, `CHANGELOG.md` and crates.io publishing are driven by [release-plz](https://release-plz.dev)
 from conventional commits. Merging its release PR tags `vX.Y.Z`; the tag builds the app and the C
-library for Linux, Windows and macOS (`.github/workflows/release.yml`) and attaches the archives
-and `SHA256SUMS` to the GitHub release.
+library for Linux, Windows and macOS (`.github/workflows/release.yml`) and attaches the archives,
+`SHA256SUMS` and the version's `CHANGELOG.md` section to the GitHub release.
 
 ## Contributing
 

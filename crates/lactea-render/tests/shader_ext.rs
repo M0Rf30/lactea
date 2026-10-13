@@ -17,35 +17,11 @@ use lactea_render::{
     BlurParams, Compat, CompiledShader, FrameInput, Md2Blend, Md2OldPass, RenderConfig, Renderer,
     ShaderExt,
 };
+use lactea_testutil::{gpu_or_skip, quiet_input, read_rgba8};
 use std::sync::Arc;
 
 const W: u32 = 64;
 const H: u32 = 48;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
-/// No adapter: skip with a message, unless `LACTEA_REQUIRE_GPU` is set (CI), which makes it a failure.
-macro_rules! need_gpu {
-    () => {
-        match gpu() {
-            Some(g) => g,
-            None => {
-                assert!(
-                    std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-                    "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-                );
-                eprintln!("SKIP: no wgpu adapter");
-                return;
-            }
-        }
-    };
-}
 
 fn cfg(compat: Compat) -> RenderConfig {
     RenderConfig {
@@ -76,47 +52,6 @@ fn target(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
     (t, v)
 }
 
-fn read_target(device: &wgpu::Device, queue: &wgpu::Queue, t: &wgpu::Texture) -> Vec<u8> {
-    let bpr = (W * 4).div_ceil(256) * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (bpr * H) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: t,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(H),
-            },
-        },
-        wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(enc.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = buf.slice(..).get_mapped_range().unwrap();
-    let mut out = Vec::new();
-    for y in 0..H {
-        out.extend_from_slice(&data[(y * bpr) as usize..(y * bpr + W * 4) as usize]);
-    }
-    out
-}
-
 fn render(
     r: &mut Renderer,
     device: &wgpu::Device,
@@ -127,19 +62,6 @@ fn render(
     let mut enc = device.create_command_encoder(&Default::default());
     r.render_frame(&mut enc, input, view).unwrap();
     queue.submit(Some(enc.finish()));
-}
-
-/// An input that draws nothing but the shaders: identity warp, decay 1, no wave / mv / borders.
-fn quiet_input() -> FrameInput {
-    let mut f = FrameInput::default();
-    f.post.decay = 1.0;
-    f.post.gamma = 1.0;
-    f.post.wrap = false;
-    f.main_wave.rgba[3] = 0.0;
-    f.mv.rgba[3] = 0.0;
-    f.borders.ob_rgba[3] = 0.0;
-    f.borders.ib_rgba[3] = 0.0;
-    f
 }
 
 fn shader(body: &str, bindings: &str, interface: ShaderInterface) -> CompiledShader {
@@ -184,7 +106,7 @@ fn px(img: &[u8], x: u32, y: u32) -> [u8; 3] {
 /// not set it sees the neutral `(-1, -1, 0, 0)`.
 #[test]
 fn mouse_reaches_the_shader() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg(Compat::MilkDrop3)).unwrap();
     let (_t, view) = target(&device);
     // x, y mapped to [0, 1]; z and w packed in blue (z/2 + w/4) so all four are told apart
@@ -213,7 +135,7 @@ fn mouse_reaches_the_shader() {
 /// `ext.q_hi` (`q33..q64`) reaches `mx.q_hi`: first, last and a middle component.
 #[test]
 fn q_hi_reaches_the_shader() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg(Compat::MilkDrop3)).unwrap();
     let (_t, view) = target(&device);
     r.set_comp_shader(Some(plain(
@@ -288,7 +210,7 @@ fn assert_fft_ramp(img: &[u8], rev: bool, what: &str) {
 /// every frame that carries `ext.fft`, kept by one that does not, and private to each renderer (`sibling`).
 #[test]
 fn fft_texture_is_uploaded_kept_and_per_renderer() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut r = Renderer::new(&device, &queue, cfg(Compat::MilkDrop3)).unwrap();
     let (_t, view) = target(&device);
@@ -335,7 +257,7 @@ fn fft_texture_is_uploaded_kept_and_per_renderer() {
 /// recorded commands, not a queue write that lands before all of them).
 #[test]
 fn fft_upload_is_ordered_with_the_frame_that_carries_it() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg(Compat::MilkDrop3)).unwrap();
     r.set_comp_shader(Some(fft_shader())).unwrap();
     let (ta, va) = target(&device);
@@ -348,14 +270,22 @@ fn fft_upload_is_ordered_with_the_frame_that_carries_it() {
     r.render_frame(&mut enc, &a, &va).unwrap();
     r.render_frame(&mut enc, &b, &vb).unwrap();
     queue.submit(Some(enc.finish()));
-    assert_fft_ramp(&read_target(&device, &queue, &ta), false, "first frame");
-    assert_fft_ramp(&read_target(&device, &queue, &tb), true, "second frame");
+    assert_fft_ramp(
+        &read_rgba8(&device, &queue, &ta, W, H),
+        false,
+        "first frame",
+    );
+    assert_fft_ramp(
+        &read_rgba8(&device, &queue, &tb, W, H),
+        true,
+        "second frame",
+    );
 }
 
 /// A frame rendered to the renderer's own output (`render_frame_to_output`) uploads the FFT as well.
 #[test]
 fn fft_is_uploaded_by_render_frame_to_output() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg(Compat::MilkDrop3)).unwrap();
     r.set_comp_shader(Some(fft_shader())).unwrap();
     let mut f = quiet_input();
@@ -395,7 +325,7 @@ fn ramp_alpha() -> Vec<u8> {
 /// shows the old side, the right part the new one.
 #[test]
 fn old_state_passes_see_their_own_ext() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (_t, view) = target(&device);
     let mut r = Renderer::new(&device, &queue, cfg(Compat::MilkDrop3)).unwrap();
     for set in [Renderer::set_warp_shader, Renderer::set_comp_shader] {

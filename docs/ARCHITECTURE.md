@@ -19,22 +19,26 @@ lactea itself is `MIT OR Apache-2.0`.
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `lactea-abi` | Frozen contract: `MilkUniforms` (= `include.fx` registers), WGSL prelude, bind layout, `MeshVertex`, `ShaderInterface`, `RunConfig`, `pcm_range`, dump layout | — |
+| `lactea-abi` | Frozen contract: `MilkUniforms` (= `include.fx` registers), WGSL prelude, bind layout, `MeshVertex`, `ShaderInterface`, `RunConfig`, `pcm_range`, dump layout; `serde` is an optional feature (enabled by `lactea-cli` and `lactea-compare` for the dump types) | — |
 | `lactea-eel` | ns-eel2 language (projectm-eval semantics, f64), compile once / run many, pre-resolved var handles, shared gmegabuf | — |
-| `lactea-jpeg` | JPEG decoder reproducing `stb_image` output byte for byte (projectM's texture decoder) | — |
+| `lactea-jpeg` | JPEG decoder reproducing `stb_image` output byte for byte (projectM's texture decoder); the only JPEG decoder in the tree | — |
 | `lactea-eel-oracle` | projectm-eval via `cc`; differential + fuzz tests (publish = false) | eel |
 | `lactea-preset` | `.milk` parser with MD2 key/default/version/code-joining semantics; serializer | — |
 | `lactea-audio` | MD2 audio analysis (bass/mid/treb, `_att`, waveform 576, spectrum 512) from float PCM | — |
 | `lactea-hlsl` | MD2 HLSL dialect (+ `include.fx`, sampler prefixes, `texsize_*`) → WGSL + `ShaderInterface` | abi |
-| `lactea-render` | wgpu port of MD2 `RenderFrame`: warp mesh, blur, shapes, waves, borders, motion vectors, comp; no window/audio knowledge | abi |
-| `lactea-compare` | Dump reader/writer, image metrics (PSNR/SSIM/max-abs), var diffs, reports, `fdcompare` CLI | abi |
-| `lactea` | Engine glue: preset → eel → per-frame / per-vertex / waves / shapes → `render` | all |
-| `lactea-app` | Standalone: winit + PipeWire/cpal capture + file playback, preset browser; not published to crates.io | lactea, jpeg |
-| `lactea-cli` | `fdrender`: deterministic dumps and teacher forcing for fidelity work; not published | lactea, compare |
-| `lactea-capi` | C ABI for non-Rust hosts (render into a host Vulkan image or read back RGBA8); not published to crates.io | lactea, jpeg |
+| `lactea-render` | wgpu port of MD2 `RenderFrame`: warp mesh, blur, shapes, waves, borders, motion vectors, comp; no window/audio knowledge. Modules `renderer/{mod,pipelines,uv_readback,orchestrate,passes,fixed,burn}.rs`; feature `gles` adds the GLES backend | abi |
+| `lactea-compare` | Dump reader/writer, image metrics (PSNR/SSIM/max-abs), var diffs, reports, `fdcompare` CLI; not published | abi (serde) |
+| `lactea` | Engine glue: preset → eel → per-frame / per-vertex / waves / shapes → `render` | abi, eel, preset, audio, hlsl, render |
+| `lactea-host` | Host helpers shared by the binaries and the C API (publish = false): directory-backed `TextureProvider` (`DirTextures`, several dirs, optional cache), image/media decode (`decode_image/file/media`; JPEG via `lactea-jpeg`), headless GPU init, WAV reader, preset-directory scan and `PlaylistFs` | lactea, jpeg |
+| `lactea-testutil` | GPU test helpers for tests (publish = false); dev-dependency of `lactea` and `lactea-render` | render |
+| `lactea-app` | Standalone: winit + PipeWire/cpal capture + file playback, preset browser; not published to crates.io; features `engine`, `pipewire`, `gles` | abi, host, lactea (optional) |
+| `lactea-cli` | `fdrender`: deterministic dumps and teacher forcing for fidelity work; not published | lactea, render, preset, abi (serde), host, compare |
+| `lactea-capi` | C ABI for non-Rust hosts (render into a host Vulkan image or read back RGBA8); not published to crates.io; feature `gles` | lactea, host |
 
 Embedding rule: library crates never create windows, surfaces, threads or audio devices and
-never touch the filesystem (presets/textures come in as bytes), so they also build for wasm.
+never touch the filesystem (presets/textures come in as bytes), so they also build for wasm. The
+filesystem, GPU-device and decode work lives in `lactea-host`, which only the native hosts
+(app, C API, `fdrender`) use.
 
 ## Determinism contract (oracle and lactea are driven identically)
 

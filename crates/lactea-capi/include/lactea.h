@@ -16,34 +16,17 @@
 // and `lactea_resize` check the size against it and the error message names the limit.
 #define LACTEA_MAX_DIMENSION 16384
 
-// Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ (`docs/divergences.md`,
-// `docs/md3.md`).
-enum LacteaCompat
-#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
-  : int32_t
-#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
- {
-  // Follow projectM.
-  LACTEA_COMPAT_PROJECTM = 0,
-  // Follow MilkDrop 2.
-  LACTEA_COMPAT_MILKDROP2 = 1,
-  // Follow MilkDrop 3.
-  LACTEA_COMPAT_MILKDROP3 = 2,
-  // Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
-  // (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
-  // names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
-  // code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
-  // changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
-  // mode in use. Before the first load the mode is projectM.
-  LACTEA_COMPAT_AUTO = 3,
-};
-#ifndef __cplusplus
-#if __STDC_VERSION__ >= 202311L
-typedef enum LacteaCompat LacteaCompat;
-#else
-typedef int32_t LacteaCompat;
-#endif // __STDC_VERSION__ >= 202311L
-#endif // __cplusplus
+// `projectm_playlist_sort_predicate`: sort by the whole path.
+#define LACTEA_PLAYLIST_SORT_FULL_PATH 0
+
+// `projectm_playlist_sort_predicate`: sort by the file name only.
+#define LACTEA_PLAYLIST_SORT_FILENAME_ONLY 1
+
+// `projectm_playlist_sort_order`: ascending.
+#define LACTEA_PLAYLIST_SORT_ASCENDING 0
+
+// `projectm_playlist_sort_order`: descending.
+#define LACTEA_PLAYLIST_SORT_DESCENDING 1
 
 // Result of every fallible call. `0` is success; failures are negative and the message is in
 // `lactea_last_error`.
@@ -74,6 +57,14 @@ typedef int32_t LacteaStatus;
 // Opaque engine handle.
 typedef struct LacteaEngine LacteaEngine;
 
+// Opaque playlist handle.
+typedef struct LacteaPlaylist LacteaPlaylist;
+
+// Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ (`docs/divergences.md`,
+// `docs/md3.md`): one of the `LACTEA_COMPAT_*` values. A plain `int32_t` so that any bit pattern read
+// from C is a valid Rust value; unknown values are rejected with `LACTEA_STATUS_INVALID_ARGUMENT`.
+typedef int32_t LacteaCompat;
+
 // Construction parameters. Fill with `lactea_config_default` and override fields.
 typedef struct {
   // Render width in pixels, `1..=LACTEA_MAX_DIMENSION`.
@@ -86,7 +77,8 @@ typedef struct {
   uint32_t mesh_y;
   // Seeds every random stream: same seed + same inputs = same frames.
   uint64_t seed;
-  // Which implementation to follow where projectM and MilkDrop 2 differ.
+  // Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ: one of the
+  // `LACTEA_COMPAT_*` values (`LACTEA_COMPAT_AUTO` picks per preset from its content).
   LacteaCompat compat;
   // Sample rate of the PCM given to `lactea_push_pcm_f32`.
   uint32_t sample_rate;
@@ -105,7 +97,8 @@ typedef struct {
 // Called when a rendered frame asks for another preset (display time up or a beat-driven hard cut,
 // see `lactea_set_switch_settings`). With `LACTEA_COMPAT_MILKDROP3` an auto hard cut
 // (`lactea_set_auto_hard_cut_mode`) calls it too, with `is_hard_cut = true`; `preset_locked`
-// silences every request. The request is *also*
+// silences every request. While a playlist is connected (`lactea_playlist_connect`) it answers the
+// requests and this callback is not called. The request is *also*
 // kept for `lactea_poll_switch_request`. The callback runs synchronously on the calling thread,
 // inside `lactea_render*`, after the frame is submitted and the call's work is done. It may call
 // any lactea function on the same engine, for example `lactea_load_preset_ex` to load the next
@@ -155,6 +148,54 @@ typedef struct {
   double preset_duration_rand;
 } LacteaSwitchSettings;
 
+// A log level (`projectm_log_level`): one of the `LACTEA_LOG_LEVEL_*` values. A plain `int32_t`; out-of-range
+// values are clamped (below 0: `NOTSET`, above 6: `FATAL`).
+typedef int32_t LacteaLogLevel;
+
+// Log callback: `level` is the record's `LACTEA_LOG_LEVEL_*`, `message` NUL-terminated and valid only during the
+// call (it may contain line breaks).
+typedef void (*LacteaLogFn)(LacteaLogLevel level, const char *message, void *user_data);
+
+// Pixels a texture load callback hands back (`projectm_texture_load_data` with the OpenGL parts removed).
+typedef struct {
+  // `width * height * 4` RGBA8 bytes, **row 0 = top** (projectM's callback uses OpenGL order, first row =
+  // bottom, and accepts 3 or 4 channels and GL texture ids; none of those exist here). NULL = "no such
+  // texture".
+  const uint8_t *rgba;
+  // Width in pixels (> 0 with pixels).
+  uint32_t width;
+  // Height in pixels (> 0 with pixels).
+  uint32_t height;
+} LacteaImage;
+
+// Texture load callback (`projectm_set_texture_load_event_callback`): `name` is the texture as the preset's shader
+// names it, lowercase, without the `sampler_` and quality prefixes and without extension (`sampler_fw_clouds2` asks
+// for `"clouds2"`), NUL-terminated and valid only during the call. Fill `*out` and return `true` to supply it;
+// `false` leaves the lookup to the `lactea_set_texture_dir` directory. `*out` starts zeroed. The pixels are copied
+// before the callback's caller continues, so they only need to stay valid until the callback returns.
+//
+// It runs synchronously on the thread of the lactea call that loads a preset (`lactea_load_*`) or resets textures,
+// while the engine is in use: it must **not** call any lactea function on that engine.
+typedef bool (*LacteaTextureLoadFn)(const char *name, void *user_data, LacteaImage *out);
+
+// A preset was switched to (`projectm_playlist_preset_switched_event`). Not raised when a load
+// callback handled the load.
+typedef void (*LacteaPlaylistSwitchedFn)(bool is_hard_cut, uint32_t index, void *user_data);
+
+// Switching failed after the retries (`projectm_playlist_preset_switch_failed_event`); the strings
+// are valid during the call only.
+typedef void (*LacteaPlaylistSwitchFailedFn)(const char *preset_filename,
+                                             const char *message,
+                                             void *user_data);
+
+// Loads the preset at `index` yourself (`projectm_playlist_preset_load_event`): return `true` when
+// handled (the playlist then does nothing else and raises no switched event), `false` to let it
+// load the file.
+typedef bool (*LacteaPlaylistLoadFn)(uint32_t index,
+                                     const char *filename,
+                                     bool hard_cut,
+                                     void *user_data);
+
 // The host's Vulkan objects. Dispatchable handles are passed as pointers, strings as arrays of
 // NUL-terminated names exactly as given to `vkCreateInstance` / `vkCreateDevice`.
 typedef struct {
@@ -200,6 +241,44 @@ typedef struct {
   // Owner of the memory above.
   void *private_data;
 } LacteaVulkanRequirements;
+
+// Follow projectM.
+#define LACTEA_COMPAT_PROJECTM 0
+
+// Follow MilkDrop 2.
+#define LACTEA_COMPAT_MILKDROP2 1
+
+// Follow MilkDrop 3.
+#define LACTEA_COMPAT_MILKDROP3 2
+
+// Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
+// (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
+// names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
+// code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
+// changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
+// mode in use. Before the first load the mode is projectM.
+#define LACTEA_COMPAT_AUTO 3
+
+// Use the default level ([`LACTEA_LOG_LEVEL_INFO`]).
+#define LACTEA_LOG_LEVEL_NOTSET 0
+
+// Verbose trace output.
+#define LACTEA_LOG_LEVEL_TRACE 1
+
+// Debug output.
+#define LACTEA_LOG_LEVEL_DEBUG 2
+
+// Informational messages.
+#define LACTEA_LOG_LEVEL_INFO 3
+
+// Non-critical problems, e.g. a shader that fell back to the default one.
+#define LACTEA_LOG_LEVEL_WARN 4
+
+// Recoverable errors, e.g. a preset that failed to load.
+#define LACTEA_LOG_LEVEL_ERROR 5
+
+// Irrecoverable errors (lactea reports none; accepted as the level that silences everything below it).
+#define LACTEA_LOG_LEVEL_FATAL 6
 
 #ifdef __cplusplus
 extern "C" {
@@ -277,12 +356,15 @@ LacteaStatus lactea_set_switch_failed_callback(LacteaEngine *engine,
                                                LacteaSwitchFailedFn callback,
                                                void *user_data);
 
-// Use the images under `path` (recursive; jpg/jpeg/png/tga/bmp/dib) for preset `sampler_*`
-// textures. Takes effect for presets loaded afterwards.
+// Use the images under `path` (recursive; jpg/jpeg/dds/png/tga/bmp/dib) for preset `sampler_*`
+// textures. Takes effect for presets loaded afterwards. With `LACTEA_COMPAT_MILKDROP3` (or auto) the
+// directory also supplies MD3's sprites and shader textures (additionally `jfif` and `gif`); when `path`
+// is one of the folders `textures`, `sprites` or `gifs`, its siblings of those names are searched too.
 //
 // # Safety
 // `engine` valid; `path` NUL-terminated UTF-8.
-LacteaStatus lactea_set_texture_dir(LacteaEngine *engine, const char *path);
+LacteaStatus lactea_set_texture_dir(LacteaEngine *engine,
+                                    const char *path);
 
 // Push `frames` sample frames of interleaved float PCM (`-1..1`) with `channels` channels (only
 // the first two are analysed).
@@ -399,6 +481,53 @@ LacteaStatus lactea_set_mouse(LacteaEngine *engine,
                               bool inside,
                               bool left_down);
 
+// MilkDrop 2 (BeatDrop) Ctrl + arrow keys (`LACTEA_COMPAT_MILKDROP2`; ignored by the other modes): the expression
+// variables `ctrllt ctrlrt ctrldn ctrlup`. Call it whenever the state changes; the engine reads the latest values
+// once per rendered frame.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_set_ctrl_keys(LacteaEngine *engine,
+                                  bool left,
+                                  bool right,
+                                  bool down,
+                                  bool up);
+
+// MilkDrop 2 (BeatDrop) wall clock (`LACTEA_COMPAT_MILKDROP2`; ignored by the other modes): the expression
+// variables `year month day weekday hour minute second milliseconds totalseconds` and the shader constants `_c15` /
+// `_c16`. The engine never reads the system clock: call it whenever the host's time moves on (typically once per
+// frame). `weekday` is 1 = Monday .. 7 = Sunday. Until the first call the date reads 0 and the time of day
+// follows the frame clock (`totalseconds` = frame time modulo 86400). A field out of its range (`month` 1..=12,
+// `day` 1..=31, `weekday` 1..=7, `hour` < 24, `minute` < 60, `second` < 60, `millisecond` < 1000) is
+// `InvalidArgument` and nothing is changed.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_set_date_time(LacteaEngine *engine,
+                                  uint16_t year,
+                                  uint8_t month,
+                                  uint8_t day,
+                                  uint8_t weekday,
+                                  uint8_t hour,
+                                  uint8_t minute,
+                                  uint8_t second,
+                                  uint16_t millisecond);
+
+// Go back to the frame-clock time of day of [`lactea_set_date_time`].
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_clear_date_time(LacteaEngine *engine);
+
+// The `monitor` variable of the active preset as its last rendered frame left it (BeatDrop's debug read-out; an
+// ordinary persistent variable in every mode): 0 when no preset is loaded or the preset's code never mentions
+// `monitor`.
+//
+// # Safety
+// `engine` valid; `out` writable.
+LacteaStatus lactea_get_monitor(const LacteaEngine *engine,
+                                double *out);
+
 // MilkDrop 3 `VolumeSensitivity`: linear gain (default 1) on the 8-bit quantised audio input. Only
 // `LACTEA_COMPAT_MILKDROP3` uses it. A non-finite value is `InvalidArgument`.
 //
@@ -447,6 +576,20 @@ LacteaStatus lactea_set_auto_hard_cut_mode(LacteaEngine *engine, uint8_t mode);
 // # Safety
 // `engine` valid; `out` writable.
 LacteaStatus lactea_get_auto_hard_cut_mode(const LacteaEngine *engine, uint8_t *out);
+
+// `projectm_set_preset_start_clean`: `true` starts every preset loaded afterwards from a black frame,
+// `false` (the default) warps its first frame from the previous preset's last image.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_set_preset_start_clean(LacteaEngine *engine,
+                                           bool enabled);
+
+// `projectm_get_preset_start_clean`.
+//
+// # Safety
+// `engine` valid; `out` writable.
+LacteaStatus lactea_get_preset_start_clean(const LacteaEngine *engine, bool *out);
 
 // The compat mode the engine is running now, never `LACTEA_COMPAT_AUTO`: with
 // `LACTEA_COMPAT_AUTO` it is the mode the last successfully loaded preset resolved to (the creation
@@ -530,6 +673,402 @@ LacteaStatus lactea_read_stage(LacteaEngine *engine,
                                size_t out_len,
                                uint32_t *width,
                                uint32_t *height);
+
+// `projectm_sprite_create`: add a user sprite. `type_name` is the case-insensitive sprite type (`"milkdrop"`) and
+// `code` the text of a MilkDrop `imgNN` section (`img=`, `init_N`, `code_N`; see `lactea::Engine::sprite_create`).
+// The new sprite's id (never 0) is stored in `*out_id`. An unknown type, a sprite limit of 0, unreadable data or
+// code that does not compile is `LACTEA_STATUS_INVALID_ARGUMENT` (the message says which) with `*out_id` = 0. At
+// the limit the oldest sprite is destroyed to make room.
+//
+// # Safety
+// `engine` valid; `type_name` and `code` NUL-terminated strings; `out_id` writable.
+LacteaStatus lactea_sprite_create(LacteaEngine *engine,
+                                  const char *type_name,
+                                  const char *code,
+                                  uint32_t *out_id);
+
+// `projectm_sprite_destroy`: unknown ids are ignored.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_sprite_destroy(LacteaEngine *engine, uint32_t sprite_id);
+
+// `projectm_sprite_destroy_all`.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_sprite_destroy_all(LacteaEngine *engine);
+
+// `projectm_sprite_get_sprite_count`: the number of live sprites (sprites remove themselves after the frame in which
+// `done` was set); 0 for NULL.
+//
+// # Safety
+// `engine` NULL or valid.
+uint32_t lactea_sprite_count(const LacteaEngine *engine);
+
+// `projectm_sprite_get_sprite_ids`: the ids of the live sprites, oldest first. Copies at most `capacity` ids into
+// `ids` (which may be NULL when `capacity` is 0) and stores the number of live sprites in `*count` (may be NULL), so
+// a call with `capacity` 0 sizes the list.
+//
+// # Safety
+// `engine` valid; `ids` NULL or `capacity` writable `uint32_t`s; `count` NULL or writable.
+LacteaStatus lactea_sprite_get_ids(const LacteaEngine *engine,
+                                   uint32_t *ids,
+                                   size_t capacity,
+                                   size_t *count);
+
+// `projectm_sprite_set_max_sprites`: the limit of concurrent sprites (default 16). Lowering it destroys the oldest
+// sprites; 0 makes `lactea_sprite_create` fail.
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_sprite_set_max(LacteaEngine *engine,
+                                   uint32_t max_sprites);
+
+// `projectm_sprite_get_max_sprites` (0 for NULL).
+//
+// # Safety
+// `engine` NULL or valid.
+uint32_t lactea_sprite_get_max(const LacteaEngine *engine);
+
+// `projectm_sprite_get_var`: the value of an expression variable of a sprite in `*out`; 0 for an unknown sprite or
+// a variable the code never used.
+//
+// # Safety
+// `engine` valid; `name` a NUL-terminated string; `out` writable.
+LacteaStatus lactea_sprite_get_var(const LacteaEngine *engine,
+                                   uint32_t sprite_id,
+                                   const char *name,
+                                   double *out);
+
+// `projectm_sprite_set_var`: set an expression variable of a sprite (registered when new); ignored for an unknown
+// sprite.
+//
+// # Safety
+// `engine` valid; `name` a NUL-terminated string.
+LacteaStatus lactea_sprite_set_var(LacteaEngine *engine,
+                                   uint32_t sprite_id,
+                                   const char *name,
+                                   double value);
+
+// `projectm_burn_texture` (`ProjectM::BurnInTexture`): draw one image as a quad into the image the next frame's
+// warp samples, in the running preset and, during a soft cut, in the incoming one. Nothing happens before the
+// first preset is loaded.
+//
+// `rgba` is `width * height` RGBA8 pixels, row 0 = **top** (projectM takes an OpenGL texture id of the host's
+// context, which does not exist here: the pixels are copied before the call returns and the buffer stays the
+// caller's). `left`, `top`, `rect_width`, `rect_height` are in output pixels and follow projectM's placement
+// arithmetic: the quad is scaled by `rect_width / W` x `rect_height / H` about the centre of the image, and a
+// non-zero `left` / `top` perspective-shifts it rather than translating it, exactly as projectM does. The copy is
+// opaque (no blending).
+//
+// Returns `LACTEA_STATUS_INVALID_ARGUMENT` for NULL pixels, zero sizes or a size beyond the device's texture limit.
+//
+// # Safety
+// `engine` valid; `rgba` points to `width * height * 4` readable bytes.
+LacteaStatus lactea_burn_texture_rgba(LacteaEngine *engine,
+                                      const uint8_t *rgba,
+                                      uint32_t width,
+                                      uint32_t height,
+                                      int32_t left,
+                                      int32_t top,
+                                      int32_t rect_width,
+                                      int32_t rect_height);
+
+// `projectm_reset_textures`: forgets every decoded texture, rescans the `lactea_set_texture_dir` directory and
+// resolves the running preset's textures again (call after the files or the texture callback's answers changed).
+//
+// # Safety
+// `engine` valid.
+LacteaStatus lactea_reset_textures(LacteaEngine *engine);
+
+// `projectm_get_vcs_version_string`: `git describe --always --dirty` of the source the library was built from, or
+// `"unknown"` for a build outside a git checkout (a published crate). A static NUL-terminated string: do not free.
+const char *lactea_vcs_version(void);
+
+// `projectm_set_log_callback`: receives every log record lactea (and the engine crates under it) emits. Process-global,
+// like projectM's global callback (there is no per-thread variant); `NULL` removes it. Thread-safe: records are
+// delivered on the thread whose lactea call produced them, possibly from several threads at once, so the callback
+// must be reentrant on its own data.
+//
+// Unlike the event callbacks, a log callback runs *inside* the lactea call, while the engine is in use: it must
+// **not** call any lactea function on an engine (setting the callback or the level is fine). A record logged by a
+// lactea call made in the callback is dropped. After removing the callback, `user_data` may still be passed to a
+// callback running on another thread: free it only once no lactea call is running.
+//
+// Records are only produced while a level at or below theirs is set (`lactea_set_log_level`, default `INFO`).
+// Fails with `LACTEA_STATUS_INVALID_ARGUMENT` when the process already has a different `log` logger installed
+// (e.g. a Rust host).
+//
+// # Safety
+// `callback`, if not NULL, must be callable from any thread until removed; `user_data` is passed to it unchanged.
+LacteaStatus lactea_set_log_callback(LacteaLogFn callback,
+                                     void *user_data);
+
+// `projectm_set_log_level`: the lowest level delivered to the log callback (process-global; `NOTSET` selects the
+// default, `INFO`). `LACTEA_LOG_LEVEL_FATAL` behaves like `ERROR`: lactea has no fatal records.
+LacteaStatus lactea_set_log_level(LacteaLogLevel level);
+
+// `projectm_set_texture_load_event_callback`: consult `callback` for every texture a preset's shaders (and, with
+// `LACTEA_COMPAT_MILKDROP3`, shape images) ask for, before the `lactea_set_texture_dir` directory; `NULL` removes it.
+// See [`LacteaTextureLoadFn`] for the contract. Takes effect for presets loaded afterwards (or
+// `lactea_reset_textures`). `randNN` samplers still pick from the directory's files.
+//
+// # Safety
+// `engine` valid; `callback`, if not NULL, valid to call from the thread that loads presets; `user_data` is passed
+// to it unchanged.
+LacteaStatus lactea_set_texture_load_callback(LacteaEngine *engine,
+                                              LacteaTextureLoadFn callback,
+                                              void *user_data);
+
+// `projectm_playlist_create`: an empty playlist, connected to `engine` unless that is NULL. The
+// shuffle sequence is seeded from the clock. Free with `lactea_playlist_destroy`; the playlist and
+// the engine may be destroyed in either order.
+//
+// # Safety
+// `engine` NULL or valid.
+LacteaPlaylist *lactea_playlist_create(LacteaEngine *engine);
+
+// `projectm_playlist_destroy`. NULL is ignored. Must not be called from one of the playlist's own
+// callbacks.
+//
+// # Safety
+// `playlist` NULL or a handle from `lactea_playlist_create`, not used afterwards.
+void lactea_playlist_destroy(LacteaPlaylist *playlist);
+
+// `projectm_playlist_connect`: (re)connects the playlist to `engine`, or disconnects it with NULL.
+// See the module notes for what connecting does. An engine has at most one playlist: connecting
+// it here disconnects the one it had.
+//
+// # Safety
+// `playlist` valid; `engine` NULL or valid.
+void lactea_playlist_connect(LacteaPlaylist *playlist, LacteaEngine *engine);
+
+// `projectm_playlist_size`.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_size(LacteaPlaylist *playlist);
+
+// `projectm_playlist_clear`: removes every item and the history.
+//
+// # Safety
+// `playlist` valid.
+void lactea_playlist_clear(LacteaPlaylist *playlist);
+
+// `projectm_playlist_items`: copies of the items `start..start+count` (clamped) as a
+// NULL-terminated array; free it with `lactea_playlist_free_string_array`. NULL for a NULL handle.
+//
+// # Safety
+// `playlist` valid.
+char **lactea_playlist_items(LacteaPlaylist *playlist, uint32_t start, uint32_t count);
+
+// `projectm_playlist_item`: a copy of the item at `index`, to free with
+// `lactea_playlist_free_string`; NULL when out of range.
+//
+// # Safety
+// `playlist` valid.
+char *lactea_playlist_item(LacteaPlaylist *playlist, uint32_t index);
+
+// `projectm_playlist_add_path`: appends the `.milk`, `.prjm` and `.milk2` files of the directory
+// `path` (also below it with `recurse_subdirs`), sorted by path. Returns how many were added;
+// the filter and `allow_duplicates` apply.
+//
+// # Safety
+// `playlist` valid; `path` NUL-terminated.
+uint32_t lactea_playlist_add_path(LacteaPlaylist *playlist,
+                                  const char *path,
+                                  bool recurse_subdirs,
+                                  bool allow_duplicates);
+
+// `projectm_playlist_insert_path`: like `lactea_playlist_add_path`, starting at `index`
+// (`UINT32_MAX` appends).
+//
+// # Safety
+// `playlist` valid; `path` NUL-terminated.
+uint32_t lactea_playlist_insert_path(LacteaPlaylist *playlist,
+                                     const char *path,
+                                     uint32_t index,
+                                     bool recurse_subdirs,
+                                     bool allow_duplicates);
+
+// `projectm_playlist_add_preset`.
+//
+// # Safety
+// `playlist` valid; `filename` NUL-terminated.
+bool lactea_playlist_add_preset(LacteaPlaylist *playlist,
+                                const char *filename,
+                                bool allow_duplicates);
+
+// `projectm_playlist_insert_preset` (`index == UINT32_MAX` appends). `false` when the filter or a
+// duplicate rejected it.
+//
+// # Safety
+// `playlist` valid; `filename` NUL-terminated.
+bool lactea_playlist_insert_preset(LacteaPlaylist *playlist,
+                                   const char *filename,
+                                   uint32_t index,
+                                   bool allow_duplicates);
+
+// `projectm_playlist_add_presets`: returns how many of the `count` names were added.
+//
+// # Safety
+// `playlist` valid; `filenames` points to `count` NUL-terminated strings.
+uint32_t lactea_playlist_add_presets(LacteaPlaylist *playlist,
+                                     const char *const *filenames,
+                                     uint32_t count,
+                                     bool allow_duplicates);
+
+// `projectm_playlist_insert_presets`: the accepted names keep their order from `index` on.
+//
+// # Safety
+// `playlist` valid; `filenames` points to `count` NUL-terminated strings.
+uint32_t lactea_playlist_insert_presets(LacteaPlaylist *playlist,
+                                        const char *const *filenames,
+                                        uint32_t count,
+                                        uint32_t index,
+                                        bool allow_duplicates);
+
+// `projectm_playlist_remove_preset`.
+//
+// # Safety
+// `playlist` valid.
+bool lactea_playlist_remove_preset(LacteaPlaylist *playlist, uint32_t index);
+
+// `projectm_playlist_remove_presets`: returns how many were removed.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_remove_presets(LacteaPlaylist *playlist, uint32_t index, uint32_t count);
+
+// `projectm_playlist_sort` of `count` items from `start_index`. `predicate` is
+// `LACTEA_PLAYLIST_SORT_FULL_PATH` or `..._FILENAME_ONLY`, `order` `LACTEA_PLAYLIST_SORT_ASCENDING`
+// or `..._DESCENDING`; other values are ignored (see `lactea_last_error`). Clears the history.
+//
+// # Safety
+// `playlist` valid.
+void lactea_playlist_sort(LacteaPlaylist *playlist,
+                          uint32_t start_index,
+                          uint32_t count,
+                          int32_t predicate,
+                          int32_t order);
+
+// `projectm_playlist_set_filter`: `count` expressions (`+glob` keeps, `-glob` drops). Only items
+// added afterwards are checked, see `lactea_playlist_apply_filter`.
+//
+// # Safety
+// `playlist` valid; `filter_list` points to `count` NUL-terminated strings.
+void lactea_playlist_set_filter(LacteaPlaylist *playlist,
+                                const char *const *filter_list,
+                                size_t count);
+
+// `projectm_playlist_get_filter`: the expressions as a NULL-terminated array (free with
+// `lactea_playlist_free_string_array`); their number goes to `*count` (may be NULL).
+//
+// # Safety
+// `playlist` valid; `count` NULL or writable.
+char **lactea_playlist_get_filter(LacteaPlaylist *playlist, size_t *count);
+
+// `projectm_playlist_apply_filter`: removes the items the filter rejects; returns how many.
+//
+// # Safety
+// `playlist` valid.
+size_t lactea_playlist_apply_filter(LacteaPlaylist *playlist);
+
+// `projectm_playlist_set_shuffle`.
+//
+// # Safety
+// `playlist` valid.
+void lactea_playlist_set_shuffle(LacteaPlaylist *playlist, bool shuffle);
+
+// `projectm_playlist_get_shuffle`.
+//
+// # Safety
+// `playlist` valid.
+bool lactea_playlist_get_shuffle(LacteaPlaylist *playlist);
+
+// `projectm_playlist_set_retry_count`: failed loads in a row before the switch-failed event
+// (default 500).
+//
+// # Safety
+// `playlist` valid.
+void lactea_playlist_set_retry_count(LacteaPlaylist *playlist, uint32_t retry_count);
+
+// `projectm_playlist_get_retry_count`.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_get_retry_count(LacteaPlaylist *playlist);
+
+// `projectm_playlist_get_position` (0 for an empty playlist).
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_get_position(LacteaPlaylist *playlist);
+
+// `projectm_playlist_set_position`: plays the preset at `new_position` (a failing one is dropped
+// and replaced, see `lactea_playlist_set_retry_count`) and returns the position afterwards.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_set_position(LacteaPlaylist *playlist,
+                                      uint32_t new_position,
+                                      bool hard_cut);
+
+// `projectm_playlist_play_next` (random with shuffle); returns the new position.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_play_next(LacteaPlaylist *playlist, bool hard_cut);
+
+// `projectm_playlist_play_previous`; returns the new position.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_play_previous(LacteaPlaylist *playlist, bool hard_cut);
+
+// `projectm_playlist_play_last`: the preset played before this one; returns the new position.
+//
+// # Safety
+// `playlist` valid.
+uint32_t lactea_playlist_play_last(LacteaPlaylist *playlist, bool hard_cut);
+
+// `projectm_playlist_set_preset_switched_event_callback` (NULL removes it).
+//
+// # Safety
+// `playlist` valid; the callback stays callable until replaced or the playlist is destroyed.
+void lactea_playlist_set_preset_switched_event_callback(LacteaPlaylist *playlist,
+                                                        LacteaPlaylistSwitchedFn callback,
+                                                        void *user_data);
+
+// `projectm_playlist_set_preset_switch_failed_event_callback` (NULL removes it).
+//
+// # Safety
+// `playlist` valid; the callback stays callable until replaced or the playlist is destroyed.
+void lactea_playlist_set_preset_switch_failed_event_callback(LacteaPlaylist *playlist,
+                                                             LacteaPlaylistSwitchFailedFn callback,
+                                                             void *user_data);
+
+// `projectm_playlist_set_preset_load_event_callback` (NULL removes it): the host loads the presets.
+//
+// # Safety
+// `playlist` valid; the callback stays callable until replaced or the playlist is destroyed.
+void lactea_playlist_set_preset_load_event_callback(LacteaPlaylist *playlist,
+                                                    LacteaPlaylistLoadFn callback,
+                                                    void *user_data);
+
+// `projectm_playlist_free_string`: frees a string returned by this API. NULL is ignored.
+//
+// # Safety
+// `string` NULL or returned by `lactea_playlist_item`, not freed before.
+void lactea_playlist_free_string(char *string);
+
+// `projectm_playlist_free_string_array`: frees an array and its strings returned by
+// `lactea_playlist_items` or `lactea_playlist_get_filter`. NULL is ignored.
+//
+// # Safety
+// `array` NULL or returned by one of those, not freed before.
+void lactea_playlist_free_string_array(char **array);
 
 // Which device extensions and features wgpu needs on `host`'s physical device. Fills `*out`; free
 // the result with `lactea_vulkan_requirements_free`. See the module documentation for the

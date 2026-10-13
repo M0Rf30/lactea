@@ -31,9 +31,11 @@ wave: [[f32;576];2], wave_len (=480), spectrum: [[f32;512];2] }`
   land on the same scale (`projectm_pcm_add_int16` / `_uint8`); `MAX_SAMPLES` = 576 is
   `projectm_pcm_get_max_samples`.
 * channel 0 = L, channel 1 = R, further channels ignored, mono is copied to both.
+* a non-finite sample (NaN, +-inf) becomes 0 in `ProjectM` / `BeatDrop` mode; a single one would poison the running
+  averages for good (`MD3`: below).
 * one circular buffer of **576 sample frames** per channel. `Add` writes at `start`, then
   `start += count (mod 576)`. There is no per-frame consumption count: each analysis snapshots
-  the **latest 576 frames, oldest first** (`start` is the oldest). At 44.1 kHz / 60 fps a frame
+  the **latest 576 frames, oldest first** (`start` is the oldest; two slice copies of the ring). At 44.1 kHz / 60 fps a frame
   pushes 735 frames, so only its last 576 are seen (the first 159 are never analysed). At
   fps > 76.5 (sr 44100) a frame pushes < 576 frames and the window overlaps the previous frame.
   Before the first 576 frames exist the missing history is zeros.
@@ -69,12 +71,12 @@ wave: [[f32;576];2], wave_len (=480), spectrum: [[f32;512];2] }`
 | 3 | FFT window | 576 samples zero-padded into a 1024 window, envelope over 1024 (`Init(1024,512,..)`), `sqrtf` magnitude, literal 6.2831853f/1.5707963268f | 480 samples in, 576 buffer damped first; envelope over 480; `hypotf`; PI-based constants | per mode (`FftStyle::{Md2,ProjectM}`) |
 | 4 | input damping `0.5*(x[i]+x[i-1])` | none | yes | ProjectM mode only |
 | 5 | silence | `imm_rel`/`avg_rel` = **0** when `|long_avg|<0.001` (BeatDrop changed it; original MD2 and projectM use 1) | 1 | ProjectM: 1, BeatDrop: 0. Also the initial values before the first update |
-| 6 | dt for smoothing | `AdjustRateToFPS(rate, 30, GetFps())`, i.e. `1/fps` smoothed fps | `time(n)-time(n-1)` in float; frame 0 sees `~0` (the TimeKeeper's reference is the construction wall-clock, so the first dt is `-(small wall time)`, not exactly 0 -> non-deterministic unless the oracle pins it) | `update(fps)` uses `1/fps` for every frame (deterministic contract). `update_dt(0.0)` reproduces projectM's frame 0 (no averaging at all: rate = 1). The oracle slice should pin its first dt to 0 or `1/fps`; compare tests call `update_dt(0.0)` on frame 0 |
+| 6 | dt for smoothing | `AdjustRateToFPS(rate, 30, GetFps())`, i.e. `1/fps` smoothed fps | `time(n)-time(n-1)` in float; frame 0 sees `~0` (the TimeKeeper's reference is the construction wall-clock, so the first dt is `-(small wall time)`, not exactly 0 -> non-deterministic unless the oracle pins it) | `update(fps)` uses `1/fps` for every frame (deterministic contract). `update_dt(0.0)` reproduces projectM's frame 0 (no averaging at all: rate = 1). A negative or non-finite dt (also `update(0.0)` / negative fps) is treated as 0. `Engine` calls `update_dt(clock.time - last_time)`, with dt = 0 on the first rendered frame. The oracle slice should pin its first dt to 0 or `1/fps`; compare tests call `update_dt(0.0)` on frame 0 |
 | 7 | `vol` | not a variable in MD2 per-frame code; shader `_c3.w = 0.3333f*(imm_rel[0], imm_rel[1], imm_rel[2])` is a **comma-operator bug** in MD2 (evaluates to `0.3333*treb`) | `(bass+mid+treb)*0.333` | `AudioFrame.vol` is the projectM value; the render/hlsl slice must decide whether to reproduce the MD2 `0.3333*treb` bug for `_c3.w`/`_c4.w` (projectM does not) |
 | 8 | waveform source | `m_sound.fWaveform` 576 -> aligned -> `NUM_WAVEFORM_SAMPLES`=480 (the shell file is not in `third_party/md2`; alignment algorithm taken from projectM which states it mirrors MD2) | same, 480 valid | same |
-| 9 | frame counter for the `<50` long-average switch | `GetFrame()` | `m_frameCount`, 0-based, incremented after each render | internal counter, 0-based, +1 per `update` |
+| 9 | frame counter for the `<50` long-average switch | `GetFrame()` | `m_frameCount`, 0-based, incremented after each render | internal counter, 0-based, +1 per `update` (saturating; `Analyzer::frame_index`) |
 | 10| spectrum scale | un-normalised FFT of 128-scaled input | same | same; DC bin is always 0 (equalise[0] = -0.02*ln 1 = 0) |
-| 11| extra BeatDrop-only analysis (`get_fft()` shader texture with RMS normalisation, 2048-window `myfftshader`, `FFTAttack/FFTDecay` smoothing) | yes | none | **not implemented** (no projectM counterpart; presets from the corpus cannot use it) |
+| 11| extra BeatDrop-only analysis (`get_fft()` shader texture with RMS normalisation, 2048-window `myfftshader`, `FFTAttack/FFTDecay` smoothing) | yes | none | `BeatDropShaderFft` (separate from `Analyzer`, fed by the engine under `Compat::MilkDrop2` only, `CompatRules::md2_shader_inputs`): see "BeatDrop shader FFT" below; no projectM counterpart |
 | 12| MilkDrop 3 (3.37) analysis | rows 1-5: no 8-bit quantiser, no gain, `(L+R)/2` spectrum | rows 1-5 | `AnalysisMode::Md3` (opt-in): 8-bit quantised input, `VolumeSensitivity`, alignment **before** the analysis, bands from the **left** channel only, 576-sample window, silence -> 1; plus `ShaderFft` for the `get_fft` shader helper. See "MilkDrop 3 mode" below |
 
 ## Numerics
@@ -108,7 +110,7 @@ Source: the behavioural description of MilkDrop 3 (3.37) audio analysis and shad
 
 ```rust
 let mut a = Analyzer::with_mode(44100, AnalysisMode::Md3);   // sample_rate is not used
-a.set_volume_sensitivity(1.0);                               // default; only Md3 reads it
+a.set_volume_sensitivity(1.0);                               // default; only Md3 reads it; non-finite values are ignored
 a.push_pcm_f32(&interleaved, 2);                             // quantised to int8 on the way in
 let f = a.update(60.0);                                      // bass/mid/treb, wave, spectrum
 // every rendered frame, with the sticky FFTAttack / FFTDecay globals (defaults 0.5 / 0.7):
@@ -121,14 +123,16 @@ let s: &[f32; 512] = shader_fft.step(&f.spectrum[0], attack, decay);
    (`push_pcm_i16`: `s / 256`, `push_pcm_u8`: `s - 128`), then `v >= 128 -> 127`, `v < -128 ->
    -128`, otherwise `trunc(v)` (toward zero: `0.999 -> 127`, `-0.999 -> -127`, `0.0078 -> 0`).
    This is MD3's capture quantiser `>= 1.0 -> 127`, `< -1.0 -> -128`, `(int)(128 * s)`; 0 dBFS
-   maps to 127 / -128 and there is no +128 offset. The result is stored as `f32`. A NaN becomes 0.
+   maps to 127 / -128 and there is no +128 offset. The result is stored as `f32`. A NaN becomes 0
+   and +-inf saturates to 127 / -128 (`md3::quantise_i8`).
    The other modes keep the unquantised `128 * s`.
 2. **Snapshot + gain.** Both channels, newest 576 frames oldest first (as in the other modes),
    multiplied by `volume_sensitivity` (default 1.0, `set_volume_sensitivity` /
    `volume_sensitivity`). The gain acts on the *already quantised* values, so it cannot recover
    a clipped peak (`1.0` full scale with gain 2 is `254`, not `256`) and the waveform may leave
    +-128; it is not clamped. It is applied at `update`, so changing it takes effect on the
-   samples already buffered. Ignored by `ProjectM` and `BeatDrop`.
+   samples already buffered. A non-finite value passed to `set_volume_sensitivity` is ignored (the previous gain stays).
+   Ignored by `ProjectM` and `BeatDrop`.
 3. **Alignment first.** The existing per-channel `Aligner` (nSamples 480, octaves 6) runs
    *before* the analysis, so the spectra and the bands see the aligned waveform including its
    zeroed tail (samples 480..575 are zero whenever the best offset is > 0). This is the opposite
@@ -139,8 +143,8 @@ let s: &[f32; 512] = shader_fft.step(&f.spectrum[0], attack, decay);
    |X[i]|` for `i < 512` with `equalize[i] = -0.02 * ln((512 - i) / 512)`. It is the MD2 FFT
    (`FftStyle::Md2`, `samples_in = 576`) with **no** `0.5 * (x[i] + x[i-1])` input damping.
    The public `md3_spectrum(&[f32; 576]) -> [f32; 512]` is exactly this step for an already
-   prepared int8-unit waveform (no alignment, no gain); the analyzer produces identical values
-   (it keeps its own tables, `md3_spectrum` rebuilds them on every call).
+   prepared int8-unit waveform (no alignment, no gain); the analyzer produces identical values. `md3_spectrum` uses one
+   thread-local FFT, built on first use and reused by later calls; the analyzer keeps its own.
 5. **Bands, left channel only.** `imm[b] = sum of the left spectrum over bins
    [512*b/6, 512*(b+1)/6)`, b = 0, 1, 2 -> `[0,85) [85,170) [170,256)` (a plain sum, no mean over
    the channels; with a 44.1 kHz effective rate 0-3.6 / 3.6-7.3 / 7.3-11 kHz). Whatever the
@@ -226,3 +230,35 @@ step(spec, attack, decay):
   shifted window + zero tail), the 60 fps smoothing vectors T1 / T2 (`bass` 19.487, 10.000,
   6.8406, ...), the 0.9 -> 0.992 switch at frame 50, a loud low tone after a high tone
   (`bass > 3`, `treb < 0.1`), a constant level (`bass` only, analytic `1 / (1 - r^(k+1))`).
+
+## BeatDrop shader FFT (`BeatDropShaderFft`)
+
+Source: `third_party/md2/plugin.cpp::DoCustomSoundAnalysis` (the BeatDrop fork). It feeds the `sampler_fft` / `sampler_wave` textures of BeatDrop shaders
+(`get_fft`, `get_fft_peak`, `get_wave`; `docs/hlsl.md` "BeatDrop prelude") and does not touch `Analyzer`.
+
+```rust
+let mut s = BeatDropShaderFft::new();          // empty history, s_fftRMS = 0.1
+s.push_pcm_f32(&interleaved, 2);               // newest 2048 sample frames per channel are kept
+s.update(fps, attack, decay);                  // once per rendered frame; attack / decay = FFTAttack / FFTDecay (0.5 / 0.7 default)
+let (row0, row1) = (s.smoothed(), s.peak());   // 1024 bins each
+```
+
+One instance per engine, never reset by a preset change. Constants: `SHADER_FFT_BINS` = 1024, `SHADER_FFT_WINDOW` = 2048, `SHADER_WAVE_SAMPLES` = 480.
+A non-finite PCM sample counts as 0, a non-finite `fps` or one below 1e-8 is 1e-8, a non-finite `attack` / `decay` is 0.5 / 0.7. Arithmetic is `f32` in the C++
+operation order, `f64` where the C++ promotes (`.25 + decay * .75`, `exp(-1 / fps / .3)`).
+
+Per `update`:
+
+1. Both channels: the latest 2048 frames, oldest first, through the raised-cosine envelope and a 2048-point FFT with **no** equalisation
+   (`Fft::new(2048, 1024, false, 1.0, FftStyle::Md2)`), 1024 magnitude bins; the spectrum is `0.5 * (L + R)`.
+2. RMS normalisation: `rms = max(sqrt(mean(spec^2)), 1e-5)`, smoothed `s_rms = s_rms * e + rms * (1 - e)` with `e = exp(-1 / fps / tau)`, `tau` = 2 s while `rms > s_rms`
+   (attack) and 5 s otherwise (release).
+3. Per bin: `v = spec / s_rms * 0.175 - 0.03` (scaling `m_nFFTShaderScaling` .175 and noise floor `m_nFFTShaderNoiseFloor` .03, the compiled-in defaults, not the
+   `.ini` values), floored at 0; bins below 24 (`kBassRampEnd`) are multiplied by `0.15 + 0.85 * (i / 24)^2`.
+4. FPS-independent attack / decay (the coefficients are 60 fps values): `smoothed += (v - smoothed) * a` when `v > smoothed`, else `* d`, with
+   `a = 1 - (1 - attack)^(60 / fps)` and `d = 1 - (1 - (1 - decay)^2)^(60 / fps)`; values below 5e-8 are cut to 0 (row 0, `m_fFFTSmoothed`).
+5. Peak hold (row 1, `m_fFFTPeak`): `peak = smoothed` when `smoothed >= peak` and the bin holds for `int(fps * (.25 + .75 * decay))` frames; afterwards it
+   falls by `exp(-1 / fps / .3)` per frame.
+
+The engine builds the texture rows `spectrum`, `peak`, wave L, wave R: the waves are `AudioFrame.wave / 128` (the first 480 aligned samples, scaled to `-1..1`,
+zero beyond). `FFTAttack` / `FFTDecay` come from the active state's preset (not blended during a soft cut). Tests: `tests/beatdrop.rs`.

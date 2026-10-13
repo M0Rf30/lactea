@@ -95,20 +95,18 @@ impl GlobalMemory {
         }
     }
 
-    /// Value of `reg00 + i` (`i < 100`).
-    ///
-    /// # Panics
-    /// If `i >= 100`.
+    /// Value of `reg00 + i`; `i >= 100` reads 0 (like [`gmem`](Self::gmem) out of range).
     pub fn reg(&self, i: usize) -> f64 {
-        f64::from_bits(self.regs[i].load(Relaxed))
+        self.regs
+            .get(i)
+            .map_or(0.0, |r| f64::from_bits(r.load(Relaxed)))
     }
 
-    /// Sets `reg00 + i` (`i < 100`).
-    ///
-    /// # Panics
-    /// If `i >= 100`.
+    /// Sets `reg00 + i`; `i >= 100` is ignored.
     pub fn set_reg(&self, i: usize, v: f64) {
-        self.regs[i].store(v.to_bits(), Relaxed);
+        if let Some(r) = self.regs.get(i) {
+            r.store(v.to_bits(), Relaxed);
+        }
     }
 
     /// Reads gmegabuf slot `index` (does not allocate; unallocated / out of range reads 0).
@@ -192,12 +190,6 @@ impl LocalMem {
         self.blocks.fill(None);
     }
 
-    /// Allocates `block` (zeroed) if it is not allocated yet.
-    #[inline]
-    pub(crate) fn ensure(&mut self, block: usize) {
-        self.blocks[block].get_or_insert_with(alloc_local_block);
-    }
-
     #[inline]
     pub(crate) fn get(&self, idx: u32) -> f64 {
         let idx = idx as usize;
@@ -248,15 +240,13 @@ impl LocalMem {
             }
             let (sb, so) = ((src as usize) >> 16, src as usize & BLOCK_MASK);
             let (db, d_o) = ((dest as usize) >> 16, dest as usize & BLOCK_MASK);
-            self.ensure(sb);
-            self.ensure(db);
             let n = copy_len as usize;
-            const ALLOCATED: &str = "ensure() allocated both blocks";
+            // An unallocated source reads as zeros: zero the destination if it exists, but
+            // never allocate a block only to hold zeros.
             if sb == db {
-                self.blocks[sb]
-                    .as_mut()
-                    .expect(ALLOCATED)
-                    .copy_within(so..so + n, d_o);
+                if let Some(b) = self.blocks[sb].as_mut() {
+                    b.copy_within(so..so + n, d_o);
+                }
             } else {
                 // Distinct blocks never overlap: borrow both through one split.
                 let (lo, hi) = self.blocks.split_at_mut(sb.max(db));
@@ -265,8 +255,15 @@ impl LocalMem {
                 } else {
                     (&hi[0], &mut lo[db])
                 };
-                let s = s.as_ref().expect(ALLOCATED);
-                d.as_mut().expect(ALLOCATED)[d_o..d_o + n].copy_from_slice(&s[so..so + n]);
+                match s {
+                    Some(s) => d.get_or_insert_with(alloc_local_block)[d_o..d_o + n]
+                        .copy_from_slice(&s[so..so + n]),
+                    None => {
+                        if let Some(d) = d {
+                            d[d_o..d_o + n].fill(0.0);
+                        }
+                    }
+                }
             }
             src += copy_len;
             dest += copy_len;
@@ -290,18 +287,19 @@ impl LocalMem {
         if count < 1 {
             return;
         }
+        // Zero fill of an unallocated block changes nothing: skip the 512 KiB allocation.
+        let zero = val.to_bits() == 0;
         while count > 0 {
             let blk = (dest as usize) >> 16;
             let off = dest as usize & BLOCK_MASK;
-            self.ensure(blk);
             let mut n = BLOCK_LEN - off;
             if n as i32 > count {
                 n = count as usize;
             }
-            self.blocks[blk]
-                .as_mut()
-                .expect("ensure() allocated the block")[off..off + n]
-                .fill(val);
+            let slot = &mut self.blocks[blk];
+            if !zero || slot.is_some() {
+                slot.get_or_insert_with(alloc_local_block)[off..off + n].fill(val);
+            }
             count -= n as i32;
             dest += n as i32;
         }
@@ -310,4 +308,38 @@ impl LocalMem {
 
 fn alloc_local_block() -> Box<[f64]> {
     vec![0.0; BLOCK_LEN].into_boxed_slice()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allocated(m: &LocalMem) -> usize {
+        m.blocks.iter().flatten().count()
+    }
+
+    #[test]
+    fn zero_traffic_does_not_allocate() {
+        let mut m = LocalMem::new();
+        assert_eq!(m.get(70_000), 0.0);
+        m.fill(0, 200_000, 0.0);
+        m.copy(70_000, 0, 1000);
+        assert_eq!(allocated(&m), 0);
+        m.set(5, 3.0);
+        m.copy(65_536, 70_000, 4); // unallocated source, unallocated destination
+        assert_eq!(allocated(&m), 1);
+        m.copy(0, 70_000, 8); // unallocated source zeroes an allocated destination
+        assert_eq!(m.peek(5), 0.0);
+        assert_eq!(allocated(&m), 1);
+    }
+
+    #[test]
+    fn copy_and_fill_still_move_values() {
+        let mut m = LocalMem::new();
+        m.fill(65_530, 12, 2.5);
+        m.copy(200_000, 65_530, 12);
+        assert_eq!(m.peek(200_000), 2.5);
+        assert_eq!(m.peek(200_011), 2.5);
+        assert_eq!(m.peek(200_012), 0.0);
+    }
 }

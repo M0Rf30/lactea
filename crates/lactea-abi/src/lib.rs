@@ -10,6 +10,7 @@
 #![warn(missing_docs)]
 
 use bytemuck::{Pod, Zeroable};
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Number of `q` variables shared between per-frame equations and shaders.
@@ -193,7 +194,8 @@ pub struct MeshVertex {
 }
 
 /// Which pass a translated shader runs in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum PassKind {
     /// Warp pass.
     Warp,
@@ -202,7 +204,8 @@ pub enum PassKind {
 }
 
 /// Built-in noise textures (`noise_*` / `noisevol_*`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum NoiseTex {
     /// `noise_lq`.
     Lq,
@@ -226,7 +229,8 @@ impl NoiseTex {
 }
 
 /// What a shader sampler reads from.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TexSource {
     /// Previous frame image (`sampler_main`, `sampler_fw_main`, ...).
     Main,
@@ -246,7 +250,8 @@ pub enum TexSource {
 }
 
 /// Sampler filter mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Filter {
     /// Bilinear.
     Linear,
@@ -255,7 +260,8 @@ pub enum Filter {
 }
 
 /// Sampler addressing mode.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum Address {
     /// Repeat.
     Wrap,
@@ -264,7 +270,8 @@ pub enum Address {
 }
 
 /// Texture dimensionality of a sampler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum TexDim {
     /// 2D texture.
     D2,
@@ -273,7 +280,8 @@ pub enum TexDim {
 }
 
 /// One sampler of a translated shader and how it is filtered and addressed.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct TextureBinding {
     /// Sampler identifier as written in the HLSL source (e.g. `sampler_fw_main`).
     pub hlsl_name: String,
@@ -289,7 +297,8 @@ pub struct TextureBinding {
 
 /// Resource interface of a translated warp/comp shader. The GPU backend builds the
 /// group(1) bind group from this, in order.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ShaderInterface {
     /// Texture bindings in group(1) order.
     pub textures: Vec<TextureBinding>,
@@ -300,7 +309,8 @@ pub struct ShaderInterface {
 }
 
 /// Deterministic run settings shared by the projectM reference renderer, lactea and the comparator.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RunConfig {
     /// Output width in pixels.
     pub width: u32,
@@ -356,6 +366,7 @@ pub fn pcm_range(frame: u64, sample_rate: u64, fps: u64) -> (u64, u64) {
 /// ```
 pub mod dump {
     use super::RunConfig;
+    #[cfg(feature = "serde")]
     use serde::{Deserialize, Serialize};
 
     /// Dump metadata file name inside a dump directory.
@@ -366,8 +377,9 @@ pub mod dump {
     pub const TEXTURES_DIR: &str = "textures";
 
     /// Which intermediate or final image a dump frame holds.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-    #[serde(rename_all = "lowercase")]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+    #[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
     pub enum Stage {
         /// Composite output (what the user sees).
         Final,
@@ -412,7 +424,8 @@ pub mod dump {
     }
 
     /// `meta.json` contents: who produced the dump and with which settings.
-    #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+    #[derive(Clone, Debug, PartialEq)]
+    #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
     pub struct DumpMeta {
         /// e.g. `projectm@<git sha>` or `lactea@0.1.0`.
         pub producer: String,

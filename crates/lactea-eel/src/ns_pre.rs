@@ -20,10 +20,7 @@
 // call) is bounded by the caller's `Context::max_depth`; the C code has no limit and needs a deep
 // native stack for adversarial input.
 
-/// `isspace` in the C locale.
-fn is_space(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
+use crate::lexer::is_space;
 
 fn is_alnum(c: u8) -> bool {
     c.is_ascii_alphanumeric()
@@ -98,17 +95,8 @@ fn strtoul16(s: &[u8]) -> (u32, usize) {
         i += 2;
     }
     let first = i;
-    let mut v: u64 = 0;
-    let mut over = false;
-    while i < s.len() && s[i].is_ascii_hexdigit() {
-        let d = u64::from((s[i] as char).to_digit(16).unwrap_or(0));
-        v = v * 16 + d;
-        if v > u64::from(u32::MAX) {
-            over = true;
-            v = u64::from(u32::MAX);
-        }
-        i += 1;
-    }
+    let (v, over, used) = crate::lexer::hex_prefix(&s[i..], u64::from(u32::MAX));
+    i += used;
     if i == first {
         return (0, 0);
     }

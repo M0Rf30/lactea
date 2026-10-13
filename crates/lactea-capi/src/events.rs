@@ -14,7 +14,8 @@ use std::ffi::{CString, c_char, c_void};
 /// Called when a rendered frame asks for another preset (display time up or a beat-driven hard cut,
 /// see `lactea_set_switch_settings`). With `LACTEA_COMPAT_MILKDROP3` an auto hard cut
 /// (`lactea_set_auto_hard_cut_mode`) calls it too, with `is_hard_cut = true`; `preset_locked`
-/// silences every request. The request is *also*
+/// silences every request. While a playlist is connected (`lactea_playlist_connect`) it answers the
+/// requests and this callback is not called. The request is *also*
 /// kept for `lactea_poll_switch_request`. The callback runs synchronously on the calling thread,
 /// inside `lactea_render*`, after the frame is submitted and the call's work is done. It may call
 /// any lactea function on the same engine, for example `lactea_load_preset_ex` to load the next

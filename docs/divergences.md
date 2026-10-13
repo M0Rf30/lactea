@@ -24,7 +24,7 @@ every column below headed "MilkDrop 2" applies to it too, and its own difference
 | Warp mesh cell diagonal | mirrored (projectM mesh row 0 = top) | MD2 orientation |
 | Warp animation terms' `y` | opposite sign fed to the four sin/cos terms | MD2 sign |
 | Blur pass 0 source | sampled with `uv.y` flipped (+1 texel bias goes the other way) | MD2 bias |
-| No-shader composite hue corners | `shade[0..1]` are the top corners | MD2 order |
+| No-shader composite hue corners (`shade_top_first`) | `shade[0..1]` are the top corners | MD2's `v3[0..1]` have `y = +1 + 1/H`, which `support.cpp:179` (`D3DXMatrixOrthoLH(2, -2)`, a y flip) puts at the **bottom** corners |
 | Border / MV / main-wave / shape-outline colours | raw values (clamped by GL) | `Color::Modulo`-style wrap |
 | First frame after preset load (the frame that allocates the blur textures) | presets whose shaders sample `GetBlur1..3`: no shapes/waves/main wave/darken-centre/borders (`BlurTexture::Update` restores FBO 0, projectM bug); all other presets draw them normally | overlays always drawn |
 | First shape draw after a blur update | presets that sample blur: a textured first shape reads the main image with the leaked linear/clamp `BlurTexture` sampler (`Kind::TexLeak`); later shapes nearest/repeat | bilinear everywhere (no sampler objects) |
@@ -52,6 +52,14 @@ every column below headed "MilkDrop 2" applies to it too, and its own difference
 | No-shader composite sampler address (`noshader_comp_wrap`) | clamp | wrap |
 | `shapecode_N_image` (`custom_shape_image`) | read (projectM addition) | not a key; the line stays in `Preset::extra` |
 | Linear ops on interpolated shader inputs (`gl_varying_fold`) | Mesa moves `input ± uniform/const` (and a few other linear ops) of the warp / comp fragment shader into the vertex stage and interpolates the result; the translator emits those values (`CompiledShader::folds`) and the renderer delivers them as extra varyings `fold{j}` (mesh and GPU-warp vertex stages) | added per pixel from the interpolated input (about 1 ulp apart) |
+| Final shader output alpha (`wrapped_hlsl` projectM flavour) | the generated shader ends with `float4(ret.xyz, 1.0)` (`MilkdropShader.cpp:468`): alpha 1 | `float4(ret.xyz, _vDiffuse.w)`, the interpolated vertex alpha |
+| `noisevol_*` texture content (`noisevol_row_stride`) | the cubic smoothing addresses slice `z` with `z * size` (projectM bug, `MilkdropNoise.cpp:199,225,252-261`) | `z * size * size` (`plugin.cpp:3031-3072`) |
+| Shader `time` (`_c2.x`) wrap (`shader_time_wrap`) | wrapped modulo 10000 (`MilkdropShader.cpp:168`) | the raw time (`milkdropfs.cpp:5289`); MilkDrop 3 wraps like projectM |
+| `randNN` sampler slots (`max_rand_slot`) | projectM peels the quality prefix before detecting `randNN` (`MilkdropShader.cpp:80-86`), so `sampler_fw_rand03` is random slot 3; any `randNN…` spelling counts; slots 0..=15, higher ones are ordinary texture names | the same peeling, but exactly `randNN` or `randNN_…` (`plugin.cpp:3578`); slots 0..=99 (`MAX_RAND_TEX`) |
+| `randNN_prefix` pool filter (`rand_filter_raw_name`) | tests byte 6 of the *raw* sampler name (`TextureManager::GetRandomTexture`), so a quality prefix (`fw_rand03_x`) disables the filter | filters on the prefix-stripped name |
+| Random choices (determinism, every mode) | `std::random_device`: the soft-cut shader index and its four statics, the `randNN` texture pick over the unsorted directory scan | C `rand()` / `random_device` (blend pattern). lactea draws all of them from seeded streams of `EngineConfig::seed` (`transition_select`, `transition_static`, `md2_blend_pattern`, `randtex_<name>`); the `randNN` pool (`TextureProvider::random_pool`) must be sorted by name (the oracle sorts its pool the same way) |
+| Text overlays, preset title / info | none (`libprojectM` has no font code) | MD2 / BeatDrop draw them (`plugin.cpp` text engine); out of scope here: not drawn in any mode, hosts show their own |
+| BeatDrop host inputs (`md2_input_vars`) | none: `mousex mousey mousedown mouseclick`, `ctrllt ctrlrt ctrldn ctrlup`, `year … totalseconds` and `monitor` are ordinary user variables | the host-set values (`Engine::set_mouse`, `set_ctrl_keys`, `set_date_time`), sampled once per rendered frame; date variables per-frame context only, the others also per-vertex; `mousey` has a bottom origin, `mouseclick` is a one-frame edge. `monitor` is persistent (`milkdropfs.cpp:616` resets it per frame, a `plugin.cpp` comment says otherwise: unresolved) |
 
 Shared quirk kept without a switch (present in both): `GetSafeBlurMinMax` typo (`max = avg - 0.05`).
 Deliberately not copied: MD2's one-frame lag of comp-shader blur usage (`m_nHighestBlurTexUsedThisFrame`).
@@ -63,6 +71,7 @@ Deliberately not copied: MD2's one-frame lag of comp-shader blur usage (`m_nHigh
 | Bands | bins `[0,85)`, `[85,170)`, `[170,256)` of the mono 512 spectrum | Hz bands 0–250, 250–4000, 4000–20000 |
 | FFT input | 480 damped samples (`0.5·(x[i]+x[i-1])`) | zero-padded 1024 window |
 | Silence | all `*_rel` = 1.0 | 0 |
+| Shader FFT texture (`sampler_fft` / `sampler_wave`; rule `md2_shader_inputs`, MD2 only) | none: the samplers stay unresolved user textures | `BeatDropShaderFft`: last 2048 frames per channel, raised-cosine window, RMS normalisation (time constants 2 s / 5 s), scaling .175, noise floor .03, bass ramp, FPS-independent attack / decay, peak hold; 1024×4 `R32Float` texture (spectrum, peak, wave L, wave R) |
 
 Input scaling: float PCM ×128; ring of 576 frames; mono duplicated; >2 channels ignored. See
 `docs/audio.md` for the full table.
@@ -103,11 +112,11 @@ Details and verification in [`md3.md`](md3.md).
 | Item | MilkDrop 2 / BeatDrop | MilkDrop 3 |
 |---|---|---|
 | Audio analysis (`md3_audio_analysis`, `AnalysisMode::Md3`) | BeatDrop: mono `(L+R)/2`, Hz bands, silence 0 | left channel only, 576-sample Hann FFT zero-padded to 1024 on the aligned 8-bit-quantised waveform times `VolumeSensitivity`, bins `[0,85)`, `[85,170)`, `[170,256)` summed, silence 1.0 |
-| `get_fft` / `sampler_fft` data (`md3_shader_fft`) | BeatDrop: mono 1024-bin RMS-normalised FFT, FPS-independent attack / decay, `sqrt`, peak-hold row | left equalised spectrum, per-frame max-normalised, 0.2 gate, squared, 3-bin smear, attack `0.5a+0.5` / decay `0.1d+0.9` once per rendered frame; the state survives preset changes |
+| `get_fft` / `sampler_fft` data (`md3_shader_fft`) | BeatDrop (`md2_shader_inputs`, `BeatDropShaderFft`): mono 1024-bin RMS-normalised FFT of a 2048-sample window, FPS-independent attack / decay, `sqrt`, peak-hold row | left equalised spectrum, per-frame max-normalised, 0.2 gate, squared, 3-bin smear, attack `0.5a+0.5` / decay `0.1d+0.9` once per rendered frame; the state survives preset changes |
 | `FFTAttack` / `FFTDecay` (`md3_shader_fft`) | per state, blended in soft cuts | process-global, replaced by every preset import (file value or 0.5 / 0.7), never blended; a `.milk2` imports PRESET1 then PRESET2, so PRESET2's keys (or 0.5 / 0.7) win |
-| Shader prelude (`md3_shader_prelude`) | `get_fft` = `sqrt(tex2D(sampler_fft, (x, .25)))`, `get_fft_hz` `/22050`, `get_fft_peak*`, `get_wave*`, `sampler_wave`, `_c15` / `_c16` time / date | `get_fft` without `sqrt` at v = 0.5, `get_fft_hz` `/24000`, none of the other helpers; `_c14` mouse, `mouse*` macros, `q33..q64` (`_qi.._qp`) |
+| Shader prelude (`md3_shader_prelude`) | BeatDrop (`md2_shader_inputs`): `get_fft` = `sqrt(tex2D(sampler_fft, (x, .25)))`, `get_fft_hz` `/22050`, `get_fft_peak[_hz]` (v = .75), `get_wave`, `HAS_FFT_PEAK`, `sampler_wave`, `_c14` mouse, `_c15` time, `_c16` date. The helper macro names are reconstructed from BeatDrop's docs: its `include.fx` additions are not in `third_party/md2` | `get_fft` without `sqrt` at v = 0.5, `get_fft_hz` `/24000`, none of the other helpers; `_c14` mouse, `mouse*` macros, `q33..q64` (`_qi.._qp`) |
 | `q` / `t` variables (`md3_extended_vars`) | `q1..q32`, `t1..t8` | `q1..q64`, `t1..t16` in every VM that has them, `monitor2` / `monitor3` persisted like `monitor`, no q blending |
-| Mouse (`md3_extended_vars`) | BeatDrop `mousex` ... | shader-only: `_c14` / `mouse*` (top-origin y, `-1, -1` outside the window, `z` held, `w` one frame after release). Preset expressions cannot read it: `mouse.x` does not compile in MD3 3.37 (measured), so no EEL variable is registered |
+| Mouse (`md3_extended_vars`) | BeatDrop (`md2_input_vars`): expression variables `mousex mousey mousedown mouseclick`, `ctrllt ctrlrt ctrldn ctrlup`, shader `_c14` | shader-only: `_c14` / `mouse*` (top-origin y, `-1, -1` outside the window, `z` held, `w` one frame after release). Preset expressions cannot read it: `mouse.x` does not compile in MD3 3.37 (measured), so no EEL variable is registered |
 | Shader `time` (`md3_shader_time`, `_c2.x`) | absolute frame time | seconds since this state's preset started, modulo 10000 (the outgoing state of a blend uses its own start) |
 | Generated composite shader of presets without `comp_N` (`md3_md2_comp_effects`) | brighten `1-(1-ret)^2`, solarize `*2` | brighten `sqrt(ret)`, solarize `*4` |
 

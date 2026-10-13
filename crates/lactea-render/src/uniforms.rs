@@ -253,8 +253,8 @@ impl<'a> MilkUniformInputs<'a> {
 /// * `mip_y`: projectM from the height; MD2 from the *width* (typo).
 /// * `_c1`: projectM zeros; MD2 the "sd" aspect.
 /// * `_c8.._c11` use the double-precision `time` (`time*0.329f` etc.).
-/// * `_c2.x` is `ext.time` (MilkDrop 3: seconds since the pass's own preset started) when set, else `time`; both are
-///   wrapped modulo 10000.
+/// * `_c2.x` is `ext.time` (MilkDrop 3: seconds since the pass's own preset started) when set, else `time`; wrapped
+///   modulo 10000 only when `rules.shader_time_wrap` (projectM, MilkDrop 3), raw under MilkDrop 2.
 pub(crate) fn fill_milk_uniforms(inp: &MilkUniformInputs<'_>, rot_rng: &mut Rng) -> MilkUniforms {
     let MilkUniformInputs {
         width,
@@ -295,10 +295,14 @@ pub(crate) fn fill_milk_uniforms(inp: &MilkUniformInputs<'_>, rot_rng: &mut Rng)
     if !rules.c1_is_zero {
         u.c[1] = [aspect_x, aspect_y, 1.0 / aspect_x, 1.0 / aspect_y];
     }
-    // `_c2.x`: time since preset start wrapped at 10000 s (`ApplyShaderParams` / projectM `LoadVariables`).
+    // `_c2.x`: time since preset start (`ApplyShaderParams` / projectM `LoadVariables`).
     let ft = ext.time.unwrap_or(f.time) as f32;
-    let wrapped = ft - ((ft as f64 / 10000.0) as i32 * 10000) as f32;
-    u.c[2] = [wrapped, f.fps, f.frame as f32, f.progress];
+    let shown = if rules.shader_time_wrap {
+        ft - ((ft as f64 / 10000.0) as i32 * 10000) as f32
+    } else {
+        ft
+    };
+    u.c[2] = [shown, f.fps, f.frame as f32, f.progress];
     let (vol, vol_att) = if rules.vol_is_comma_bug {
         (0.3333 * f.treb, 0.3333 * f.treb_att)
     } else {
@@ -576,6 +580,15 @@ mod tests {
         h.time = 99999.0;
         h.ext.time = Some(3.25);
         assert_eq!(fill(&h, &rules).c[2][0], 3.25);
+    }
+
+    /// MilkDrop 2 passes the raw time to `_c2.x` (`milkdropfs.cpp:5289`); only projectM and MilkDrop 3 wrap it.
+    #[test]
+    fn md2_shader_time_is_not_wrapped() {
+        let mut f = frame();
+        f.time = 12345.5;
+        assert_eq!(fill(&f, &Compat::MilkDrop2.rules()).c[2][0], 12345.5);
+        assert_eq!(fill(&f, &Compat::ProjectM.rules()).c[2][0], 2345.5);
     }
 
     /// `ShaderExt::default()` is neutral: `_c2.x` is `FrameInput::time` and nothing of the extension (mouse, q33..,

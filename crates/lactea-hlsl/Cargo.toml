@@ -23,7 +23,7 @@ lactea-abi.workspace = true
 [dev-dependencies]
 lactea-hlsl = { path = ".", features = ["testing"] }
 naga = { workspace = true, features = ["wgsl-in", "spv-in", "wgsl-out"] }
-wgpu = { workspace = true, features = ["naga-ir"] }
+wgpu = { workspace = true, features = ["naga-ir", "vulkan"] }
 pollster.workspace = true
 bytemuck.workspace = true
 serde_json.workspace = true

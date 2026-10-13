@@ -25,6 +25,47 @@ pub struct AudioDecoder {
     scratch: Vec<f32>,
 }
 
+/// The default audio track of a stream with a decoder for it.
+struct Track {
+    decoder: Box<dyn SymDecoder>,
+    track_id: u32,
+    sample_rate: u32,
+    channels: usize,
+    total_frames: Option<u64>,
+}
+
+fn open_track(format: &dyn FormatReader, path: &Path) -> Result<Track, String> {
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or_else(|| format!("{}: no decodable audio track", path.display()))?;
+    let audio = match track.codec_params.as_ref() {
+        Some(CodecParameters::Audio(audio)) => audio,
+        _ => return Err(format!("{}: no audio codec parameters", path.display())),
+    };
+    let decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(audio, &AudioDecoderOptions::default())
+        .map_err(|e| format!("{}: no decoder ({e})", path.display()))?;
+    // The decoder may output another rate than the container declares (HE-AAC).
+    let sample_rate = decoder
+        .codec_params()
+        .sample_rate
+        .or(audio.sample_rate)
+        .ok_or_else(|| format!("{}: unknown sample rate", path.display()))?;
+    let channels = audio
+        .channels
+        .as_ref()
+        .map(|c| c.count())
+        .unwrap_or(2)
+        .max(1);
+    Ok(Track {
+        decoder,
+        track_id: track.id,
+        sample_rate,
+        channels,
+        total_frames: track.num_frames,
+    })
+}
+
 impl AudioDecoder {
     pub fn open(path: &Path) -> Result<Self, String> {
         let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -41,38 +82,15 @@ impl AudioDecoder {
                 MetadataOptions::default(),
             )
             .map_err(|e| format!("{}: unsupported or corrupt file ({e})", path.display()))?;
-        let track = format
-            .default_track(TrackType::Audio)
-            .ok_or_else(|| format!("{}: no decodable audio track", path.display()))?;
-        let track_id = track.id;
-        let total_frames = track.num_frames;
-        let audio = match track.codec_params.as_ref() {
-            Some(CodecParameters::Audio(audio)) => audio,
-            _ => return Err(format!("{}: no audio codec parameters", path.display())),
-        };
-        let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(audio, &AudioDecoderOptions::default())
-            .map_err(|e| format!("{}: no decoder ({e})", path.display()))?;
-        // The decoder may output another rate than the container declares (HE-AAC).
-        let sample_rate = decoder
-            .codec_params()
-            .sample_rate
-            .or(audio.sample_rate)
-            .ok_or_else(|| format!("{}: unknown sample rate", path.display()))?;
-        let channels = audio
-            .channels
-            .as_ref()
-            .map(|c| c.count())
-            .unwrap_or(2)
-            .max(1);
+        let t = open_track(format.as_ref(), path)?;
         Ok(Self {
             path: path.to_path_buf(),
             format,
-            decoder,
-            track_id,
-            sample_rate,
-            channels,
-            total_frames,
+            decoder: t.decoder,
+            track_id: t.track_id,
+            sample_rate: t.sample_rate,
+            channels: t.channels,
+            total_frames: t.total_frames,
             scratch: Vec::new(),
         })
     }
@@ -98,7 +116,23 @@ impl AudioDecoder {
                 Err(SymError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return Ok(false);
                 }
-                Err(SymError::ResetRequired) => return Ok(false),
+                Err(SymError::ResetRequired) => {
+                    // The stream's tracks changed (chained Ogg, ...): decoders are bound to the old
+                    // parameters, so build a new one from the new default track and carry on.
+                    let t = open_track(self.format.as_ref(), &self.path)?;
+                    if t.sample_rate != self.sample_rate {
+                        return Err(format!(
+                            "{}: sample rate changed from {} to {} Hz mid-stream",
+                            self.path.display(),
+                            self.sample_rate,
+                            t.sample_rate
+                        ));
+                    }
+                    self.decoder = t.decoder;
+                    self.track_id = t.track_id;
+                    self.channels = t.channels;
+                    continue;
+                }
                 Err(e) => return Err(format!("{}: read error: {e}", self.path.display())),
             };
             if packet.track_id != self.track_id {

@@ -250,8 +250,9 @@ fn programs_are_bound_to_their_context() {
     let mut a = Context::new(g.clone());
     let mut b = Context::new(g);
     let p = a.compile("1").unwrap();
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.run(&p)));
-    assert!(r.is_err());
+    assert_eq!(b.try_run(&p), None);
+    assert_eq!(b.run(&p), 0.0);
+    assert_eq!(a.try_run(&p), Some(1.0));
 }
 
 #[test]

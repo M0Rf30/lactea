@@ -13,7 +13,10 @@
 //! Output convention as in [`crate::wavegen`]: clip space, x right, y up, before `SmoothWave`.
 
 use crate::frame::MainWave;
-use crate::wavegen::{NUM_WAVEFORM_SAMPLES, WaveGeom, line_edges, volume_alpha_mod, wave_rgb};
+use crate::wavegen::{
+    NUM_WAVE_INPUT, NUM_WAVEFORM_SAMPLES, WaveGeom, finish_alpha, line_edges, line_strip,
+    size_gain, wave_rgb, wrap_param2,
+};
 
 /// `NUM_WAVES` of MilkDrop 3: valid modes are `0..=16`; the drawn mode is `(int)wave_mode % 17`.
 pub const MD3_NUM_WAVES: i32 = 17;
@@ -40,32 +43,6 @@ fn extended_right(wr: &[f32], spec_l: &[f32], k: usize) -> f32 {
     }
 }
 
-/// Vertices of one strip along the clipped line `(ex, ey)` (the "angled line" helper of modes 6..11): `n` points
-/// from the first edge towards the second one (the far end is never reached), displaced along the perpendicular by
-/// `amp(i)`; `x_off` shifts the whole strip in x after clipping (mode 11).
-fn line_strip(
-    ex: [f32; 2],
-    ey: [f32; 2],
-    n: usize,
-    x_off: f32,
-    amp: impl Fn(usize) -> f32,
-) -> Vec<[f32; 2]> {
-    let dx = (ex[1] - ex[0]) / n as f32;
-    let dy = (ey[1] - ey[0]) / n as f32;
-    let ang2 = dy.atan2(dx);
-    let perp_dx = (ang2 + 1.57).cos();
-    let perp_dy = (ang2 + 1.57).sin();
-    (0..n)
-        .map(|i| {
-            let a = amp(i);
-            [
-                ex[0] + x_off + dx * i as f32 + perp_dx * a,
-                ey[0] + dy * i as f32 + perp_dy * a,
-            ]
-        })
-        .collect()
-}
-
 /// One pass of MD3's `DrawWave` loop: the vertices and the alpha of the wave number `mw.mode` *before* the
 /// "alpha < 0.004" test (which applies to the possibly blended result).
 ///
@@ -90,6 +67,9 @@ pub fn main_wave_geometry_md3_raw(
     blending: bool,
 ) -> Option<WaveGeom> {
     let (asp_x, asp_y) = aspect;
+    if wl.len() < NUM_WAVE_INPUT || wr.len() < NUM_WAVE_INPUT {
+        return None;
+    }
     let (fl, fr) = (wl, wr);
     let rgb = wave_rgb(mw);
     let pos_x = mw.x * 2.0 - 1.0;
@@ -100,29 +80,10 @@ pub fn main_wave_geometry_md3_raw(
     let t = time;
 
     // `param2` differs from `param` only for the modes that wrap it into [-1, 1)
-    let mut param2 = param;
-    if matches!(wave, 0 | 1 | 4) && !(-1.0..=1.0).contains(&param2) {
-        let q = param2 * 0.5 + 0.5;
-        param2 = (q - q.floor()).abs() * 2.0 - 1.0;
-    }
+    let param2 = wrap_param2(wave, param);
 
     let mut alpha = mw.rgba[3];
-    let finish = |alpha: f32| -> f32 {
-        let a = if mw.mod_alpha_by_volume {
-            alpha * volume_alpha_mod(mw, imm_rel)
-        } else {
-            alpha
-        };
-        a.clamp(0.0, 1.0)
-    };
-    // modes 2 and 5 scale the alpha by a table of the texture width, mode 3 replaces it (exact widths only)
-    let size_gain = || match tex_w {
-        256 => 0.07,
-        512 => 0.09,
-        1024 => 0.11,
-        2048 => 0.13,
-        _ => 1.0,
-    };
+    let finish = |alpha: f32| finish_alpha(mw, imm_rel, alpha);
     // modes 6..=11: vertices per strip (`min(240, W/3)`) and the sample offset that centres them in the 480 samples
     let line_n = (NUM_WAVEFORM_SAMPLES / 2).min(tex_w as usize / 3);
     let line_off = (NUM_WAVEFORM_SAMPLES - line_n) / 2;
@@ -212,7 +173,7 @@ pub fn main_wave_geometry_md3_raw(
         // spiro: faint (2) / treble-driven (3)
         2 | 3 => {
             if wave == 2 {
-                alpha *= size_gain();
+                alpha *= size_gain(tex_w);
             } else {
                 alpha = match tex_w {
                     256 => 0.075,
@@ -250,7 +211,7 @@ pub fn main_wave_geometry_md3_raw(
         }
         // explosive hash
         5 => {
-            alpha = finish(alpha * size_gain());
+            alpha = finish(alpha * size_gain(tex_w));
             let (c, s) = ((0.3 * t).cos(), (0.3 * t).sin());
             v = (0..NUM_WAVEFORM_SAMPLES)
                 .map(|i| {

@@ -163,9 +163,8 @@ struct GpuVertex {
 const ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
 
-/// Vertex stage (sprite space has y down) and one fragment entry point per mode, each producing the stage-0
-/// colour and alpha of the table.
-const SRC: &str = r#"
+/// Vertex stage (sprite space has y down); the fragment entry points follow in [`FRAGMENT_RETURNS`].
+const VERTEX_SRC: &str = r#"
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 
@@ -183,63 +182,45 @@ fn vs_main(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>, @location(2)
     o.color = color;
     return o;
 }
-
-fn texel(in: VOut) -> vec4<f32> { return textureSample(tex, samp, in.uv); }
-
-// 0 Blend: MODULATE(diffuse, texture) colour, diffuse alpha
-@fragment fn fs0(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(in.color.rgb * t.rgb, in.color.a);
-}
-// 1 Decal, 2 Additive: colour only, alpha 1 (decal: blending off)
-@fragment fn fs1(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(in.color.rgb * t.rgb, 1.0);
-}
-@fragment fn fs2(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(in.color.rgb * t.rgb, 1.0);
-}
-// 3 Srccolor: the texture alone
-@fragment fn fs3(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(t.rgb, 1.0);
-}
-// 4 Colorkey: alpha = diffuse * texture alpha
-@fragment fn fs4(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(in.color.rgb * t.rgb, in.color.a * t.a);
-}
-// 5 Multiplicative, 6 Subtractive: colour only
-@fragment fn fs5(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(in.color.rgb * t.rgb, in.color.a);
-}
-@fragment fn fs6(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(in.color.rgb * t.rgb, in.color.a);
-}
-// 7 Invert: SUBTRACT(TFACTOR = white, texture)
-@fragment fn fs7(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(clamp(vec3<f32>(1.0) - t.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a * t.a);
-}
-// 8 Cut-off: MODULATE(texture, diffuse), alpha = diffuse * texture alpha
-@fragment fn fs8(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(t.rgb * in.color.rgb, in.color.a * t.a);
-}
-// 9 Darken: ADDSIGNED(texture, diffuse)
-@fragment fn fs9(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(clamp(t.rgb + in.color.rgb - vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a);
-}
-// 10 Vivid: MODULATE2X(texture, diffuse)
-@fragment fn fs10(in: VOut) -> @location(0) vec4<f32> {
-    let t = texel(in);
-    return vec4<f32>(clamp(2.0 * t.rgb * in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a);
-}
 "#;
+
+/// The returned value of fragment entry point `fs<mode>`, indexed by mode (`t` is the texel, `in.color` the
+/// diffuse): the stage-0 colour and alpha of the table.
+const FRAGMENT_RETURNS: [&str; 11] = [
+    // 0 Blend: MODULATE(diffuse, texture) colour, diffuse alpha
+    "vec4<f32>(in.color.rgb * t.rgb, in.color.a)",
+    // 1 Decal: colour only, alpha 1 (blending off)
+    "vec4<f32>(in.color.rgb * t.rgb, 1.0)",
+    // 2 Additive: colour only, alpha 1
+    "vec4<f32>(in.color.rgb * t.rgb, 1.0)",
+    // 3 Srccolor: the texture alone
+    "vec4<f32>(t.rgb, 1.0)",
+    // 4 Colorkey: alpha = diffuse * texture alpha
+    "vec4<f32>(in.color.rgb * t.rgb, in.color.a * t.a)",
+    // 5 Multiplicative: colour only
+    "vec4<f32>(in.color.rgb * t.rgb, in.color.a)",
+    // 6 Subtractive: colour only
+    "vec4<f32>(in.color.rgb * t.rgb, in.color.a)",
+    // 7 Invert: SUBTRACT(TFACTOR = white, texture)
+    "vec4<f32>(clamp(vec3<f32>(1.0) - t.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a * t.a)",
+    // 8 Cut-off: MODULATE(texture, diffuse), alpha = diffuse * texture alpha
+    "vec4<f32>(t.rgb * in.color.rgb, in.color.a * t.a)",
+    // 9 Darken: ADDSIGNED(texture, diffuse)
+    "vec4<f32>(clamp(t.rgb + in.color.rgb - vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a)",
+    // 10 Vivid: MODULATE2X(texture, diffuse)
+    "vec4<f32>(clamp(2.0 * t.rgb * in.color.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), in.color.a)",
+];
+
+/// The complete WGSL module: vertex stage and one fragment entry point `fs<mode>` per mode.
+fn shader_source() -> String {
+    let mut s = String::from(VERTEX_SRC);
+    for (mode, ret) in FRAGMENT_RETURNS.iter().enumerate() {
+        s.push_str(&format!(
+            "@fragment fn fs{mode}(in: VOut) -> @location(0) vec4<f32> {{\n    let t = textureSample(tex, samp, in.uv);\n    return {ret};\n}}\n"
+        ));
+    }
+    s
+}
 
 /// `(SRCBLEND, DESTBLEND)` of a mode; `None` = alpha blending off (decal).
 fn factors(mode: usize) -> Option<(wgpu::BlendFactor, wgpu::BlendFactor)> {
@@ -268,7 +249,7 @@ impl SpritePipes {
     ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sprite"),
-            source: wgpu::ShaderSource::Wgsl(SRC.into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sprite"),

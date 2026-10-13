@@ -18,6 +18,7 @@ mod md3_io;
 pub mod milk2;
 mod scan;
 mod sprite;
+mod user_sprite;
 
 use scan::{Lookup, decode, sane_entries};
 use std::collections::HashSet;
@@ -27,6 +28,7 @@ pub use detect::{DetectedCompat, DetectedFamily, Evidence, detect_compat};
 pub use md3_io::{export_shape_file, export_wave_file, import_shape_file, import_wave_file};
 pub use scan::LINEFEED_CONTROL_CHAR;
 pub use sprite::PresetSprite;
+pub use user_sprite::{UserSprite, parse_user_sprite};
 
 /// `MAX_CUSTOM_WAVES` (md_defines.h)
 pub const MAX_CUSTOM_WAVES: usize = 16;
@@ -65,6 +67,12 @@ pub enum ParseError {
     Empty,
     /// UTF-16 BOM: MD2 reads bytes and would see no keys at all.
     Utf16,
+    /// projectM flavour: input larger than `PresetFileParser::maxFileSize` (1 MiB).
+    TooLarge,
+    /// projectM flavour: a NUL byte anywhere (`PresetFileParser::Read` treats it as binary).
+    BinaryData,
+    /// projectM flavour: no `key value` line at all (`Read` returns `!m_presetValues.empty()`).
+    NoKeys,
     /// A `.wave` / `.shape` import named a slot that does not exist.
     SlotOutOfRange {
         /// The requested slot.
@@ -92,6 +100,9 @@ impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ParseError::Empty => f.write_str("empty preset"),
+            ParseError::TooLarge => f.write_str("preset larger than 1 MiB"),
+            ParseError::BinaryData => f.write_str("preset contains a NUL byte"),
+            ParseError::NoKeys => f.write_str("preset has no key/value lines"),
             ParseError::Utf16 => f.write_str("preset is UTF-16 (not supported by MilkDrop)"),
             ParseError::SlotOutOfRange { slot, count } => {
                 write!(f, "custom wave/shape slot {slot} out of range (0..{count})")
@@ -707,7 +718,19 @@ impl Preset {
         }
         let mut lk = match flavor {
             Flavor::Md2 => Lookup::new(bytes),
-            Flavor::ProjectM => Lookup::projectm(bytes),
+            Flavor::ProjectM => {
+                if bytes.len() > scan::PROJECTM_MAX_FILE_SIZE {
+                    return Err(ParseError::TooLarge);
+                }
+                if bytes.contains(&0) {
+                    return Err(ParseError::BinaryData);
+                }
+                let lk = Lookup::projectm(bytes);
+                if lk.is_empty() {
+                    return Err(ParseError::NoKeys);
+                }
+                lk
+            }
         };
         let mut p = Preset::default();
         if flavor == Flavor::ProjectM {
@@ -876,9 +899,11 @@ impl Preset {
     }
 
     /// Serialise to `.milk` text.  Floats are written with Rust's shortest round-trip
-    /// formatting (not MD2's `%.3f`), so `parse(to_milk(p)) == p` holds for every preset
-    /// produced by [`Preset::parse`].  Only customs differing from their defaults are
-    /// written.  Shader text lines are written with a leading backtick like MD2's Export.
+    /// formatting (not MD2's `%.3f`), so `parse(to_milk(p))` reproduces every field of a preset
+    /// produced by [`Preset::parse`].  `==` is not a reliable check: a field holding NaN
+    /// (`PartialEq` on `f32`) never compares equal to itself.  Only customs differing from
+    /// their defaults are written.  Shader text lines are written with a leading backtick like
+    /// MD2's Export.
     pub fn to_milk(&self) -> String {
         let mut out = String::new();
         let v = self.milkdrop_preset_version;

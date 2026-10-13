@@ -2,14 +2,7 @@
 //! Skipped (with a note) when there is no GPU adapter.
 
 use lactea::{Compat, Engine, EngineConfig, Transition};
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
+use lactea_testutil::gpu;
 
 /// An identifier split over two code lines in every EEL part the engine compiles.
 const SPLIT: &str = "MILKDROP_PRESET_VERSION=201\n\
@@ -43,7 +36,8 @@ fn load(compat: Compat) -> Option<Result<(), String>> {
             compat,
             ..EngineConfig::default()
         },
-    );
+    )
+    .unwrap();
     Some(
         engine
             .load_preset(SPLIT.as_bytes(), "split", Transition::Cut)

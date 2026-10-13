@@ -141,7 +141,9 @@ struct TransitionUniforms {
     rand_static: [i32; 4],
 }
 
-const HEADER: &str = r#"
+const HEADER: &str = concat!(
+    crate::shaders::fullscreen_tri_fn!(),
+    r#"
 struct TP {
     resolution: vec4<f32>,
     duration_params: vec4<f32>,
@@ -155,9 +157,8 @@ struct TP {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
     // z = 0.5: gl_FragCoord.z of projectM's z = 0 quad under the default [-1, 1] -> [0, 1] depth range
-    return vec4<f32>(p[vi], 0.5, 1.0);
+    return vec4<f32>(fullscreen_tri(vi), 0.5, 1.0);
 }
 
 fn glsl_mod(x: f32, y: f32) -> f32 {
@@ -197,7 +198,8 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(rgb, 1.0);
 }
-"#;
+"#
+);
 
 const CIRCLE: &str = r#"
 fn main_image(frag: vec4<f32>, frag_coord: vec2<f32>) -> vec4<f32> {

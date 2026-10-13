@@ -4,9 +4,15 @@
 //! `sscanf` and falls back to the default when the conversion count is not 1.  These
 //! helpers reproduce which prefixes convert and which fail.
 
+/// `isspace` in the C locale.
 #[inline]
-fn is_space(b: u8) -> bool {
+pub(crate) fn is_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// `s` without its leading C-locale whitespace.
+pub(crate) fn skip_space(s: &[u8]) -> &[u8] {
+    &s[s.iter().position(|&b| !is_space(b)).unwrap_or(s.len())..]
 }
 
 /// `sscanf(s, "%d", &i) == 1 ? Some(i) : None`.
@@ -165,30 +171,70 @@ fn scan_hex(s: &[u8]) -> Option<f32> {
     Some((mant * (2.0f64).powi(exp)) as f32)
 }
 
-/// C++ `std::stoi(s)` (base 10) as `Some(v)`; `None` where it throws (`invalid_argument`: no
-/// digits; `out_of_range`: outside `int`).  Leading whitespace, one sign and the digit run
-/// are read, the rest is ignored (`"3.9"` -> 3).  projectM's `PresetFileParser::GetInt`.
-pub(crate) fn stoi(s: &[u8]) -> Option<i32> {
-    let mut i = 0;
-    while i < s.len() && is_space(s[i]) {
-        i += 1;
+/// Why a `std::stoi` / `std::stof` style conversion threw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NumErr {
+    /// `std::invalid_argument`: nothing converts.
+    Invalid,
+    /// `std::out_of_range`.
+    OutOfRange,
+}
+
+/// End of the decimal float prefix `digits [. digits] [e[+-]digits]` starting at `from` (the
+/// exponent counts only with digits); `None` when there is no mantissa digit.
+pub(crate) fn decimal_end(s: &[u8], from: usize) -> Option<usize> {
+    let digits = |at: usize| {
+        s[at.min(s.len())..]
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count()
+    };
+    let mut k = from + digits(from);
+    let mut mant_digits = k - from;
+    if s.get(k) == Some(&b'.') {
+        let frac = digits(k + 1);
+        k += 1 + frac;
+        mant_digits += frac;
     }
-    let mut neg = false;
-    if i < s.len() && (s[i] == b'+' || s[i] == b'-') {
-        neg = s[i] == b'-';
-        i += 1;
-    }
-    let start = i;
-    let mut v: i128 = 0;
-    while i < s.len() && s[i].is_ascii_digit() {
-        v = (v * 10 + (s[i] - b'0') as i128).min(i128::from(u64::MAX));
-        i += 1;
-    }
-    if i == start {
+    if mant_digits == 0 {
         return None;
     }
-    let v = if neg { -v } else { v };
-    i32::try_from(v).ok()
+    if matches!(s.get(k), Some(b'e' | b'E')) {
+        let mut e = k + 1;
+        if matches!(s.get(e), Some(b'+' | b'-')) {
+            e += 1;
+        }
+        let exp = digits(e);
+        if exp > 0 {
+            k = e + exp;
+        }
+    }
+    Some(k)
+}
+
+/// C++ `std::stoi(s)` (base 10) with the exception kind; leading whitespace, one sign and the
+/// digit run are read, the rest is ignored (`"3.9"` -> 3).
+pub(crate) fn stoi_checked(s: &[u8]) -> Result<i32, NumErr> {
+    let s = skip_space(s);
+    let (neg, s) = match s.first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let n = s.iter().take_while(|b| b.is_ascii_digit()).count();
+    if n == 0 {
+        return Err(NumErr::Invalid);
+    }
+    let mut v: i128 = 0;
+    for &d in &s[..n] {
+        v = (v * 10 + i128::from(d - b'0')).min(i128::from(u64::MAX));
+    }
+    i32::try_from(if neg { -v } else { v }).map_err(|_| NumErr::OutOfRange)
+}
+
+/// [`stoi_checked`] as `Some(v)`; `None` where it throws.  projectM's `PresetFileParser::GetInt`.
+pub(crate) fn stoi(s: &[u8]) -> Option<i32> {
+    stoi_checked(s).ok()
 }
 
 /// C++ `std::stof(s)` as `Some(v)`; `None` where it throws (`invalid_argument`: nothing
@@ -215,36 +261,7 @@ pub(crate) fn stof(s: &[u8]) -> Option<f32> {
         let negative = s.get(i) == Some(&b'-');
         return Some(scan_float(&s[i..]).unwrap_or(if negative { -0.0 } else { 0.0 }));
     }
-    // decimal: digits [. digits] [e[+-]digits]; the exponent counts only with digits
-    let mut k = j;
-    let mut mant_digits = 0;
-    while k < s.len() && s[k].is_ascii_digit() {
-        k += 1;
-        mant_digits += 1;
-    }
-    if k < s.len() && s[k] == b'.' {
-        k += 1;
-        while k < s.len() && s[k].is_ascii_digit() {
-            k += 1;
-            mant_digits += 1;
-        }
-    }
-    if mant_digits == 0 {
-        return None;
-    }
-    if k < s.len() && (s[k] == b'e' || s[k] == b'E') {
-        let mut e = k + 1;
-        if e < s.len() && (s[e] == b'+' || s[e] == b'-') {
-            e += 1;
-        }
-        let ds = e;
-        while e < s.len() && s[e].is_ascii_digit() {
-            e += 1;
-        }
-        if e > ds {
-            k = e;
-        }
-    }
+    let k = decimal_end(s, j)?;
     let text = std::str::from_utf8(&s[i..k]).ok()?;
     let v: f32 = text.parse().ok()?;
     let nonzero_literal = text

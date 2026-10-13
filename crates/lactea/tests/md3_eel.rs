@@ -2,14 +2,7 @@
 //! (`CompatRules::md3_ns_eel2`, `md3_drop_failed_code`). Skipped (with a note) when there is no GPU adapter.
 
 use lactea::{Compat, Engine, EngineConfig, PresetReport, Transition};
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
+use lactea_testutil::gpu;
 
 fn load(compat: Compat, preset: &str) -> Option<Result<PresetReport, String>> {
     let (device, queue) = gpu()?;
@@ -22,7 +15,8 @@ fn load(compat: Compat, preset: &str) -> Option<Result<PresetReport, String>> {
             compat,
             ..EngineConfig::default()
         },
-    );
+    )
+    .unwrap();
     Some(
         engine
             .load_preset(preset.as_bytes(), "t", Transition::Cut)

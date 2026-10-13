@@ -27,14 +27,13 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use lactea::{
-    Compat, Engine, EngineConfig, FrameClock, Image, Media, MediaFiles, PresetControl,
-    SwitchRequest, TEXTURE_EXTENSIONS as MEDIA_EXTENSIONS, TextureProvider, decode_gif,
-};
+use lactea::{Compat, Engine, EngineConfig, FrameClock, PresetControl, SwitchRequest};
 
 mod events;
+mod extras;
+mod playlist;
 mod vulkan;
 
 use events::{CCallbacks, Event, LacteaSwitchFailedFn, LacteaSwitchRequestedFn, Outbox};
@@ -57,24 +56,22 @@ pub enum LacteaStatus {
 }
 
 /// Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ (`docs/divergences.md`,
-/// `docs/md3.md`).
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LacteaCompat {
-    /// Follow projectM.
-    Projectm = 0,
-    /// Follow MilkDrop 2.
-    Milkdrop2 = 1,
-    /// Follow MilkDrop 3.
-    Milkdrop3 = 2,
-    /// Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
-    /// (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
-    /// names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
-    /// code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
-    /// changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
-    /// mode in use. Before the first load the mode is projectM.
-    Auto = 3,
-}
+/// `docs/md3.md`): one of the `LACTEA_COMPAT_*` values. A plain `int32_t` so that any bit pattern read
+/// from C is a valid Rust value; unknown values are rejected with `LACTEA_STATUS_INVALID_ARGUMENT`.
+pub type LacteaCompat = i32;
+/// Follow projectM.
+pub const LACTEA_COMPAT_PROJECTM: LacteaCompat = 0;
+/// Follow MilkDrop 2.
+pub const LACTEA_COMPAT_MILKDROP2: LacteaCompat = 1;
+/// Follow MilkDrop 3.
+pub const LACTEA_COMPAT_MILKDROP3: LacteaCompat = 2;
+/// Per-preset detection: every `lactea_load_preset*` resolves the mode from the preset's content
+/// (MilkDrop 3 when it uses an MD3 feature: `.milk2`, sprite block, `q33`..`q64`, MD3-only shader
+/// names, ...; otherwise projectM). MilkDrop 2 is only a fallback: a preset projectM rejects because its
+/// code does not compile is retried once under MilkDrop 2 (`lactea_get_compat` then says so). A load that
+/// changes the mode is a hard cut whatever the requested transition; `lactea_get_compat` reports the
+/// mode in use. Before the first load the mode is projectM.
+pub const LACTEA_COMPAT_AUTO: LacteaCompat = 3;
 
 /// Construction parameters. Fill with `lactea_config_default` and override fields.
 #[repr(C)]
@@ -90,7 +87,8 @@ pub struct LacteaConfig {
     pub mesh_y: u32,
     /// Seeds every random stream: same seed + same inputs = same frames.
     pub seed: u64,
-    /// Which implementation to follow where projectM and MilkDrop 2 differ.
+    /// Which implementation to follow where projectM, MilkDrop 2 and MilkDrop 3 differ: one of the
+    /// `LACTEA_COMPAT_*` values (`LACTEA_COMPAT_AUTO` picks per preset from its content).
     pub compat: LacteaCompat,
     /// Sample rate of the PCM given to `lactea_push_pcm_f32`.
     pub sample_rate: u32,
@@ -149,6 +147,10 @@ pub struct LacteaEngine {
     /// MilkDrop 3 `TimeBetweenPresetsRand` as the host last set it (`lactea_set_switch_settings`);
     /// kept here because `control` only holds it under `LACTEA_COMPAT_MILKDROP3`.
     md3_time_rand: f64,
+    /// The texture directory and texture load callback, merged into the engine's one provider.
+    textures: extras::HostTextures,
+    /// The playlist connected with `lactea_playlist_connect`, if any.
+    playlist_link: playlist::Link,
 }
 
 thread_local! {
@@ -244,6 +246,62 @@ fn guard_delivering(engine: *mut LacteaEngine, f: impl FnOnce() -> LacteaStatus)
     status
 }
 
+/// [`guard`] for a call on `engine`: NULL is `InvalidArgument`, otherwise `f` gets the engine.
+///
+/// Private, and only called from `extern "C"` functions whose own contract says `engine` is NULL or valid.
+fn with_engine_mut(
+    engine: *mut LacteaEngine,
+    f: impl FnOnce(&mut LacteaEngine) -> LacteaStatus,
+) -> LacteaStatus {
+    guard(|| match unsafe { engine.as_mut() } {
+        Some(e) => f(e),
+        None => fail(LacteaStatus::InvalidArgument, "engine is NULL"),
+    })
+}
+
+/// [`with_engine_mut`] that also delivers the events the call queued (see [`guard_delivering`]).
+fn with_engine_delivering(
+    engine: *mut LacteaEngine,
+    f: impl FnOnce(&mut LacteaEngine) -> LacteaStatus,
+) -> LacteaStatus {
+    guard_delivering(engine, || match unsafe { engine.as_mut() } {
+        Some(e) => f(e),
+        None => fail(LacteaStatus::InvalidArgument, "engine is NULL"),
+    })
+}
+
+/// The shared body of `lactea_push_pcm_{f32,i16,u8}`: validate the host's slice, then hand it to `push`.
+fn push_pcm<T>(
+    engine: *mut LacteaEngine,
+    samples: *const T,
+    frames: usize,
+    channels: u32,
+    push: fn(&mut Engine, &[T], usize),
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        if channels == 0 || (samples.is_null() && frames != 0) {
+            return fail(
+                LacteaStatus::InvalidArgument,
+                "samples is NULL or channels is 0",
+            );
+        }
+        let Some(n) = frames.checked_mul(channels as usize) else {
+            return fail(LacteaStatus::InvalidArgument, "frames * channels overflows");
+        };
+        if let Err(status) = check_slice_len::<T>(n, "samples") {
+            return status;
+        }
+        if n != 0 {
+            push(
+                &mut e.engine,
+                unsafe { std::slice::from_raw_parts(samples, n) },
+                channels as usize,
+            );
+        }
+        LacteaStatus::Ok
+    })
+}
+
 /// Run the callbacks for the events queued on `engine`, oldest first.
 ///
 /// No reference into the engine lives across a callback (each queue access is a short borrow of the
@@ -275,6 +333,12 @@ unsafe fn deliver_events(engine: *mut LacteaEngine) {
             let Some((event, mut callbacks)) = next else {
                 break;
             };
+            // a connected playlist answers switch requests itself, like projectM's connector
+            if let Event::SwitchRequested { hard_cut } = event
+                && playlist::handle_switch_request(engine, hard_cut)
+            {
+                continue;
+            }
             event.deliver(&mut callbacks);
         }
         let e = unsafe { &mut *engine };
@@ -284,186 +348,6 @@ unsafe fn deliver_events(engine: *mut LacteaEngine) {
         }
         LAST_ERROR.with(|e| *e.borrow_mut() = last_error);
     }));
-}
-
-fn create_target(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("lactea target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&Default::default());
-    (texture, view)
-}
-
-fn init_gpu() -> Result<(wgpu::Device, wgpu::Queue), String> {
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .map_err(|e| format!("no wgpu adapter: {e}"))?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-        .map_err(|e| format!("request_device: {e}"))
-}
-
-// ---------------------------------------------------------------------------------------------
-// textures
-// ---------------------------------------------------------------------------------------------
-
-const TEXTURE_EXTENSIONS: [&str; 7] = ["jpg", "jpeg", "dds", "png", "tga", "bmp", "dib"];
-
-/// Directory-backed [`TextureProvider`]: recursive scan, keyed by lowercase base name, random pool
-/// sorted by (name, path) (same rules as the CLI and projectM's `FileScanner`).
-struct DirTextures {
-    files: Vec<(String, PathBuf)>,
-    /// Every file MD3 may look for (sprites, GIFs, `.jfif`), by path relative to the MD3 data root.
-    media: MediaFiles<PathBuf>,
-}
-
-impl DirTextures {
-    /// Index `root` recursively; when `root` is one of the MD3 folders (`textures`, `sprites`, `gifs`) its parent
-    /// is the data root too, so a preset's `sprites\x.png` resolves next to the textures.
-    fn scan(root: &Path) -> Self {
-        let mut files = Vec::new();
-        scan_dir(root, &mut files, 0);
-        files.sort();
-        let mut media = MediaFiles::new();
-        scan_media(root, "", 0, &mut media);
-        let md3_folder = root.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            ["textures", "sprites", "gifs"].contains(&n.to_ascii_lowercase().as_str())
-        });
-        if let (true, Some(parent)) = (md3_folder, root.parent()) {
-            for sub in ["textures", "sprites", "gifs"] {
-                scan_media(&parent.join(sub), sub, 0, &mut media);
-            }
-        }
-        Self { files, media }
-    }
-}
-
-/// Register every media file under `dir` as `<rel>/<name>` (path relative to the data root).
-fn scan_media(dir: &Path, rel: &str, depth: u32, out: &mut MediaFiles<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-    entries.sort();
-    for p in entries {
-        let Some(name) = p.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
-            continue;
-        };
-        let path = if rel.is_empty() {
-            name
-        } else {
-            format!("{rel}/{name}")
-        };
-        if p.is_dir() {
-            if depth < 8 {
-                scan_media(&p, &path, depth + 1, out);
-            }
-            continue;
-        }
-        let ext = p
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(str::to_ascii_lowercase);
-        if ext.is_some_and(|e| MEDIA_EXTENSIONS.contains(&e.as_str())) {
-            out.add(&path, p);
-        }
-    }
-}
-
-/// A GIF (by content) as frames, anything else as a still image.
-fn decode_media(path: &Path) -> Option<Media> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.starts_with(b"GIF8") {
-        return decode_gif(&bytes).ok().map(Media::Animated);
-    }
-    decode_file(path).map(Media::Still)
-}
-
-fn scan_dir(dir: &Path, out: &mut Vec<(String, PathBuf)>, depth: u32) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            if depth < 8 {
-                scan_dir(&p, out, depth + 1);
-            }
-            continue;
-        }
-        let ext = p
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(str::to_ascii_lowercase);
-        if let (Some(ext), Some(stem)) = (ext, p.file_stem().and_then(|s| s.to_str()))
-            && TEXTURE_EXTENSIONS.contains(&ext.as_str())
-        {
-            out.push((stem.to_ascii_lowercase(), p));
-        }
-    }
-}
-
-fn decode_file(path: &Path) -> Option<Image> {
-    let bytes = std::fs::read(path).ok()?;
-    if lactea_jpeg::is_jpeg(&bytes)
-        && let Ok(img) = lactea_jpeg::decode_rgba(&bytes)
-    {
-        return Some(Image {
-            width: img.width,
-            height: img.height,
-            rgba8: img.rgba,
-        });
-    }
-    let rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    Some(Image {
-        width,
-        height,
-        rgba8: rgba.into_raw(),
-    })
-}
-
-impl TextureProvider for DirTextures {
-    fn load(&mut self, name: &str) -> Option<Image> {
-        let lower = name.to_ascii_lowercase();
-        self.files
-            .iter()
-            .filter(|(n, _)| *n == lower)
-            .find_map(|(_, path)| decode_file(path))
-    }
-
-    fn random_pool(&self) -> Vec<String> {
-        self.files.iter().map(|(n, _)| n.clone()).collect()
-    }
-
-    fn load_md3_texture(&mut self, name: &str) -> Option<Media> {
-        let path = self.media.find_texture(name)?.clone();
-        decode_media(&path)
-    }
-
-    fn load_sprite(&mut self, path: &str) -> Option<Media> {
-        let file = self.media.find_sprite(path)?.clone();
-        decode_media(&file)
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -500,7 +384,7 @@ pub unsafe extern "C" fn lactea_config_default(out: *mut LacteaConfig) {
             mesh_x: d.mesh[0],
             mesh_y: d.mesh[1],
             seed: d.seed,
-            compat: LacteaCompat::Projectm,
+            compat: LACTEA_COMPAT_PROJECTM,
             sample_rate: d.sample_rate,
             fps: d.fps,
             preset_duration: d.preset_duration,
@@ -521,8 +405,8 @@ pub unsafe extern "C" fn lactea_create(config: *const LacteaConfig) -> *mut Lact
             return std::ptr::null_mut();
         };
         cfg.output_format = wgpu::TextureFormat::Rgba8Unorm;
-        let (device, queue) = match init_gpu() {
-            Ok(x) => x,
+        let (device, queue) = match lactea_host::gpu::init_gpu() {
+            Ok(g) => (g.device, g.queue),
             Err(e) => {
                 set_error(e);
                 return std::ptr::null_mut();
@@ -536,7 +420,7 @@ pub unsafe extern "C" fn lactea_create(config: *const LacteaConfig) -> *mut Lact
             set_error(msg);
             return std::ptr::null_mut();
         }
-        let (texture, view) = create_target(&device, cfg.width, cfg.height);
+        let (texture, view) = lactea_host::gpu::create_target(&device, cfg.width, cfg.height);
         build_engine(
             cfg,
             device,
@@ -571,16 +455,24 @@ unsafe fn engine_config(config: *const LacteaConfig) -> Option<EngineConfig> {
         cfg.mesh = [c.mesh_x, c.mesh_y];
         cfg.seed = c.seed;
         cfg.compat = match c.compat {
-            LacteaCompat::Milkdrop2 => Compat::MilkDrop2,
-            LacteaCompat::Milkdrop3 => Compat::MilkDrop3,
-            LacteaCompat::Projectm => Compat::ProjectM,
-            LacteaCompat::Auto => {
+            LACTEA_COMPAT_MILKDROP2 => Compat::MilkDrop2,
+            LACTEA_COMPAT_MILKDROP3 => Compat::MilkDrop3,
+            LACTEA_COMPAT_PROJECTM => Compat::ProjectM,
+            LACTEA_COMPAT_AUTO => {
                 cfg.auto_compat = true;
                 Compat::ProjectM
+            }
+            other => {
+                set_error(format!("unknown compat mode {other}"));
+                return None;
             }
         };
         cfg.sample_rate = c.sample_rate;
         cfg.fps = c.fps;
+        if !c.preset_duration.is_finite() {
+            set_error("preset_duration must be finite");
+            return None;
+        }
         cfg.preset_duration = c.preset_duration;
         cfg.auto_hard_cut_mode = c.auto_hard_cut_mode;
     }
@@ -595,15 +487,16 @@ fn build_engine(
     target: Option<InternalTarget>,
     vulkan: Option<vulkan::VulkanState>,
 ) -> *mut LacteaEngine {
-    let engine = Engine::new(&device, &queue, cfg.clone());
+    let engine = match Engine::new(&device, &queue, cfg.clone()) {
+        Ok(e) => e,
+        Err(err) => {
+            set_error(err);
+            return std::ptr::null_mut();
+        }
+    };
     let mut control = PresetControl::new(cfg.seed);
     control.set_preset_duration(cfg.preset_duration);
-    // MD3 display time: BlendTimeAuto + TimeBetweenPresets + a random part up to TimeBetweenPresetsRand.
-    // Re-evaluated after every load (`sync_md3_time_rand`) because `LACTEA_COMPAT_AUTO` can change the mode.
-    if cfg.compat.rules().md3_preset_time_rand {
-        control.set_md3_time_rand(Some(MD3_TIME_BETWEEN_PRESETS_RAND));
-    }
-    Box::into_raw(Box::new(LacteaEngine {
+    let mut e = LacteaEngine {
         engine,
         device,
         queue,
@@ -618,7 +511,11 @@ fn build_engine(
         vulkan,
         readback: None,
         md3_time_rand: MD3_TIME_BETWEEN_PRESETS_RAND,
-    }))
+        textures: Default::default(),
+        playlist_link: playlist::Link::default(),
+    };
+    sync_md3_time_rand(&mut e);
+    Box::into_raw(Box::new(e))
 }
 
 /// Destroy an engine. NULL is a no-op. Inside one of the engine's own callbacks the engine is
@@ -677,10 +574,7 @@ pub unsafe extern "C" fn lactea_load_preset_ex(
     name: *const c_char,
     transition_seconds: f64,
 ) -> LacteaStatus {
-    guard_delivering(engine, || {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_delivering(engine, |e| {
         if bytes.is_null() && len != 0 {
             return fail(LacteaStatus::InvalidArgument, "bytes is NULL");
         }
@@ -719,8 +613,8 @@ pub unsafe extern "C" fn lactea_load_preset_ex(
     })
 }
 
-/// MD3 display-time randomisation follows the mode the engine runs now (`LACTEA_COMPAT_AUTO` can
-/// change it at every load).
+/// MD3 display time (BlendTimeAuto + TimeBetweenPresets + a random part up to TimeBetweenPresetsRand)
+/// follows the mode the engine runs now: `LACTEA_COMPAT_AUTO` can change it at every load.
 fn sync_md3_time_rand(e: &mut LacteaEngine) {
     let rand = e
         .engine
@@ -751,6 +645,9 @@ fn preset_started(e: &mut LacteaEngine, soft: Option<f64>) {
             e.control.start_preset(now);
         }
     }
+    // `progress` runs over the display time the control just sampled for this preset (projectM's `TimeKeeper`)
+    e.engine
+        .set_loaded_preset_duration(e.control.preset_duration_sampled());
     e.pending_switch = None;
 }
 
@@ -778,10 +675,7 @@ pub unsafe extern "C" fn lactea_set_switch_requested_callback(
     callback: LacteaSwitchRequestedFn,
     user_data: *mut c_void,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.events.requested = callback;
         e.events.requested_user = user_data;
         LacteaStatus::Ok
@@ -799,18 +693,17 @@ pub unsafe extern "C" fn lactea_set_switch_failed_callback(
     callback: LacteaSwitchFailedFn,
     user_data: *mut c_void,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.events.failed = callback;
         e.events.failed_user = user_data;
         LacteaStatus::Ok
     })
 }
 
-/// Use the images under `path` (recursive; jpg/jpeg/png/tga/bmp/dib) for preset `sampler_*`
-/// textures. Takes effect for presets loaded afterwards.
+/// Use the images under `path` (recursive; jpg/jpeg/dds/png/tga/bmp/dib) for preset `sampler_*`
+/// textures. Takes effect for presets loaded afterwards. With `LACTEA_COMPAT_MILKDROP3` (or auto) the
+/// directory also supplies MD3's sprites and shader textures (additionally `jfif` and `gif`); when `path`
+/// is one of the folders `textures`, `sprites` or `gifs`, its siblings of those names are searched too.
 ///
 /// # Safety
 /// `engine` valid; `path` NUL-terminated UTF-8.
@@ -819,18 +712,15 @@ pub unsafe extern "C" fn lactea_set_texture_dir(
     engine: *mut LacteaEngine,
     path: *const c_char,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         if path.is_null() {
             return fail(LacteaStatus::InvalidArgument, "path is NULL");
         }
         let Ok(p) = unsafe { CStr::from_ptr(path) }.to_str() else {
             return fail(LacteaStatus::InvalidArgument, "path is not UTF-8");
         };
-        e.engine
-            .set_texture_provider(Box::new(DirTextures::scan(Path::new(p))));
+        e.textures.set_dir(Path::new(p));
+        e.textures.install(&mut e.engine);
         LacteaStatus::Ok
     })
 }
@@ -847,29 +737,7 @@ pub unsafe extern "C" fn lactea_push_pcm_f32(
     frames: usize,
     channels: u32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
-        if channels == 0 || (samples.is_null() && frames != 0) {
-            return fail(
-                LacteaStatus::InvalidArgument,
-                "samples is NULL or channels is 0",
-            );
-        }
-        if frames == 0 {
-            return LacteaStatus::Ok;
-        }
-        let Some(n) = frames.checked_mul(channels as usize) else {
-            return fail(LacteaStatus::InvalidArgument, "frames * channels overflows");
-        };
-        if let Err(status) = check_slice_len::<f32>(n, "samples") {
-            return status;
-        }
-        let pcm = unsafe { std::slice::from_raw_parts(samples, n) };
-        e.engine.push_pcm_f32(pcm, channels as usize);
-        LacteaStatus::Ok
-    })
+    push_pcm(engine, samples, frames, channels, Engine::push_pcm_f32)
 }
 
 /// Change the render size (clears the feedback image; the loaded preset keeps running). A size the
@@ -883,18 +751,17 @@ pub unsafe extern "C" fn lactea_resize(
     width: u32,
     height: u32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         if let Err(msg) =
             check_dimensions(width, height, e.device.limits().max_texture_dimension_2d)
         {
             return fail(LacteaStatus::InvalidArgument, msg);
         }
-        e.engine.resize(width, height);
+        if let Err(err) = e.engine.resize(width, height) {
+            return fail(LacteaStatus::InvalidArgument, err);
+        }
         if e.target.is_some() {
-            let (texture, view) = create_target(&e.device, width, height);
+            let (texture, view) = lactea_host::gpu::create_target(&e.device, width, height);
             e.target = Some(InternalTarget { texture, view });
         }
         e.width = width;
@@ -934,7 +801,7 @@ fn encode_frame(
 /// [`deliver_events`].
 fn notify_switch(e: &mut LacteaEngine, request: Option<SwitchRequest>) {
     if let Some(r) = request
-        && e.events.requested.is_some()
+        && (e.events.requested.is_some() || e.playlist_link.is_connected())
     {
         e.outbox.queue.push_back(Event::SwitchRequested {
             hard_cut: r.hard_cut,
@@ -1009,17 +876,30 @@ fn render_inner(
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
+    // A failed read-back may leave the buffer mapped or with a map request in flight, and the next
+    // frame would then copy into it: drop it so it is recreated.
     if let Err(err) = e.device.poll(wgpu::PollType::wait_indefinitely()) {
+        e.readback = None;
         return fail(LacteaStatus::Gpu, format!("poll: {err:?}"));
     }
     match rx.recv() {
         Ok(Ok(())) => {}
-        Ok(Err(err)) => return fail(LacteaStatus::Gpu, format!("map: {err}")),
-        Err(err) => return fail(LacteaStatus::Gpu, format!("map: {err}")),
+        Ok(Err(err)) => {
+            e.readback = None;
+            return fail(LacteaStatus::Gpu, format!("map: {err}"));
+        }
+        Err(err) => {
+            e.readback = None;
+            return fail(LacteaStatus::Gpu, format!("map: {err}"));
+        }
     }
     let data = match slice.get_mapped_range() {
         Ok(d) => d,
-        Err(err) => return fail(LacteaStatus::Gpu, format!("mapped range: {err}")),
+        Err(err) => {
+            buf.unmap();
+            e.readback = None;
+            return fail(LacteaStatus::Gpu, format!("mapped range: {err}"));
+        }
     };
     let row = (w * 4) as usize;
     for y in 0..h as usize {
@@ -1043,12 +923,7 @@ pub unsafe extern "C" fn lactea_render(
     time: f64,
     frame: u32,
 ) -> LacteaStatus {
-    guard_delivering(engine, || {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
-        render_inner(e, time, frame, None)
-    })
+    with_engine_delivering(engine, |e| render_inner(e, time, frame, None))
 }
 
 /// Render one frame and copy it to `out` as tightly packed RGBA8 (`width * height * 4` bytes,
@@ -1064,10 +939,7 @@ pub unsafe extern "C" fn lactea_render_to_buffer(
     out: *mut u8,
     out_len: usize,
 ) -> LacteaStatus {
-    guard_delivering(engine, || {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_delivering(engine, |e| {
         let need = e.width as usize * e.height as usize * 4;
         if out.is_null() || out_len < need {
             return fail(
@@ -1113,30 +985,7 @@ pub unsafe extern "C" fn lactea_push_pcm_i16(
     frames: usize,
     channels: u32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
-        if channels == 0 || (samples.is_null() && frames != 0) {
-            return fail(
-                LacteaStatus::InvalidArgument,
-                "samples is NULL or channels is 0",
-            );
-        }
-        let Some(n) = frames.checked_mul(channels as usize) else {
-            return fail(LacteaStatus::InvalidArgument, "frames * channels overflows");
-        };
-        if let Err(status) = check_slice_len::<i16>(n, "samples") {
-            return status;
-        }
-        if n != 0 {
-            e.engine.push_pcm_i16(
-                unsafe { std::slice::from_raw_parts(samples, n) },
-                channels as usize,
-            );
-        }
-        LacteaStatus::Ok
-    })
+    push_pcm(engine, samples, frames, channels, Engine::push_pcm_i16)
 }
 
 /// Push `frames` sample frames of interleaved unsigned 8-bit PCM, silence = 128
@@ -1151,30 +1000,7 @@ pub unsafe extern "C" fn lactea_push_pcm_u8(
     frames: usize,
     channels: u32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
-        if channels == 0 || (samples.is_null() && frames != 0) {
-            return fail(
-                LacteaStatus::InvalidArgument,
-                "samples is NULL or channels is 0",
-            );
-        }
-        let Some(n) = frames.checked_mul(channels as usize) else {
-            return fail(LacteaStatus::InvalidArgument, "frames * channels overflows");
-        };
-        if let Err(status) = check_slice_len::<u8>(n, "samples") {
-            return status;
-        }
-        if n != 0 {
-            e.engine.push_pcm_u8(
-                unsafe { std::slice::from_raw_parts(samples, n) },
-                channels as usize,
-            );
-        }
-        LacteaStatus::Ok
-    })
+    push_pcm(engine, samples, frames, channels, Engine::push_pcm_u8)
 }
 
 /// Sample frames per channel the engine keeps (`projectm_pcm_get_max_samples`).
@@ -1224,17 +1050,12 @@ pub unsafe extern "C" fn lactea_last_frame_time(engine: *const LacteaEngine) -> 
 /// `engine` valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lactea_load_idle_preset(engine: *mut LacteaEngine) -> LacteaStatus {
-    guard_delivering(engine, || {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
-        match e.engine.load_idle_preset() {
-            Ok(_) => {
-                preset_started(e, None);
-                LacteaStatus::Ok
-            }
-            Err(err) => load_failed(e, lactea::IDLE_PRESET_NAME, err),
+    with_engine_delivering(engine, |e| match e.engine.load_idle_preset() {
+        Ok(_) => {
+            preset_started(e, None);
+            LacteaStatus::Ok
         }
+        Err(err) => load_failed(e, lactea::IDLE_PRESET_NAME, err),
     })
 }
 
@@ -1244,10 +1065,10 @@ pub unsafe extern "C" fn lactea_load_idle_preset(engine: *mut LacteaEngine) -> L
 /// `engine` valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lactea_set_fps(engine: *mut LacteaEngine, fps: u32) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
+        if fps == 0 {
+            return fail(LacteaStatus::InvalidArgument, "fps must be non-zero");
+        }
         e.engine.set_fps(fps);
         LacteaStatus::Ok
     })
@@ -1281,10 +1102,7 @@ pub unsafe extern "C" fn lactea_set_mouse(
     inside: bool,
     left_down: bool,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         if inside && let Err(status) = check_finite(&[("x", f64::from(x)), ("y", f64::from(y))]) {
             return status;
         }
@@ -1292,6 +1110,107 @@ pub unsafe extern "C" fn lactea_set_mouse(
             position: inside.then_some([x, y]),
             left_down,
         });
+        LacteaStatus::Ok
+    })
+}
+
+/// MilkDrop 2 (BeatDrop) Ctrl + arrow keys (`LACTEA_COMPAT_MILKDROP2`; ignored by the other modes): the expression
+/// variables `ctrllt ctrlrt ctrldn ctrlup`. Call it whenever the state changes; the engine reads the latest values
+/// once per rendered frame.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_set_ctrl_keys(
+    engine: *mut LacteaEngine,
+    left: bool,
+    right: bool,
+    down: bool,
+    up: bool,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        e.engine.set_ctrl_keys(lactea::CtrlKeys {
+            left,
+            right,
+            down,
+            up,
+        });
+        LacteaStatus::Ok
+    })
+}
+
+/// MilkDrop 2 (BeatDrop) wall clock (`LACTEA_COMPAT_MILKDROP2`; ignored by the other modes): the expression
+/// variables `year month day weekday hour minute second milliseconds totalseconds` and the shader constants `_c15` /
+/// `_c16`. The engine never reads the system clock: call it whenever the host's time moves on (typically once per
+/// frame). `weekday` is 1 = Monday .. 7 = Sunday. Until the first call the date reads 0 and the time of day
+/// follows the frame clock (`totalseconds` = frame time modulo 86400). A field out of its range (`month` 1..=12,
+/// `day` 1..=31, `weekday` 1..=7, `hour` < 24, `minute` < 60, `second` < 60, `millisecond` < 1000) is
+/// `InvalidArgument` and nothing is changed.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_set_date_time(
+    engine: *mut LacteaEngine,
+    year: u16,
+    month: u8,
+    day: u8,
+    weekday: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    millisecond: u16,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        let date_time = lactea::DateTime {
+            year,
+            month,
+            day,
+            weekday,
+            hour,
+            minute,
+            second,
+            millisecond,
+        };
+        if !date_time.is_valid() {
+            return fail(
+                LacteaStatus::InvalidArgument,
+                "date/time field out of range (month 1..=12, day 1..=31, weekday 1..=7, hour < 24, minute < 60, second < 60, millisecond < 1000)",
+            );
+        }
+        e.engine.set_date_time(date_time);
+        LacteaStatus::Ok
+    })
+}
+
+/// Go back to the frame-clock time of day of [`lactea_set_date_time`].
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_clear_date_time(engine: *mut LacteaEngine) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        e.engine.clear_date_time();
+        LacteaStatus::Ok
+    })
+}
+
+/// The `monitor` variable of the active preset as its last rendered frame left it (BeatDrop's debug read-out; an
+/// ordinary persistent variable in every mode): 0 when no preset is loaded or the preset's code never mentions
+/// `monitor`.
+///
+/// # Safety
+/// `engine` valid; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_get_monitor(
+    engine: *const LacteaEngine,
+    out: *mut f64,
+) -> LacteaStatus {
+    guard(|| {
+        let (Some(e), false) = (unsafe { engine.as_ref() }, out.is_null()) else {
+            return fail(LacteaStatus::InvalidArgument, "engine or out is NULL");
+        };
+        unsafe { out.write(e.engine.monitor()) };
         LacteaStatus::Ok
     })
 }
@@ -1306,10 +1225,7 @@ pub unsafe extern "C" fn lactea_set_volume_sensitivity(
     engine: *mut LacteaEngine,
     sensitivity: f32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         if let Err(status) = check_finite(&[("sensitivity", f64::from(sensitivity))]) {
             return status;
         }
@@ -1329,12 +1245,9 @@ pub unsafe extern "C" fn lactea_set_mesh_size(
     width: u32,
     height: u32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
-        e.engine.set_mesh_size(width, height);
-        LacteaStatus::Ok
+    with_engine_mut(engine, |e| match e.engine.set_mesh_size(width, height) {
+        Ok(_) => LacteaStatus::Ok,
+        Err(err) => fail(LacteaStatus::InvalidArgument, err),
     })
 }
 
@@ -1374,10 +1287,7 @@ pub unsafe extern "C" fn lactea_set_texel_offset(
     x: f32,
     y: f32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.engine.set_texel_offset([x, y]);
         LacteaStatus::Ok
     })
@@ -1422,10 +1332,7 @@ pub unsafe extern "C" fn lactea_set_auto_hard_cut_mode(
     engine: *mut LacteaEngine,
     mode: u8,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.engine.set_auto_hard_cut_mode(mode);
         LacteaStatus::Ok
     })
@@ -1450,6 +1357,40 @@ pub unsafe extern "C" fn lactea_get_auto_hard_cut_mode(
     })
 }
 
+/// `projectm_set_preset_start_clean`: `true` starts every preset loaded afterwards from a black frame,
+/// `false` (the default) warps its first frame from the previous preset's last image.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_set_preset_start_clean(
+    engine: *mut LacteaEngine,
+    enabled: bool,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        e.engine.set_start_clean(enabled);
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_get_preset_start_clean`.
+///
+/// # Safety
+/// `engine` valid; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_get_preset_start_clean(
+    engine: *const LacteaEngine,
+    out: *mut bool,
+) -> LacteaStatus {
+    guard(|| {
+        let (Some(e), false) = (unsafe { engine.as_ref() }, out.is_null()) else {
+            return fail(LacteaStatus::InvalidArgument, "engine or out is NULL");
+        };
+        unsafe { out.write(e.engine.start_clean()) };
+        LacteaStatus::Ok
+    })
+}
+
 /// The compat mode the engine is running now, never `LACTEA_COMPAT_AUTO`: with
 /// `LACTEA_COMPAT_AUTO` it is the mode the last successfully loaded preset resolved to (the creation
 /// mode, `LACTEA_COMPAT_PROJECTM`, before the first load); with a fixed mode it is that mode.
@@ -1467,9 +1408,9 @@ pub unsafe extern "C" fn lactea_get_compat(
         };
         unsafe {
             out.write(match e.engine.current_compat() {
-                Compat::ProjectM => LacteaCompat::Projectm,
-                Compat::MilkDrop2 => LacteaCompat::Milkdrop2,
-                Compat::MilkDrop3 => LacteaCompat::Milkdrop3,
+                Compat::ProjectM => LACTEA_COMPAT_PROJECTM,
+                Compat::MilkDrop2 => LACTEA_COMPAT_MILKDROP2,
+                Compat::MilkDrop3 => LACTEA_COMPAT_MILKDROP3,
             })
         };
         LacteaStatus::Ok
@@ -1583,9 +1524,7 @@ pub unsafe extern "C" fn lactea_set_switch_settings(
         c.set_hard_cut_duration(s.hard_cut_duration);
         c.set_hard_cut_sensitivity(s.hard_cut_sensitivity);
         e.md3_time_rand = s.preset_duration_rand.max(0.0);
-        if e.engine.current_compat().rules().md3_preset_time_rand {
-            c.set_md3_time_rand(Some(e.md3_time_rand));
-        }
+        sync_md3_time_rand(e);
         e.engine.set_preset_duration(s.preset_duration);
         LacteaStatus::Ok
     })
@@ -1641,10 +1580,7 @@ pub unsafe extern "C" fn lactea_touch(
     pressure: i32,
     touch_type: i32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         let Some(kind) = lactea::TouchType::from_i32(touch_type) else {
             return fail(
                 LacteaStatus::InvalidArgument,
@@ -1667,10 +1603,7 @@ pub unsafe extern "C" fn lactea_touch_drag(
     y: f32,
     pressure: i32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.engine.touch_drag(x, y, pressure);
         LacteaStatus::Ok
     })
@@ -1686,10 +1619,7 @@ pub unsafe extern "C" fn lactea_touch_destroy(
     x: f32,
     y: f32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.engine.touch_destroy(x, y);
         LacteaStatus::Ok
     })
@@ -1701,10 +1631,7 @@ pub unsafe extern "C" fn lactea_touch_destroy(
 /// `engine` valid.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn lactea_touch_destroy_all(engine: *mut LacteaEngine) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         e.engine.touch_destroy_all();
         LacteaStatus::Ok
     })
@@ -1727,10 +1654,7 @@ pub unsafe extern "C" fn lactea_read_stage(
     width: *mut u32,
     height: *mut u32,
 ) -> LacteaStatus {
-    guard(|| {
-        let Some(e) = (unsafe { engine.as_mut() }) else {
-            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
-        };
+    with_engine_mut(engine, |e| {
         // The documented ids 0..=5 are the positions in `Stage::ALL` (final, main, warped, blur1..3).
         let Some(&st) = lactea::Stage::ALL.get(stage as usize) else {
             return fail(
@@ -1765,13 +1689,200 @@ pub unsafe extern "C" fn lactea_read_stage(
     })
 }
 
+/// `projectm_sprite_create`: add a user sprite. `type_name` is the case-insensitive sprite type (`"milkdrop"`) and
+/// `code` the text of a MilkDrop `imgNN` section (`img=`, `init_N`, `code_N`; see `lactea::Engine::sprite_create`).
+/// The new sprite's id (never 0) is stored in `*out_id`. An unknown type, a sprite limit of 0, unreadable data or
+/// code that does not compile is `LACTEA_STATUS_INVALID_ARGUMENT` (the message says which) with `*out_id` = 0. At
+/// the limit the oldest sprite is destroyed to make room.
+///
+/// # Safety
+/// `engine` valid; `type_name` and `code` NUL-terminated strings; `out_id` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_create(
+    engine: *mut LacteaEngine,
+    type_name: *const c_char,
+    code: *const c_char,
+    out_id: *mut u32,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        if type_name.is_null() || code.is_null() || out_id.is_null() {
+            return fail(
+                LacteaStatus::InvalidArgument,
+                "type_name, code or out_id is NULL",
+            );
+        }
+        unsafe { out_id.write(0) };
+        let Ok(kind) = unsafe { CStr::from_ptr(type_name) }.to_str() else {
+            return fail(LacteaStatus::InvalidArgument, "sprite type is not UTF-8");
+        };
+        let id = e
+            .engine
+            .sprite_create(kind, unsafe { CStr::from_ptr(code) }.to_bytes());
+        if id == 0 {
+            return fail(
+                LacteaStatus::InvalidArgument,
+                "no sprite created: unknown type, sprite limit 0, unreadable data or code that does not compile",
+            );
+        }
+        unsafe { out_id.write(id) };
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_sprite_destroy`: unknown ids are ignored.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_destroy(
+    engine: *mut LacteaEngine,
+    sprite_id: u32,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        e.engine.sprite_destroy(sprite_id);
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_sprite_destroy_all`.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_destroy_all(engine: *mut LacteaEngine) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        e.engine.sprite_destroy_all();
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_sprite_get_sprite_count`: the number of live sprites (sprites remove themselves after the frame in which
+/// `done` was set); 0 for NULL.
+///
+/// # Safety
+/// `engine` NULL or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_count(engine: *const LacteaEngine) -> u32 {
+    guard_value(0, || {
+        unsafe { engine.as_ref() }.map_or(0, |e| e.engine.sprite_count())
+    })
+}
+
+/// `projectm_sprite_get_sprite_ids`: the ids of the live sprites, oldest first. Copies at most `capacity` ids into
+/// `ids` (which may be NULL when `capacity` is 0) and stores the number of live sprites in `*count` (may be NULL), so
+/// a call with `capacity` 0 sizes the list.
+///
+/// # Safety
+/// `engine` valid; `ids` NULL or `capacity` writable `uint32_t`s; `count` NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_get_ids(
+    engine: *const LacteaEngine,
+    ids: *mut u32,
+    capacity: usize,
+    count: *mut usize,
+) -> LacteaStatus {
+    guard(|| {
+        let Some(e) = (unsafe { engine.as_ref() }) else {
+            return fail(LacteaStatus::InvalidArgument, "engine is NULL");
+        };
+        if ids.is_null() && capacity > 0 {
+            return fail(LacteaStatus::InvalidArgument, "ids is NULL");
+        }
+        let live = e.engine.sprite_ids();
+        let n = live.len().min(capacity);
+        if n > 0 {
+            unsafe { std::slice::from_raw_parts_mut(ids, n) }.copy_from_slice(&live[..n]);
+        }
+        if let Some(c) = unsafe { count.as_mut() } {
+            *c = live.len();
+        }
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_sprite_set_max_sprites`: the limit of concurrent sprites (default 16). Lowering it destroys the oldest
+/// sprites; 0 makes `lactea_sprite_create` fail.
+///
+/// # Safety
+/// `engine` valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_set_max(
+    engine: *mut LacteaEngine,
+    max_sprites: u32,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        e.engine.set_max_sprites(max_sprites);
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_sprite_get_max_sprites` (0 for NULL).
+///
+/// # Safety
+/// `engine` NULL or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_get_max(engine: *const LacteaEngine) -> u32 {
+    guard_value(0, || {
+        unsafe { engine.as_ref() }.map_or(0, |e| e.engine.max_sprites())
+    })
+}
+
+/// `projectm_sprite_get_var`: the value of an expression variable of a sprite in `*out`; 0 for an unknown sprite or
+/// a variable the code never used.
+///
+/// # Safety
+/// `engine` valid; `name` a NUL-terminated string; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_get_var(
+    engine: *const LacteaEngine,
+    sprite_id: u32,
+    name: *const c_char,
+    out: *mut f64,
+) -> LacteaStatus {
+    guard(|| {
+        let (Some(e), false, false) = (unsafe { engine.as_ref() }, name.is_null(), out.is_null())
+        else {
+            return fail(LacteaStatus::InvalidArgument, "engine, name or out is NULL");
+        };
+        let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+            return fail(LacteaStatus::InvalidArgument, "variable name is not UTF-8");
+        };
+        unsafe { out.write(e.engine.sprite_var(sprite_id, name)) };
+        LacteaStatus::Ok
+    })
+}
+
+/// `projectm_sprite_set_var`: set an expression variable of a sprite (registered when new); ignored for an unknown
+/// sprite.
+///
+/// # Safety
+/// `engine` valid; `name` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lactea_sprite_set_var(
+    engine: *mut LacteaEngine,
+    sprite_id: u32,
+    name: *const c_char,
+    value: f64,
+) -> LacteaStatus {
+    with_engine_mut(engine, |e| {
+        if name.is_null() {
+            return fail(LacteaStatus::InvalidArgument, "name is NULL");
+        }
+        let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+            return fail(LacteaStatus::InvalidArgument, "variable name is not UTF-8");
+        };
+        e.engine.set_sprite_var(sprite_id, name, value);
+        LacteaStatus::Ok
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ptr::{null, null_mut};
 
-    fn engine() -> Option<*mut LacteaEngine> {
-        engine_with(LacteaCompat::Projectm, 0)
+    pub(super) fn engine() -> Option<*mut LacteaEngine> {
+        engine_with(LACTEA_COMPAT_PROJECTM, 0)
     }
 
     fn engine_with(compat: LacteaCompat, auto_hard_cut_mode: u8) -> Option<*mut LacteaEngine> {
@@ -1788,6 +1899,33 @@ mod tests {
         };
         assert!(!e.is_null());
         Some(e)
+    }
+
+    fn default_config() -> LacteaConfig {
+        let mut cfg = std::mem::MaybeUninit::<LacteaConfig>::uninit();
+        unsafe {
+            lactea_config_default(cfg.as_mut_ptr());
+            cfg.assume_init()
+        }
+    }
+
+    #[test]
+    fn config_rejects_unknown_compat_values() {
+        for bad in [4, -1, i32::MAX, i32::MIN] {
+            let cfg = LacteaConfig {
+                compat: bad,
+                ..default_config()
+            };
+            assert!(unsafe { engine_config(&cfg) }.is_none(), "{bad}");
+            let msg = unsafe { CStr::from_ptr(lactea_last_error()) }.to_string_lossy();
+            assert!(msg.contains("compat"), "{msg}");
+            assert!(unsafe { lactea_create(&cfg) }.is_null());
+        }
+        let ok = LacteaConfig {
+            compat: LACTEA_COMPAT_AUTO,
+            ..default_config()
+        };
+        assert!(unsafe { engine_config(&ok) }.is_some_and(|c| c.auto_compat));
     }
 
     #[test]
@@ -2248,7 +2386,7 @@ mod tests {
         }
 
         // the setting is stored under every compat; the config value is clamped too
-        for compat in [LacteaCompat::Projectm, LacteaCompat::Milkdrop3] {
+        for compat in [LACTEA_COMPAT_PROJECTM, LACTEA_COMPAT_MILKDROP3] {
             let Some(e) = engine_with(compat, 9) else {
                 return;
             };
@@ -2261,7 +2399,7 @@ mod tests {
 
     #[test]
     fn md3_auto_hard_cut_raises_a_hard_cut_request_only_under_milkdrop_3() {
-        let Some(e) = engine_with(LacteaCompat::Milkdrop3, 6) else {
+        let Some(e) = engine_with(LACTEA_COMPAT_MILKDROP3, 6) else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
@@ -2320,7 +2458,7 @@ mod tests {
 
     #[test]
     fn auto_hard_cut_mode_is_inert_under_projectm() {
-        let Some(e) = engine_with(LacteaCompat::Projectm, 6) else {
+        let Some(e) = engine_with(LACTEA_COMPAT_PROJECTM, 6) else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
@@ -2353,9 +2491,9 @@ mod tests {
     #[test]
     fn preset_duration_rand_is_stored_and_reaches_the_control_only_under_milkdrop_3() {
         for (compat, md3) in [
-            (LacteaCompat::Projectm, false),
-            (LacteaCompat::Milkdrop2, false),
-            (LacteaCompat::Milkdrop3, true),
+            (LACTEA_COMPAT_PROJECTM, false),
+            (LACTEA_COMPAT_MILKDROP2, false),
+            (LACTEA_COMPAT_MILKDROP3, true),
         ] {
             let Some(e) = engine_with(compat, 0) else {
                 eprintln!("skipping: no wgpu adapter");
@@ -2386,7 +2524,7 @@ mod tests {
 
     #[test]
     fn auto_compat_follows_the_loaded_preset() {
-        let Some(e) = engine_with(LacteaCompat::Auto, 0) else {
+        let Some(e) = engine_with(LACTEA_COMPAT_AUTO, 0) else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
@@ -2394,29 +2532,29 @@ mod tests {
         let md3 = b"[preset00]\nMILKDROP_PRESET_VERSION=300\nfDecay=0.9\nper_frame_1=q40=1;\n\
                     [SPRITE1_BEGIN]\nSpriteName=x\n[SPRITE1_END]\n";
         let compat = |e: *mut LacteaEngine| {
-            let mut out = LacteaCompat::Auto;
+            let mut out = LACTEA_COMPAT_AUTO;
             assert_eq!(unsafe { lactea_get_compat(e, &mut out) }, LacteaStatus::Ok);
             out
         };
         unsafe {
-            assert_eq!(compat(e), LacteaCompat::Projectm);
+            assert_eq!(compat(e), LACTEA_COMPAT_PROJECTM);
             assert_eq!(
                 lactea_load_preset(e, plain.as_ptr(), plain.len(), c"plain".as_ptr()),
                 LacteaStatus::Ok
             );
-            assert_eq!(compat(e), LacteaCompat::Projectm);
+            assert_eq!(compat(e), LACTEA_COMPAT_PROJECTM);
             assert_eq!((*e).control.md3_time_rand(), None);
             assert_eq!(
                 lactea_load_preset(e, md3.as_ptr(), md3.len(), c"md3".as_ptr()),
                 LacteaStatus::Ok
             );
-            assert_eq!(compat(e), LacteaCompat::Milkdrop3);
+            assert_eq!(compat(e), LACTEA_COMPAT_MILKDROP3);
             assert_eq!((*e).control.md3_time_rand(), Some(10.0));
             assert_eq!(
                 lactea_load_preset(e, plain.as_ptr(), plain.len(), c"plain".as_ptr()),
                 LacteaStatus::Ok
             );
-            assert_eq!(compat(e), LacteaCompat::Projectm);
+            assert_eq!(compat(e), LACTEA_COMPAT_PROJECTM);
             assert_eq!((*e).control.md3_time_rand(), None);
             assert_eq!(
                 lactea_get_compat(e, null_mut()),
@@ -2753,6 +2891,66 @@ mod tests {
     }
 
     #[test]
+    fn beatdrop_inputs_validate_their_arguments() {
+        unsafe {
+            assert_eq!(
+                lactea_set_ctrl_keys(null_mut(), true, false, false, false),
+                LacteaStatus::InvalidArgument
+            );
+            assert_eq!(
+                lactea_set_date_time(null_mut(), 2026, 10, 13, 2, 12, 0, 0, 0),
+                LacteaStatus::InvalidArgument
+            );
+            assert_eq!(
+                lactea_get_monitor(null(), &mut 0.0),
+                LacteaStatus::InvalidArgument
+            );
+        }
+        let Some(e) = engine() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        unsafe {
+            assert_eq!(
+                lactea_set_ctrl_keys(e, true, false, true, false),
+                LacteaStatus::Ok
+            );
+            assert_eq!(
+                lactea_set_date_time(e, 2026, 10, 13, 2, 23, 59, 58, 250),
+                LacteaStatus::Ok
+            );
+            // every field is range-checked
+            for (month, day, weekday, hour, minute, second, ms) in [
+                (0, 13, 2, 0, 0, 0, 0),
+                (13, 13, 2, 0, 0, 0, 0),
+                (10, 0, 2, 0, 0, 0, 0),
+                (10, 32, 2, 0, 0, 0, 0),
+                (10, 13, 0, 0, 0, 0, 0),
+                (10, 13, 8, 0, 0, 0, 0),
+                (10, 13, 2, 24, 0, 0, 0),
+                (10, 13, 2, 0, 60, 0, 0),
+                (10, 13, 2, 0, 0, 60, 0),
+                (10, 13, 2, 0, 0, 0, 1000),
+            ] {
+                assert_eq!(
+                    lactea_set_date_time(e, 2026, month, day, weekday, hour, minute, second, ms),
+                    LacteaStatus::InvalidArgument,
+                    "{month}-{day} {weekday} {hour}:{minute}:{second}.{ms}"
+                );
+            }
+            assert_eq!(lactea_clear_date_time(e), LacteaStatus::Ok);
+            let mut monitor = 1.0;
+            assert_eq!(lactea_get_monitor(e, &mut monitor), LacteaStatus::Ok);
+            assert_eq!(monitor, 0.0, "no preset loaded");
+            assert_eq!(
+                lactea_get_monitor(e, null_mut()),
+                LacteaStatus::InvalidArgument
+            );
+            lactea_destroy(e);
+        }
+    }
+
+    #[test]
     fn polling_a_null_engine_sets_an_error() {
         unsafe {
             set_error("stale");
@@ -2761,6 +2959,79 @@ mod tests {
                 CStr::from_ptr(lactea_last_error()).to_str().unwrap(),
                 "engine is NULL"
             );
+        }
+    }
+
+    #[test]
+    fn sprites_round_trip_through_the_c_api() {
+        let Some(e) = engine() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        unsafe {
+            let kind = c"MilkDrop";
+            let code = c"img=none\ncode_1=a=1;";
+            let mut id = 99;
+            assert_eq!(lactea_sprite_get_max(e), 16);
+            assert_eq!(
+                lactea_sprite_create(e, kind.as_ptr(), code.as_ptr(), &mut id),
+                LacteaStatus::Ok
+            );
+            assert_eq!(id, 1);
+            let mut second = 0;
+            lactea_sprite_create(e, kind.as_ptr(), code.as_ptr(), &mut second);
+            assert_eq!((second, lactea_sprite_count(e)), (2, 2));
+
+            // a size query, then a short buffer: the count is the total either way
+            let mut count = 0usize;
+            assert_eq!(
+                lactea_sprite_get_ids(e, null_mut(), 0, &mut count),
+                LacteaStatus::Ok
+            );
+            assert_eq!(count, 2);
+            let mut ids = [0u32; 1];
+            lactea_sprite_get_ids(e, ids.as_mut_ptr(), 1, &mut count);
+            assert_eq!((ids, count), ([1], 2));
+
+            let mut v = -1.0;
+            let name = c"zork";
+            assert_eq!(
+                lactea_sprite_get_var(e, id, name.as_ptr(), &mut v),
+                LacteaStatus::Ok
+            );
+            assert_eq!(v, 0.0);
+            lactea_sprite_set_var(e, id, name.as_ptr(), 2.5);
+            lactea_sprite_get_var(e, id, name.as_ptr(), &mut v);
+            assert_eq!(v, 2.5);
+
+            // a failed create reports why and stores 0
+            let mut bad = 7;
+            let broken = c"img=none\ncode_1=a = (;";
+            assert_eq!(
+                lactea_sprite_create(e, kind.as_ptr(), broken.as_ptr(), &mut bad),
+                LacteaStatus::InvalidArgument
+            );
+            assert_eq!(bad, 0);
+            assert!(
+                CStr::from_ptr(lactea_last_error())
+                    .to_string_lossy()
+                    .contains("no sprite created")
+            );
+            assert_eq!(
+                lactea_sprite_create(e, kind.as_ptr(), code.as_ptr(), null_mut()),
+                LacteaStatus::InvalidArgument
+            );
+
+            // lowering the limit drops the oldest
+            lactea_sprite_set_max(e, 1);
+            assert_eq!(lactea_sprite_get_max(e), 1);
+            lactea_sprite_get_ids(e, ids.as_mut_ptr(), 1, &mut count);
+            assert_eq!((ids, count), ([2], 1));
+            lactea_sprite_destroy(e, 42);
+            assert_eq!(lactea_sprite_count(e), 1);
+            lactea_sprite_destroy_all(e);
+            assert_eq!(lactea_sprite_count(e), 0);
+            lactea_destroy(e);
         }
     }
 }

@@ -15,6 +15,10 @@ const MAX_BIGSTRING_LEN: usize = 32768;
 /// `LINEFEED_CONTROL_CHAR`: terminates every line of a joined code block.
 pub const LINEFEED_CONTROL_CHAR: char = '\u{1}';
 const LF: u8 = 1;
+/// `PresetFileParser::maxFileSize`: projectM refuses larger presets.
+pub const PROJECTM_MAX_FILE_SIZE: usize = 0x100000;
+/// Highest `prefixN` index `PresetFileParser::GetCode` reads (`index <= 99999`).
+const PROJECTM_MAX_CODE_LINE: i32 = 99999;
 
 /// `MAX_VARNAME_LEN-3`: name characters kept by the scan.
 const NAME_CAP: usize = 125;
@@ -116,6 +120,11 @@ impl<'a> Lookup<'a> {
         matches!(self.backend, Backend::ProjectM { .. })
     }
 
+    /// projectM backend with no key read (always false for the MD2 scan).
+    pub fn is_empty(&self) -> bool {
+        matches!(&self.backend, Backend::ProjectM { map } if map.is_empty())
+    }
+
     /// `PresetFileParser::Read`: every non-empty line (split at `\r`/`\n`) is `key<sep>value`
     /// with `sep` = first space or `=` (a line without one, or starting with one, is skipped);
     /// the key is ASCII-lower-cased and only the first occurrence of a key is kept.
@@ -165,7 +174,8 @@ impl<'a> Lookup<'a> {
             if matches!(c, Some(b'\r') | Some(b'\n')) || is_eof(c) {
                 break;
             }
-            out.push(c.expect("EOF (None) is handled above"));
+            let Some(c) = c else { break };
+            out.push(c);
         }
         // used as a C string afterwards
         if let Some(z) = out.iter().position(|&b| b == 0) {
@@ -252,7 +262,7 @@ impl<'a> Lookup<'a> {
             if done {
                 break;
             }
-            let v = val.expect("`done` is true when the key is missing");
+            let Some(v) = val else { break };
             let mut l = len as i64;
             if v.first() == Some(&b'`') {
                 out.extend_from_slice(&v[1..]);
@@ -263,6 +273,9 @@ impl<'a> Lookup<'a> {
             out.push(LF);
             char_pos += l + 1;
             line += 1;
+            if pm && line > PROJECTM_MAX_CODE_LINE {
+                break;
+            }
         }
         out
     }

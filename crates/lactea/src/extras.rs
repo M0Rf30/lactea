@@ -5,6 +5,7 @@
 
 use super::Engine;
 use crate::callbacks::SwitchFailure;
+use crate::{EngineError, PresetReport};
 use lactea_abi::dump::Stage;
 use lactea_render::RenderError;
 
@@ -118,6 +119,54 @@ impl Engine {
     }
 }
 
+impl Engine {
+    /// `projectm_burn_texture` (`ProjectM::BurnInTexture`): draws `rgba8` (`width x height` pixels, row 0 = top) as
+    /// one quad over the image the next frame's warp reads, in the active preset and, during a soft cut, in the
+    /// incoming one. `rect = [left, top, width, height]` in output pixels, placed with projectM's arithmetic (see
+    /// [`Renderer::burn_texture`](lactea_render::Renderer::burn_texture)). Does nothing before the first preset
+    /// load, like projectM without an active preset. projectM takes an OpenGL texture id; here the pixels are copied.
+    pub fn burn_texture(
+        &mut self,
+        rgba8: &[u8],
+        width: u32,
+        height: u32,
+        rect: [i32; 4],
+    ) -> Result<(), EngineError> {
+        for slot in self.active.iter_mut().chain(self.incoming.iter_mut()) {
+            slot.renderer.burn_texture(rgba8, width, height, rect)?;
+        }
+        Ok(())
+    }
+
+    /// `projectm_reset_textures`: forgets every texture the provider decoded and resolves the textures of the running
+    /// preset(s) again from the current provider (a host that changed the files behind it sees the new pixels).
+    /// Returns the texture names that stay unresolved. The preset's shader interfaces and shape images are kept, so
+    /// nothing is recompiled.
+    pub fn reload_textures(&mut self) -> Vec<String> {
+        self.media_cache.clear();
+        let mut report = PresetReport::default();
+        for which in 0..2 {
+            let slot = if which == 0 {
+                self.active.take()
+            } else {
+                self.incoming.take()
+            };
+            let Some(mut slot) = slot else { continue };
+            slot.renderer.clear_user_textures();
+            let ifaces = std::mem::take(&mut slot.loaded.ifaces);
+            self.resolve_textures(&mut slot.renderer, &ifaces, &mut report);
+            slot.loaded.ifaces = ifaces;
+            self.resolve_shape_images(&mut slot.renderer, &slot.loaded.preset, &mut report);
+            if which == 0 {
+                self.active = Some(slot);
+            } else {
+                self.incoming = Some(slot);
+            }
+        }
+        report.unresolved_textures
+    }
+}
+
 fn image_of(r: &lactea_render::Renderer, stage: Stage) -> Result<DebugImage, RenderError> {
     let (width, height, rgba) = r.read_stage(stage)?;
     Ok(DebugImage {
@@ -132,15 +181,8 @@ fn image_of(r: &lactea_render::Renderer, stage: Stage) -> Result<DebugImage, Ren
 mod tests {
     use super::*;
     use crate::{EngineConfig, FrameClock, Transition};
+    use lactea_testutil::gpu;
     use std::sync::mpsc;
-
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-    }
 
     fn target(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
         device
@@ -174,7 +216,7 @@ mod tests {
             mesh: [16, 12],
             ..Default::default()
         };
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
         e.load_preset(MILK.as_bytes(), "t", Transition::Cut)
             .unwrap();
         let view = target(&device, 64, 36);
@@ -248,7 +290,7 @@ mod tests {
             mesh: [16, 12],
             ..Default::default()
         };
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
         let (tx, rx) = mpsc::channel::<SwitchFailure>();
         e.set_preset_switch_failed_callback(Some(move |f: &SwitchFailure| {
             let _ = tx.send(f.clone());
@@ -271,5 +313,82 @@ mod tests {
                 .is_err()
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    /// `projectm_reset_textures`: a texture whose file changed behind the provider shows the new pixels after
+    /// `reload_textures`, and not before.
+    #[test]
+    fn reload_textures_picks_up_changed_pixels() {
+        use crate::{Image, TextureProvider};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct Solid(Rc<Cell<[u8; 4]>>);
+        impl TextureProvider for Solid {
+            fn load(&mut self, name: &str) -> Option<Image> {
+                (name == "solid").then(|| Image {
+                    width: 2,
+                    height: 2,
+                    rgba8: self.0.get().repeat(4),
+                })
+            }
+            fn random_pool(&self) -> Vec<String> {
+                vec!["solid".into()]
+            }
+        }
+
+        let Some((device, queue)) = gpu() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let colour = Rc::new(Cell::new([255, 0, 0, 255]));
+        let mut e = Engine::new(
+            &device,
+            &queue,
+            EngineConfig {
+                width: 64,
+                height: 36,
+                mesh: [16, 12],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        e.set_texture_provider(Box::new(Solid(colour.clone())));
+        let preset = "[preset00]\nfDecay=0.9\nfWaveAlpha=0\nshapecode_0_enabled=1\nshapecode_0_sides=4\n\
+            shapecode_0_textured=1\nshapecode_0_image=solid\nshapecode_0_x=0.5\nshapecode_0_y=0.5\n\
+            shapecode_0_rad=0.4\nshapecode_0_r=1\nshapecode_0_g=1\nshapecode_0_b=1\nshapecode_0_a=1\n\
+            shapecode_0_r2=1\nshapecode_0_g2=1\nshapecode_0_b2=1\nshapecode_0_a2=1\nshapecode_0_border_a=0\n";
+        e.load_preset(preset.as_bytes(), "t", Transition::Cut)
+            .unwrap();
+        let view = target(&device, 64, 36);
+        let mut frame = 0u32;
+        let mut centre = |e: &mut Engine| {
+            for _ in 0..3 {
+                let mut enc = device.create_command_encoder(&Default::default());
+                e.render(
+                    &mut enc,
+                    &view,
+                    FrameClock {
+                        time: f64::from(frame) / 60.0,
+                        frame,
+                    },
+                );
+                queue.submit(Some(enc.finish()));
+                frame += 1;
+            }
+            let d = e.debug_image(Stage::Final).unwrap();
+            let i = ((d.height / 2 * d.width + d.width / 2) * 4) as usize;
+            [d.rgba[i], d.rgba[i + 1], d.rgba[i + 2]]
+        };
+        let before = centre(&mut e);
+        assert!(before[0] > 200 && before[1] < 40, "{before:?}");
+        colour.set([0, 255, 0, 255]);
+        assert!(
+            centre(&mut e)[0] > 200,
+            "the decoded texture is kept until reset"
+        );
+        assert!(e.reload_textures().is_empty());
+        let after = centre(&mut e);
+        assert!(after[1] > 200 && after[0] < 40, "{after:?}");
     }
 }

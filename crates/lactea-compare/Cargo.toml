@@ -17,7 +17,7 @@ name = "fdcompare"
 path = "src/main.rs"
 
 [dependencies]
-lactea-abi.workspace = true
+lactea-abi = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

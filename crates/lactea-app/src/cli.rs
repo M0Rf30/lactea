@@ -292,6 +292,9 @@ pub struct Args {
     pub duration_rand: f64,
 }
 
+/// Largest accepted `--duration` / `--transition-duration` / `--duration-rand`.
+const MAX_SECONDS: f64 = 1e9;
+
 impl Args {
     /// The engine seed: `--seed`, else 1.
     pub fn engine_seed(&self) -> u32 {
@@ -300,6 +303,19 @@ impl Args {
 
     /// Cross-argument checks clap cannot express.
     pub fn validate(&self) -> Result<(), String> {
+        // fed to `Duration::from_secs_f64`, which panics on NaN, infinity and values past u64 seconds;
+        // 1e9 s (31 years) is already "never" and keeps every sum below the limit
+        for (flag, v) in [
+            ("--duration", self.duration),
+            ("--transition-duration", self.transition_duration),
+            ("--duration-rand", self.duration_rand),
+        ] {
+            if !v.is_finite() || v.abs() > MAX_SECONDS {
+                return Err(format!(
+                    "{flag} {v}: must be a finite number of seconds, at most {MAX_SECONDS}"
+                ));
+            }
+        }
         if self.screenshot.is_some()
             && let Some(n) = self.frames
             && self.screenshot_frame >= n
@@ -463,6 +479,20 @@ mod tests {
         assert_eq!(a.dir.len(), 2);
         assert!(parse(&["--size", "0x5"]).is_err());
         assert!(parse(&["--size", "640"]).is_err());
+    }
+
+    #[test]
+    fn non_finite_or_huge_durations_are_rejected() {
+        for (flag, v) in [
+            ("--duration", "inf"),
+            ("--duration", "1e300"),
+            ("--transition-duration", "NaN"),
+            ("--duration-rand", "inf"),
+        ] {
+            let a = parse(&[flag, v]).unwrap();
+            assert!(a.validate().unwrap_err().contains(flag), "{flag} {v}");
+        }
+        assert!(parse(&["--duration", "0"]).unwrap().validate().is_ok());
     }
 
     #[test]

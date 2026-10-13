@@ -6,6 +6,7 @@
 //! all that matters.
 
 use super::Engine;
+use crate::EngineError;
 use lactea_audio::MAX_SAMPLES;
 
 /// projectM's mesh clamp (`ProjectM::SetMeshSize`): an odd size is rounded up to the next even one
@@ -36,7 +37,7 @@ impl Engine {
 
     /// `projectm_get_last_frame_time`: the `time` of the last rendered frame (0 before the first).
     pub fn last_frame_time(&self) -> f64 {
-        self.last_time
+        self.last_time.unwrap_or(0.0)
     }
 
     /// `projectm_get_window_size`: the render size (see [`Engine::resize`]).
@@ -52,7 +53,9 @@ impl Engine {
     /// `projectm_set_fps`: the frame rate reported to presets (projectM never measures it; this is
     /// the application's target or averaged value). Takes effect on the next frame.
     pub fn set_fps(&mut self, fps: u32) {
-        self.cfg.fps = fps;
+        if fps > 0 {
+            self.cfg.fps = fps;
+        }
     }
 
     /// The `progress` denominator (see `EngineConfig::preset_duration`).
@@ -60,11 +63,39 @@ impl Engine {
         self.cfg.preset_duration
     }
 
+    /// `projectm_get_preset_start_clean` (see [`EngineConfig::start_clean`](crate::EngineConfig::start_clean)).
+    pub fn start_clean(&self) -> bool {
+        self.cfg.start_clean
+    }
+
+    /// `projectm_set_preset_start_clean`: applies to presets loaded afterwards.
+    pub fn set_start_clean(&mut self, enabled: bool) {
+        self.cfg.start_clean = enabled;
+    }
+
     /// `projectm_set_preset_duration` as far as the engine is concerned: the preset variable
-    /// `progress = elapsed / duration`. Takes effect on the next frame.
+    /// `progress = elapsed / duration`. Takes effect on the next frame, for the shown and the incoming preset.
     pub fn set_preset_duration(&mut self, seconds: f64) {
         self.cfg.preset_duration = seconds;
         self.clock.preset_duration = seconds;
+        self.clock.duration_a = seconds;
+        self.clock.duration_b = seconds;
+    }
+
+    /// The display time of the preset loaded last, when it differs from [`Engine::preset_duration`]: projectM's
+    /// `TimeKeeper` samples one per preset (`sampledPresetDuration`, e.g.
+    /// [`PresetControl::preset_duration_sampled`](crate::PresetControl::preset_duration_sampled)) and the preset's
+    /// `progress` runs over it. Call it right after the load; during a soft cut it applies to the incoming preset
+    /// and becomes the shown preset's duration when the cut ends. A non-positive or non-finite value is ignored.
+    pub fn set_loaded_preset_duration(&mut self, seconds: f64) {
+        if !(seconds.is_finite() && seconds > 0.0) {
+            return;
+        }
+        if self.clock.smoothing {
+            self.clock.duration_b = seconds;
+        } else {
+            self.clock.duration_a = seconds;
+        }
     }
 
     /// `projectm_get_mesh_size`: warp-mesh cells per axis.
@@ -75,16 +106,23 @@ impl Engine {
     /// `projectm_set_mesh_size`: clamped like projectM; returns the size that
     /// is now in use. The warp grid of the previous frame is forgotten (the images are kept), the
     /// preset's `meshx`/`meshy` variables follow.
-    pub fn set_mesh_size(&mut self, width: u32, height: u32) -> [u32; 2] {
+    pub fn set_mesh_size(&mut self, width: u32, height: u32) -> Result<[u32; 2], EngineError> {
         let mesh = clamp_mesh_size(width, height);
         let old = self.cfg.mesh;
-        self.cfg.mesh = mesh;
-        for r in self.all_renderers_mut() {
-            // the mesh was clamped to an even grid above, which the renderer accepts
-            let _ = r.set_mesh_size(mesh);
+        let result = self
+            .all_renderers_mut()
+            .into_iter()
+            .try_for_each(|r| r.set_mesh_size(mesh));
+        if let Err(e) = result {
+            for r in self.all_renderers_mut() {
+                // the old mesh was accepted before
+                let _ = r.set_mesh_size(old);
+            }
+            return Err(e.into());
         }
+        self.cfg.mesh = mesh;
         self.md2_follow_mesh(old);
-        mesh
+        Ok(mesh)
     }
 
     /// `projectm_get_texel_offset`.
@@ -106,14 +144,7 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::{EngineConfig, FrameClock};
-
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-    }
+    use lactea_testutil::gpu;
 
     #[test]
     fn mesh_clamp_follows_projectm() {
@@ -124,6 +155,63 @@ mod tests {
         assert_eq!(clamp_mesh_size(299, 301), [300, 300]); // 299 -> 300, 301 -> 302 -> 300
         assert_eq!(clamp_mesh_size(10_000, u32::MAX), [300, 300]); // no overflow
         assert_eq!(Engine::pcm_max_samples(), 576);
+    }
+
+    /// An unusable config is rounded the way the setters do it, so the blend pattern (sized from the stored mesh) and
+    /// the renderer agree: a MilkDrop 2 soft cut on a `[3, 5]` mesh used to index past the pattern.
+    #[test]
+    fn new_sanitises_the_config_and_a_md2_soft_cut_survives_a_tiny_mesh() {
+        let Some((device, queue)) = gpu() else {
+            eprintln!("skipping: no wgpu adapter");
+            return;
+        };
+        let cfg = EngineConfig {
+            width: 0,
+            height: 0,
+            mesh: [3, 5],
+            fps: 0,
+            compat: crate::Compat::MilkDrop2,
+            ..Default::default()
+        };
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
+        assert_eq!(e.mesh_size(), [8, 8]);
+        assert_eq!((e.window_size(), e.fps()), ((1, 1), 1));
+        e.set_fps(0);
+        assert_eq!(e.fps(), 1, "a zero rate is ignored");
+        let milk = "[preset00]\nper_frame_1=q1 = 1;\n";
+        e.load_preset(milk.as_bytes(), "a", crate::Transition::Cut)
+            .unwrap();
+        e.load_preset(
+            milk.as_bytes(),
+            "b",
+            crate::Transition::Soft { seconds: 1.0 },
+        )
+        .unwrap();
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        let mut enc = device.create_command_encoder(&Default::default());
+        e.render(
+            &mut enc,
+            &view,
+            FrameClock {
+                time: 0.1,
+                frame: 1,
+            },
+        );
+        queue.submit(Some(enc.finish()));
     }
 
     #[test]
@@ -138,7 +226,7 @@ mod tests {
             mesh: [16, 12],
             ..Default::default()
         };
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
         assert_eq!(
             (
                 e.fps(),
@@ -153,7 +241,7 @@ mod tests {
         e.set_fps(35);
         e.set_preset_duration(30.0);
         e.set_texel_offset([0.5, 0.25]);
-        assert_eq!(e.set_mesh_size(33, 5), [34, 8]);
+        assert_eq!(e.set_mesh_size(33, 5).unwrap(), [34, 8]);
         assert_eq!(
             (
                 e.fps(),
@@ -224,7 +312,7 @@ mod tests {
             height: 54,
             ..Default::default()
         };
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
         assert_eq!(e.preset_name(), None);
         let report = e.load_idle_preset().expect("idle preset loads");
         assert!(

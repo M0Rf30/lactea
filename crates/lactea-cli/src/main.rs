@@ -17,8 +17,6 @@
 //! frame `n` isolates one pass.
 
 mod gpu;
-mod textures;
-mod wav;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
@@ -269,11 +267,15 @@ fn inject_oracle_noise(engine: &mut Engine, reference: &DumpReader) -> Result<()
 }
 
 /// Our own noise textures in the dump layout (same stream the renderer uses at construction).
-fn write_own_noise(writer: &DumpWriter, seed: u64) -> Result<()> {
+fn write_own_noise(
+    writer: &DumpWriter,
+    seed: u64,
+    rules: &lactea_render::CompatRules,
+) -> Result<()> {
     use lactea_render::{Rng, noise};
     let mut rng = Rng::new(seed).fork(0x6E6F_6973);
     for (tex, name) in noise_names() {
-        let data = noise::generate(tex, &mut rng);
+        let data = noise::generate(tex, &mut rng, rules);
         let (size, _, vol) = noise::noise_spec(tex);
         if vol {
             let mut bin = Vec::with_capacity(28 + data.len());
@@ -373,7 +375,7 @@ fn run(args: &Args) -> Result<i32> {
 
     let preset_bytes = std::fs::read(&args.preset)
         .with_context(|| format!("cannot read preset {}", args.preset.display()))?;
-    let audio = wav::load_wav(&args.audio)?;
+    let audio = lactea_host::wav::load_wav(&args.audio).map_err(anyhow::Error::msg)?;
     let preset2_bytes = match &args.preset2 {
         Some(p) => {
             Some(std::fs::read(p).with_context(|| format!("cannot read preset {}", p.display()))?)
@@ -501,12 +503,13 @@ fn run(args: &Args) -> Result<i32> {
             shader_overrides,
             ..EngineConfig::default()
         },
-    );
+    )
+    .map_err(|e| anyhow!("engine: {e}"))?;
     if !auto_compat && args.auto_hard_cut > 0 && !engine.auto_hard_cut_active() {
         eprintln!("fdrender: --auto-hard-cut needs --compat md3, ignored");
     }
     let tex_dir = args.texture_dir.clone().unwrap_or_else(default_texture_dir);
-    let provider = textures::DirTextures::scan(&tex_dir);
+    let provider = lactea_host::DirTextures::scan(&tex_dir);
     eprintln!(
         "fdrender: {} user textures under {}",
         provider.len(),
@@ -552,7 +555,7 @@ fn run(args: &Args) -> Result<i32> {
                 }
             }
         } else {
-            write_own_noise(&writer, args.seed)?;
+            write_own_noise(&writer, args.seed, &base_compat.rules())?;
         }
     }
 

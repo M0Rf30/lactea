@@ -1,28 +1,11 @@
 //! Headless wgpu setup and texture read-back.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
-pub struct Gpu {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub adapter_name: String,
-}
+pub use lactea_host::gpu::Gpu;
 
 pub fn init() -> Result<Gpu> {
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        ..Default::default()
-    }))
-    .map_err(|e| anyhow!("no wgpu adapter: {e}"))?;
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-            .context("request_device")?;
-    Ok(Gpu {
-        adapter_name: adapter.get_info().name,
-        device,
-        queue,
-    })
+    lactea_host::gpu::init_gpu().map_err(anyhow::Error::msg)
 }
 
 /// The target the engine renders into (what a host would hand over).
@@ -34,21 +17,7 @@ pub struct Target {
 }
 
 pub fn create_target(device: &wgpu::Device, width: u32, height: u32) -> Target {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("fdrender target"),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&Default::default());
+    let (texture, view) = lactea_host::gpu::create_target(device, width, height);
     Target {
         texture,
         view,

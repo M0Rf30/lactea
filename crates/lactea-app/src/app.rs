@@ -18,7 +18,6 @@ use crate::feed::AudioFeed;
 use crate::gfx::{Acquired, Gfx};
 use crate::input::{Action, action_for_key, parse_script};
 use crate::presets::{self, Nav, PresetBrowser, PresetEntry};
-use crate::textures::FsTextureProvider;
 use crate::visualizer::{Change, ScopeVisualizer, Visualizer};
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -236,7 +235,7 @@ impl App {
     ) -> Self {
         let now = Instant::now();
         let mut texture_dirs = args.texture_dir.clone();
-        for d in FsTextureProvider::default_dirs() {
+        for d in crate::textures::default_dirs() {
             if !texture_dirs.contains(&d) {
                 texture_dirs.push(d);
             }
@@ -342,7 +341,7 @@ impl App {
             ))),
             #[cfg(feature = "engine")]
             VisualizerKind::Engine => {
-                let textures = FsTextureProvider::new(self.texture_dirs.clone());
+                let textures = lactea_host::DirTextures::new(&self.texture_dirs).with_cache();
                 log::info!(
                     "textures: {} file(s) in {} dir(s): {:?}",
                     textures.len(),
@@ -542,6 +541,8 @@ impl App {
                 Ok(()) => {
                     self.follow_compat(run.viz.current_compat());
                     self.presets.commit(idx, nav, now);
+                    run.viz
+                        .set_loaded_preset_duration(self.presets.loaded_duration());
                     log::info!(
                         "preset [{}/{}]{}: {} ({:.0} ms)",
                         idx + 1,

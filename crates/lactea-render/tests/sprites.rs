@@ -10,33 +10,10 @@ use lactea_render::{
     Compat, CustomWave, FrameInput, RenderConfig, Renderer, SPRITE_MODES, ShapeInstance,
     SpriteDraw, SpriteVertex, WavePoint, sprite_blend_reference,
 };
+use lactea_testutil::{gpu_or_skip, quiet_input, read_rgba8};
 
 const W: u32 = 64;
 const H: u32 = 48;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
-macro_rules! gpu_or_skip {
-    () => {
-        match gpu() {
-            Some(g) => g,
-            None => {
-                assert!(
-                    std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-                    "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-                );
-                eprintln!("SKIP: no wgpu adapter");
-                return;
-            }
-        }
-    };
-}
 
 fn renderer(device: &wgpu::Device, queue: &wgpu::Queue) -> Renderer {
     Renderer::new(
@@ -77,60 +54,6 @@ fn draw(layer: u8, image: u32, blend: i32, rgba: [f32; 4], half: f32) -> SpriteD
         quad: quad(half),
         burn: false,
     }
-}
-
-/// Read an `Rgba8Unorm` texture back (row 0 = top).
-fn read(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    tex: &wgpu::Texture,
-    w: u32,
-    h: u32,
-) -> Vec<u8> {
-    let bpr = (w * 4).div_ceil(256) * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: u64::from(bpr * h),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(h),
-            },
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(enc.finish()));
-    let (tx, rx) = std::sync::mpsc::channel();
-    buf.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .expect("poll");
-    rx.recv().expect("map").expect("map ok");
-    let data = buf.slice(..).get_mapped_range().expect("mapped range");
-    let mut out = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        out.extend_from_slice(&data[(y * bpr) as usize..(y * bpr + w * 4) as usize]);
-    }
-    out
 }
 
 /// One sprite of every mode over a flat grey, against the CPU model of the blend table.
@@ -182,7 +105,7 @@ fn blend_modes_match_the_cpu_reference() {
                 }));
                 r.draw_sprites(&mut enc, &view, &[draw(1, image, mode as i32, rgba, 2.0)]);
                 queue.submit(Some(enc.finish()));
-                let px = read(&device, &queue, &target, 4, 4);
+                let px = read_rgba8(&device, &queue, &target, 4, 4);
                 let got = [px[0], px[1], px[2]];
                 let want = sprite_blend_reference(mode, rgba, texel, dst);
                 for c in 0..3 {
@@ -194,19 +117,6 @@ fn blend_modes_match_the_cpu_reference() {
             }
         }
     }
-}
-
-/// A frame input that draws nothing of its own and keeps the image as it is.
-fn quiet_input() -> FrameInput {
-    let mut f = FrameInput::default();
-    f.post.decay = 1.0;
-    f.post.gamma = 1.0;
-    f.post.wrap = false;
-    f.main_wave.rgba[3] = 0.0;
-    f.mv.rgba[3] = 0.0;
-    f.borders.ob_rgba[3] = 0.0;
-    f.borders.ib_rgba[3] = 0.0;
-    f
 }
 
 fn render(device: &wgpu::Device, queue: &wgpu::Queue, r: &mut Renderer, f: &FrameInput) {

@@ -14,14 +14,13 @@ path = "src/main.rs"
 
 [dependencies]
 lactea = { workspace = true, features = ["diagnostics"] }
-lactea-abi = { workspace = true }
+lactea-abi = { workspace = true, features = ["serde"] }
+lactea-host = { workspace = true }
 lactea-compare = { workspace = true }
-lactea-jpeg = { workspace = true }
 lactea-render = { workspace = true, features = ["diagnostics"] }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
-image = { workspace = true, features = ["jpeg", "bmp", "tga"] }
 lactea-preset = { workspace = true }

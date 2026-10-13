@@ -1,6 +1,21 @@
-<p align="center"><img src="docs/assets/banner.jpg" alt="Lactea" width="100%"></p>
+<h1 align="center"><img src="docs/assets/banner.jpg" alt="Lactea" width="100%"></h1>
 
-# Lactea
+<p align="center">
+  <a href="https://github.com/M0Rf30/lactea/actions/workflows/ci.yml"><img src="https://github.com/M0Rf30/lactea/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://crates.io/crates/lactea"><img src="https://img.shields.io/crates/v/lactea.svg" alt="crates.io"></a>
+  <a href="https://docs.rs/lactea"><img src="https://img.shields.io/docsrs/lactea" alt="docs.rs"></a>
+  <a href="https://github.com/M0Rf30/lactea/releases"><img src="https://img.shields.io/github/v/release/M0Rf30/lactea" alt="release"></a>
+  <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="MSRV 1.88">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg" alt="MIT OR Apache-2.0"></a>
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#standalone">Standalone</a> ·
+  <a href="#embedding">Embedding</a> ·
+  <a href="docs/fidelity.md">Fidelity</a> ·
+  <a href="docs/ARCHITECTURE.md">Architecture</a>
+</p>
 
 A pure-Rust MilkDrop 2/3 and projectM-compatible music visualizer built on wgpu (Vulkan, Metal, DX12,
 GL, WebGPU). It ships as:
@@ -19,12 +34,13 @@ GL, WebGPU). It ships as:
 - MilkDrop 3 (3.37) support behind `Compat::MilkDrop3`: `.milk2` double presets with the 30 blend patterns, preset
   sprites (11 blend modes, GIF), ns-eel2 expressions, `get_fft` / mouse / `q1..q64` shader inputs, wave modes 0..16
   and auto hard cuts; the whole MD3 pack loads (details and gaps: [`docs/md3.md`](docs/md3.md)).
-- Native expression engine, HLSL-to-WGSL shader translator and JPEG decoder; no C dependencies.
+- Native expression engine, HLSL-to-WGSL shader translator and JPEG decoder: the library crates have
+  no C dependencies.
 - Soft and hard preset transitions, playlist/shuffle/history logic, projectM-style runtime parameters.
 - Deterministic by construction: same preset, audio and seed give the same pixels.
-- Rendering matches projectM to within PSNR ≥ 40 dB / SSIM ≥ 0.98 on 99.8 % of its 4169 comparable
-  bundled presets, measured rather than eyeballed. Method, numbers and open issues:
-  [`docs/fidelity.md`](docs/fidelity.md).
+- Rendering matches projectM within PSNR ≥ 40 dB / SSIM ≥ 0.98 on 99.8 % (single step) and 99.5 %
+  (free run) of its 4169 comparable bundled presets (320×180, 30 frames), measured rather than
+  eyeballed. Method, numbers and open issues: [`docs/fidelity.md`](docs/fidelity.md).
 
 ## Install
 
@@ -45,7 +61,7 @@ cargo build --release -p lactea-app --no-default-features --features engine
 ```
 
 Any Vulkan (Linux/Windows), Metal (macOS) or DX12 (Windows) driver works; lavapipe renders in
-software.
+software. The OpenGL/GLES backend is opt-in: `--features gles` on `lactea-app` / `lactea-capi`.
 
 ## Standalone
 
@@ -68,7 +84,8 @@ use lactea::{Engine, EngineConfig, FrameClock, Transition};
 
 let mut engine = Engine::new(&device, &queue, EngineConfig {
     width: 1280, height: 720, output_format: surface_format, ..Default::default()
-});
+})?;                                                // Err(EngineError), e.g. size beyond the device limit
+// engine.resize(1920, 1080)?;                      // fallible too, keeps the old size on error
 engine.set_texture_provider(Box::new(my_textures)); // trait TextureProvider { load, random_pool }
 engine.load_preset(&std::fs::read("preset.milk")?, "preset", Transition::Cut)?;
 // later: blend into the next preset over 3 s (both keep running; projectM's soft cut)
@@ -133,8 +150,10 @@ cc minimal.c -Iinclude -Ltarget/release -llactea_capi -lm -Wl,-rpath,target/rele
 
 projectM-equivalent calls (`lactea_push_pcm_i16/u8`, `lactea_set_mesh_size`, `lactea_set_fps`,
 `lactea_set_texel_offset`, `lactea_{get,set}_switch_settings`, `lactea_poll_switch_request`,
-`lactea_load_idle_preset`, ...) and their mapping to `projectm_*` are listed in
-[`docs/parity.md`](docs/parity.md).
+`lactea_load_idle_preset`, `lactea_playlist_*`, `lactea_sprite_*`, `lactea_set_texture_load_callback`,
+`lactea_reset_textures`, `lactea_burn_texture_rgba`, `lactea_set_log_callback`, `lactea_vcs_version`, ...)
+and their mapping to `projectm_*` are listed in [`docs/parity.md`](docs/parity.md). The compatibility
+mode is `cfg.compat = LACTEA_COMPAT_{PROJECTM,MILKDROP2,MILKDROP3,AUTO}`.
 
 **Preset changes.** `lactea_load_preset` cuts at once; `lactea_load_preset_ex(e, bytes, len, name,
 seconds)` is the soft cut: `seconds > 0` blends the running and the new preset over that time
@@ -203,6 +222,8 @@ Direct3D hosts use the Rust `wgpu` API directly.
 | [`lactea-audio`](crates/lactea-audio) | bass/mid/treb, waveform and spectrum analysis | yes |
 | [`lactea-jpeg`](crates/lactea-jpeg) | JPEG decoder byte-identical to `stb_image` | yes |
 | [`lactea-abi`](crates/lactea-abi) | shared contract: shader constants, bindings, dump layout | yes |
+| `lactea-host` | native host helpers: texture directories, image/media/WAV decode, GPU init, preset scan | no |
+| `lactea-testutil` | GPU helpers for tests | no |
 | `lactea-compare` | dump reader/writer, PSNR/SSIM/variable diffs, `fdcompare` CLI | no (repo tooling) |
 | `lactea-capi` | C ABI (cdylib + staticlib, cbindgen header) | no, released as binaries |
 | `lactea-app` | standalone app | no, released as binaries |

@@ -3,14 +3,6 @@
 
 use lactea::{Compat, Engine, EngineConfig, FrameClock, MouseState, Transition};
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
 struct Rig {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -24,7 +16,7 @@ struct Rig {
 
 impl Rig {
     fn new(compat: Compat, w: u32, h: u32) -> Option<Rig> {
-        let (device, queue) = gpu()?;
+        let (device, queue) = lactea_testutil::gpu()?;
         let engine = Engine::new(
             &device,
             &queue,
@@ -35,7 +27,8 @@ impl Rig {
                 compat,
                 ..EngineConfig::default()
             },
-        );
+        )
+        .unwrap();
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -86,52 +79,7 @@ impl Rig {
 
     /// RGBA of the whole target.
     fn pixels(&self) -> Vec<u8> {
-        let bpr = (self.w * 4).div_ceil(256) * 256;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: u64::from(bpr * self.h),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr),
-                    rows_per_image: Some(self.h),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.w,
-                height: self.h,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(enc.finish()));
-        let slice = buf.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        rx.recv().unwrap().unwrap();
-        let data = slice.get_mapped_range().unwrap();
-        let mut out = Vec::new();
-        for y in 0..self.h {
-            let s = (y * bpr) as usize;
-            out.extend_from_slice(&data[s..s + (self.w * 4) as usize]);
-        }
-        out
+        lactea_testutil::read_rgba8(&self.device, &self.queue, &self.target, self.w, self.h)
     }
 
     fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
@@ -331,11 +279,12 @@ fn monitor2_and_monitor3_persist_like_monitor() {
 fn the_other_compat_modes_have_no_md3_names() {
     for compat in [Compat::ProjectM, Compat::MilkDrop2] {
         let mut r = rig!(compat, 16, 12);
-        for body in [
-            "ret = float3(q33, 0, 0);",
-            "ret = float3(get_fft(0.5), 0, 0);",
-            "ret = float3(mouse.x, 0, 0);",
-        ] {
+        let mut bodies = vec!["ret = float3(q33, 0, 0);", "ret = float3(mouse.x, 0, 0);"];
+        // BeatDrop's own `get_fft` exists under MilkDrop 2 (`tests/md2_inputs.rs`), not under projectM
+        if compat == Compat::ProjectM {
+            bodies.push("ret = float3(get_fft(0.5), 0, 0);");
+        }
+        for body in bodies {
             let report = r.load(&preset(body, ""));
             assert_eq!(report.shader_fallbacks.len(), 1, "{compat:?}: {body}");
         }

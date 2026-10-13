@@ -3,17 +3,10 @@
 
 use lactea::auto_cut::{Effect, MODE7_EFFECTS};
 use lactea::{Compat, Engine, EngineConfig, FrameClock, PresetControl, Transition};
+use lactea_testutil::gpu;
 
 const W: u32 = 64;
 const H: u32 = 36;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
 
 struct Rig {
     device: wgpu::Device,
@@ -39,7 +32,8 @@ impl Rig {
                 auto_hard_cut_mode: mode,
                 ..EngineConfig::default()
             },
-        );
+        )
+        .unwrap();
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {

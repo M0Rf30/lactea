@@ -12,8 +12,59 @@ pass order and `src/config.rs` for the full MD2-vs-projectM table (`Compat`, def
   at the end), custom wave / shape y = `2*y-1`.
 * Lines / points: see "Strokes" below. `Compat::MilkDrop2` draws D3D9 thin quads (`geom::push_line` /
   `push_point`); `Compat::ProjectM` (default) emulates the oracle's GL rasterisation exactly.
-* No per-frame buffer reuse: every frame bakes its vertex/uniform data into fresh buffers, so
-  `render_frame` has no ordering hazards. The encoder must be submitted before `read_stage`.
+* Per-frame buffers: the geometry builders (custom waves, main wave, overlay, motion vectors, borders, darken centre) fill a
+  reusable `FrameScratch`, so a warm frame allocates nothing there. The vertex / uniform buffers handed to the GPU are still fresh per
+  frame, because `render_frame` records into a host-owned encoder: two frames recorded into one encoder would share a
+  `queue.write_buffer` slot and see the last write. Two cached exceptions, both dropped on `resize`: the blit uniform + bind group
+  (`blit_bg`) and the uniform + bind group of blur passes 1.. (`blur_bg`, keyed by pass index and the exact uniform values; pass 0 reads a
+  different source view every frame and is not cached). The encoder must be submitted before `read_stage`.
+* No-shader composite hue tint (`CompatRules::shade_top_first`, `echo_diag_flipped`): MD2's `v3[0..1]` have `y = +1 + 1/H` (the "+H" side), which
+  `support.cpp:179`'s `D3DXMatrixOrthoLH(2, -2)` puts at the **bottom** of the image, so `shade[0..1]` sit at the bottom corners and the
+  echo quad's diagonal is not flipped (`false` for MD2); projectM has both `true`. The flat white filter quads have projectM's split too but
+  show no gradient.
+
+## Module layout (`src/renderer/`)
+
+| file | holds |
+|---|---|
+| `mod.rs` | `Renderer` (resources, size / mesh checks, user textures, sprite images, FFT texture), the public API (`new`, `resize`, `set_mesh_size`, `render_frame[_to_output]`, `read_stage`, sprite calls), `readback_rgba8`, `Blend` (`Blend::ALL`), `FrameScratch`, the `Pipelines` struct |
+| `pipelines.rs` | pipeline, layout and sampler construction: the `tex` / `flat` pipeline maps are keyed over every `Blend::ALL` mode (`blend_state` is the exhaustive match, so a new mode cannot miss its pipeline), sprite pipelines per output format, `with_uv_output` |
+| `uv_readback.rs` | GPU warp UV readback (persistent buffers, own small submission, collected by the next frame's motion-vector pass) |
+| `orchestrate.rs` | `render_frame_inner`: the pass sequence of one frame |
+| `passes.rs` | pass execution: fixed-function batches, user shader passes, MD2 warp / composite, blur chain, blit, sprite passes, FFT uploads |
+| `fixed.rs` | fixed-function geometry builders: overlay (shapes, custom waves), main wave, no-shader composite |
+| `burn.rs` | `ProjectM::BurnInTexture`: one textured quad copied into the image the next warp samples (`Renderer::burn_texture`) |
+
+## Size and mesh limits
+
+`Renderer::new`, `resize` and `set_mesh_size` return `RenderError::Invalid` for a zero size, a size above the device's
+`max_texture_dimension_2d`, a mesh above `warp_mesh::MAX_MESH_CELLS` (300 cells per axis) and a mesh that is not an even grid of
+at least 2x2 cells. Readback and byte-length arithmetic is `usize` / `u64`. A refused `resize` / `set_mesh_size` leaves the renderer usable
+at its old size. Test: `tests/limits.rs`. `lactea_render::readback_rgba8(device, queue, texture, w, h)` (the readback `Renderer::read_stage`
+uses; submits its own copy, so the frame's command buffers must already be submitted) is public for hosts and for `lactea-testutil`.
+
+## Features and backends (`Cargo.toml`)
+
+* The workspace pulls wgpu with `default-features = false, features = ["std", "parking_lot", "wgsl"]`; `lactea-render` adds the backend
+  per target: `vulkan` on Windows and non-Apple unix, `dx12` on Windows, `metal` on Apple, `webgpu` on wasm32.
+* `gles` (off by default) = `wgpu/gles`: the OpenGL ES / WebGL fallback where Vulkan / Metal / DX12 are missing.
+* `diagnostics` (off by default): image injection and extra read-backs for reference comparisons (the integration tests enable it).
+
+## Noise and shader time
+
+* `noise::gen_noise_vol(rng, size, zoom, &CompatRules)` (and `noise::generate`): with `CompatRules::noisevol_row_stride` (projectM) the cubic
+  smoothing steps through z with a stride of `size`, not MD2's `size * size` (`MilkdropNoise.cpp:199,225,252-261` vs `plugin.cpp:3031-3072`), so
+  the passes mix and overwrite unrelated rows and the volume differs from MD2's. Test: `noisevol_row_stride_follows_projectm_formula`.
+* Shader time `_c2.x` is wrapped modulo 10000 (`t - (int)(t / 10000) * 10000`) when `CompatRules::shader_time_wrap` (projectM
+  `MilkdropShader.cpp:168`, MilkDrop 3); MD2 passes the raw time (`milkdropfs.cpp:5289`).
+
+## Sprites (`sprite.rs`, `Renderer`)
+
+`has_sprite_image(id)` / `remove_sprite_image(id)` query and forget an image registered under `id`. `draw_sprites(encoder, target, draws)` draws any
+layer onto an `Rgba8Unorm` view. `burn_sprites(encoder, draws)` draws only the `burn` ones into the image the next warp reads (call after
+`render_frame_to_output`). `draw_sprites_to_output(encoder, target, draws)` draws onto a view of `RenderConfig::output_format` (loaded,
+not cleared; its own sprite pipelines when that format is not `Rgba8Unorm`), so the engine can put user sprites over a soft cut's blend and still burn them
+into both presets' feedback.
 
 ## Blur / source choices (identical in MD2 and projectM)
 * blur chain input is the *previous* image (MD2 `m_lpVS[0]` / projectM previous framebuffer), after
@@ -250,7 +301,7 @@ neutral, so output stays bit-identical.
     is outside the window; default `(-1, -1, 0, 0)`.
   * `q_hi`: `q33..q64` after the state's per-frame code; default zeros.
 * **Shader time.** `fill_milk_uniforms` takes `_c2.x` from `ShaderExt::time` (seconds since *this state's* preset started, `None` =
-  `FrameInput::time`, as before) and wraps it modulo 10000 like the absolute time (start 100 s, now 12445.5 s: the engine passes
+  `FrameInput::time`, as before) and wraps it modulo 10000 like the absolute time (`shader_time_wrap`, see "Noise and shader time"; start 100 s, now 12445.5 s: the engine passes
   12345.5, the shader sees 2345.5). `_c8.._c11` and the `rot_*` matrices keep using `FrameInput::time`.
 * **FFT texture.** Each `Renderer` owns a 512 x 1 `R32Float` texture (`TEXTURE_BINDING | COPY_DST`, zero until the first upload,
   created in `Renderer::new`, so `sibling()` gets its own) that `TexSource::Fft` bindings sample (`texsize` = `(512, 1, 1/512, 1)`).
@@ -263,3 +314,20 @@ neutral, so output stays bit-identical.
   `textureLoad` with its own clamp + bilinear. The dimensionality check treats `Fft` as a 2D texture.
 * tests: `tests/shader_ext.rs` (GPU: mouse, `q_hi`, FFT upload / keep / per-renderer / encoder order, old-state ext during a blend),
   `uniforms.rs` (`_c2.x` wrap, neutral default).
+
+## BeatDrop shader inputs (`CompatRules::md2_shader_inputs`, `Compat::MilkDrop2` only)
+
+Off under projectM (`sampler_fft` stays an unresolved user texture) and MilkDrop 3 (own prelude); the engine computes the values (`docs/hlsl.md`
+"BeatDrop prelude", `docs/audio.md` `BeatDropShaderFft`), the renderer transports them.
+
+* **Texture.** With the rule on, the renderer's FFT texture is `BEATDROP_FFT_BINS` (1024) x `BEATDROP_ROWS` (4) `R32Float` instead of 512 x 1; rows:
+  smoothed spectrum, peak hold, left wave, right wave (the wave rows are 480 texels wide, `BEATDROP_WAVE_SAMPLES`, zero past that).
+  `ShaderExt::beatdrop: Option<Arc<BeatDropTexture>>` replaces the whole texture before any pass is recorded (`record_beatdrop_upload`, a
+  staging copy in the frame's encoder like the MD3 upload); `None` keeps it; `ShaderExt::fft` is ignored under the rule. Renderer-global: the old
+  state's `beatdrop` is ignored. `texsize` of an `Fft` binding is `(width, 2, ..)`, because shaders see `sampler_fft` as rows 0..2 and `sampler_wave` as rows 2..4.
+* **Constants.** `_c14` is `ShaderExt::mouse`; `_c15` (`hour, minute, second, totalSeconds`) and `_c16` (`year, month, day, weekday`) travel in
+  `ShaderExt::time_date`, written into `MilkExtUniforms::q_hi[0..2]` (`None` leaves `q_hi` as it is). The `lactea-abi` layout is unchanged. The old state of
+  a blend carries the same frame values.
+* tests: `crates/lactea/tests/md2_inputs.rs`, `crates/lactea-hlsl/tests/beatdrop.rs`.
+* `CompatRules::md2_input_vars` (MD2 true; projectM / MD3 false) is the expression-side twin: it only makes the engine register `mousex .. totalseconds` in the preset's
+  contexts (`docs/eel.md`); the renderer does not read it. `md2_shader_inputs` also selects the 1024 x 4 FFT texture size at `Renderer::new`.

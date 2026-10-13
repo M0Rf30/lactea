@@ -1,0 +1,15 @@
+[package]
+name = "lactea-testutil"
+description = "Shared helpers of the GPU tests (headless device, read-back, quiet frame input). Not published."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Dev-dependency of the crates that test on a GPU; never a normal dependency.
+[dependencies]
+lactea-render = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }

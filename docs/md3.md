@@ -38,8 +38,8 @@ no C API exposure).
 | `.milk` with MD2 keys and code (what MD2 / BeatDrop read) | Supported: the MD2 importer, expressions and renderer (`Flavor::Md2`); code lines are glued without a separator (`md2_code_join`) |
 | MD3 expression engine (ns-eel2: source rewriter, scanner, numerics, name rules, RAM model) and compile-failure policy (a failing part is dropped, the preset loads) | Supported: `md3_ns_eel2`, `md3_drop_failed_code`, "Expression engine"; `mouse.x` and `1e3`-style literals do not compile in MD3 and do not here |
 | `q1..q64`, `t1..t16`, `monitor2` / `monitor3`, `FFTAttack` / `FFTDecay`, shader `time` per state | Supported: "Shader inputs" |
-| Shader prelude (`get_fft`, `get_fft_hz`, `sampler_fft`, `mouse*`, `q33..q64`), mouse as shader input | Supported: `lactea-hlsl` / `lactea-render`; `Engine::set_mouse`, `fdrender --mouse`, app and C API |
-| Audio analysis of MD3 (left channel, 576-sample Hann FFT, `VolumeSensitivity`) | Supported (`AnalysisMode::Md3`); not exposed in `LacteaConfig` / app options |
+| Shader prelude (`get_fft`, `get_fft_hz`, `sampler_fft`, `mouse*`, `q33..q64`), mouse as shader input | Supported: `lactea-hlsl` / `lactea-render`; `Engine::set_mouse`, `fdrender --mouse`, app and C API (the same mouse also feeds BeatDrop's `mousex ..` under MilkDrop 2, "BeatDrop inputs under MilkDrop 2") |
+| Audio analysis of MD3 (left channel, 576-sample raised-cosine FFT, `VolumeSensitivity`) | Supported (`AnalysisMode::Md3`); not exposed in `LacteaConfig` / app options |
 | Main waveform modes 0..16, shape sides up to 500, warp-term skip, border gate of blends | Supported: "Main waveform and render deltas" |
 | `.milk2` double presets (two presets plus a frozen soft cut), `BlendMilk2`, sprite of PRESET2 | Supported: container, playback, progress modes; geometry of `side` / `cercle` checked against MD3 under Wine ("Double presets"); no `DoublePresetMode` (F9) |
 | Blend patterns of MD3 soft cuts (30 patterns) | Supported: `md3_blend.rs`, enabled-pattern list (`EngineConfig::md3_transition_patterns`; no app flags) |
@@ -66,7 +66,10 @@ Each feature section below names the `CompatRules` fields it introduced.
 - **Auto hard cuts and double presets.** A cut is a hard load, which ends the double preset at once; mode 7's effect text
   is injected into the loaded (PRESET2) composite shader.
 - **Hosts.** `Engine::set_mouse`, `take_auto_cuts`, `double_preset_info`, `import_custom_wave` / `_shape` are the engine
-  calls a host wires; `docs/app.md`, `docs/engine.md` and `docs/parity.md` list the host side.
+  calls a host wires; `docs/app.md`, `docs/engine.md` and `docs/parity.md` list the host side. `Engine::new` returns
+  `Result<Engine, EngineError>` (it sanitises the config: mesh clamped to 8..=300 and even, size and fps at least 1);
+  `Engine::resize` and `Engine::set_mesh_size` are fallible too and keep the old size on failure (`RenderError::Invalid`
+  for a size beyond the device's `max_texture_dimension_2d` or a mesh beyond 300).
 
 ## Automatic compatibility
 
@@ -117,13 +120,15 @@ projectM: 206 `.milk` that use no MD3-only feature (ordinary MD2 presets). The 4
   (16 with `nWaveMode` >= 9, 3 with wave slots > 3, 1 with a shape slot > 3) resolve to projectM. Force
   `--compat milkdrop2` / `milkdrop3` for those.
 - `MILKDROP_PRESET_VERSION` 200 / 201, any `PSVERSION*`, the `FFTAttack` / `FFTDecay` keys, `mousex` / `mousey`
-  expression variables (BeatDrop's), `get_fft_peak*` / `get_wave*` shader helpers (BeatDrop's; MD3 has none), `_c15` /
+  expression variables (BeatDrop's; lactea implements them under `Compat::MilkDrop2`, "BeatDrop inputs under
+  MilkDrop 2"), `get_fft_peak*` / `get_wave*` shader helpers (BeatDrop's; MD3 has none), `_c15` /
   `_c16`.
 - `.milk2` by extension alone: a file named `.milk2` without the markers is a plain preset (as `Engine` has always
   loaded it).
 
-**Known limits.** (a) `get_fft`, `_c14` and `mouse` also exist in BeatDrop with other semantics; lactea has no
-BeatDrop prelude, so such a preset only translates under the MD3 prelude and is sent there. (b) `q33` / `t9` used as a
+**Known limits.** (a) `get_fft`, `_c14` and `mouse` also exist in BeatDrop with other semantics. `Compat::MilkDrop2`
+implements BeatDrop's own inputs (rules `md2_shader_inputs` and `md2_input_vars`), but detection never picks MilkDrop 2
+and projectM has no BeatDrop prelude, so such a preset only translates under the MD3 prelude and is sent there. (b) `q33` / `t9` used as a
 plain user variable in a projectM preset would be taken for MD3 (none of the 4194 corpus presets does). (c) An MD3
 preset that uses nothing MD3-only is indistinguishable from a projectM one and renders as projectM; pass `--compat
 milkdrop3` to run it as MD3.
@@ -338,10 +343,13 @@ error and goes on; MilkDrop 2 was left as it was.
 Rules: `md3_audio_analysis`, `md3_shader_fft`, `md3_extended_vars`, `md3_shader_prelude`, `md3_shader_time`,
 `md3_md2_comp_effects` (all false for `ProjectM` / `MilkDrop2`, true for `MilkDrop3`).
 
-**Audio** (`AnalysisMode::Md3`, `docs/audio.md`): PCM is quantised to signed 8 bit (`trunc(128 s)`, clamp -128..127),
+**Audio** (`AnalysisMode::Md3`, `docs/audio.md`): PCM is quantised to signed 8 bit (`trunc(128 s)`, clamp -128..127;
+`+inf` saturates to 127, `-inf` to -128, NaN becomes 0; the other analysis modes zero every non-finite sample),
 multiplied by `VolumeSensitivity` (`EngineConfig::volume_sensitivity`, `Engine::set_volume_sensitivity`, `fdrender
---volume-sensitivity`, `lactea_set_volume_sensitivity`), aligned like MD2, then a 576-sample Hann FFT zero-padded to
-1024 gives the equalised spectra of both channels. `bass/mid/treb` use the left channel only (bins `[0,85)`,
+--volume-sensitivity`, `lactea_set_volume_sensitivity`; a non-finite value is ignored), aligned like MD2, then a
+576-sample FFT with the raised-cosine envelope `0.5 + 0.5 sin(2 pi i / 576 - pi / 2)` (one period over the 576 samples),
+zero-padded to 1024 and equalised by `-0.02 ln((512 - i) / 512)`, gives the spectra of both channels
+(`lactea_audio::md3_spectrum`, FFT tables cached per thread). `bass/mid/treb` use the left channel only (bins `[0,85)`,
 `[85,170)`, `[170,256)` summed); silence gives exactly 1.0. The MD3 capture path (WASAPI ring, staleness) is the host's
 job.
 
@@ -365,6 +373,17 @@ the soft transition (PRESET1 at the request, PRESET2 when the first leg complete
 ordinary user texture named `wave`; the engine binds the 1x1 black placeholder (MD3 binds a texture it never fills).
 `texsize_fft` answers (512, 1) (MD3 leaves it unresolved). All PSVERSIONs are one dialect. Without the rule the names
 do not exist (a preset using them falls back, as before).
+
+**BeatDrop inputs under MilkDrop 2** (rules `md2_shader_inputs` and `md2_input_vars`: true for `Compat::MilkDrop2`,
+false for `ProjectM` and `MilkDrop3`, which keeps its own prelude and mouse). The engine does no I/O; the host feeds
+them and the engine samples them once per rendered frame: `Engine::set_mouse` (the same call as MD3's; it becomes
+`mousex mousey mousedown mouseclick` and BeatDrop's `_c14`), `Engine::set_ctrl_keys(CtrlKeys)` (`ctrllt ctrlrt ctrldn
+ctrlup`), `Engine::set_date_time(DateTime)` / `clear_date_time` (`year month day weekday hour minute second
+milliseconds totalseconds`, `_c15` / `_c16`; until the first call the date reads 0 and the time of day follows the frame
+clock) and `Engine::push_pcm_f32` (BeatDrop's shader spectrum / waveform texture behind `sampler_fft` / `sampler_wave`).
+`Engine::monitor()` reads the active preset's `monitor` variable in every mode. C API: `lactea_set_ctrl_keys`,
+`lactea_set_date_time`, `lactea_clear_date_time`, `lactea_get_monitor` (`lactea_set_mouse` is shared). The `lactea`
+app feeds only the mouse; it sends neither Ctrl + arrows nor the wall clock.
 
 **Uniforms** (`lactea-abi`): the frozen `MilkUniforms` is untouched; `MilkExtUniforms { mouse, q_hi }` is a second block at
 `@group(0) @binding(1)` (`mx` in `WGSL_COMMON`), always bound by the renderer and neutral outside MD3
@@ -552,6 +571,53 @@ before each block, which has no meaning in a seeded engine. `horizontal` fills t
 running index, `plasma3` seeds its extremes with `0.5 * h(0, 0)`, `cross2` zeroes the vertices that never blend: all
 copied as the spec describes them. `arrow` clamps the `atanh` argument to +-0.9999.
 
+The plasma midpoint displacement (`gen_plasma`, `PlasmaGrid`, `Span`), its min / max normalisation (`extent`) and the
+`(a, c)` entry of a banded wipe (`band_entry`) are the same arithmetic as MD2's and live in
+`crates/lactea/src/engine/blend_patterns.rs`; the random source is a closure (MD2 draws from a stream, MD3 replays its
+five stored values). `plasma`, `plasma2` and `plasma3` use them; MD3's plasma `a = (1 + b) / b` stays local to
+`md3_blend.rs`.
+
+**Progress of a double preset.** Only a double preset (`md3_random_instance` with `double_preset`) draws
+`blending_progress`; an ordinary soft cut has `progress = 1` and draws nothing. The draw is
+`round((rand() / 32767 * A + B) * 100) / 100` with the pattern's `(A, B)` (`Md3Pattern::progress_range`), i.e. a value in
+`[B, B + A]` in steps of 0.01; the pattern is the one drawn, or one of the first six when the auto hard cut asks, or the
+forced one. `Md3Locks::progress > 0` replaces the draw. "Default" marks the 13 patterns of the enabled list when no
+`[transitions]` section exists (`Md3Pattern::default_enabled`); `dir` marks the four patterns that read
+`blending_direction` (`Md3Pattern::uses_direction`).
+
+| # | pattern | default | dir | A | B | progress range |
+|---|---|---|---|---|---|---|
+| 0 | `zoom` | yes | | 0.7 | 0.2 | 0.20 .. 0.90 |
+| 1 | `side` | yes | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 2 | `plasma` | yes | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 3 | `plasma2` | yes | | 0.5 | 0.1 | 0.10 .. 0.60 |
+| 4 | `plasma3` | yes | | 0.3 | 0.1 | 0.10 .. 0.40 |
+| 5 | `cercle` | yes | yes | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 6 | `square` | | | 0.3 | 0.5 | 0.50 .. 0.80 |
+| 7 | `snail` | yes | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 8 | `snail2` | | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 9 | `snail3` | | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 10 | `triangle` | yes | yes | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 11 | `donuts` | | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 12 | `corner` | yes | yes | 0.4 | 0.4 | 0.40 .. 0.80 |
+| 13 | `patches` | yes | yes | 0.4 | 0.4 | 0.40 .. 0.80 |
+| 14 | `checkerboard` | | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 15 | `bubbles` | | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 16 | `stars` | | | 0.5 | 0.1 | 0.10 .. 0.60 |
+| 17 | `stars2` | | | 0.5 | 0.2 | 0.20 .. 0.70 |
+| 18 | `clock` | yes | | 0.5 | 0.1 | 0.10 .. 0.60 |
+| 19 | `nuclear` | | | 0.5 | 0.1 | 0.10 .. 0.60 |
+| 20 | `arrow` | yes | | 0.3 | 0.15 | 0.15 .. 0.45 |
+| 21 | `cisor` | | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 22 | `wave` | | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 23 | `curtain` | yes | | 0.2 | 0.1 | 0.10 .. 0.30 |
+| 24 | `vertical` | | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 25 | `horizontal` | | | 0.3 | 0.3 | 0.30 .. 0.60 |
+| 26 | `linesvertical` | | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 27 | `lineshorizontal` | | | 0.4 | 0.2 | 0.20 .. 0.60 |
+| 28 | `cross` | | | 0.4 | 0.5 | 0.50 .. 0.90 |
+| 29 | `cross2` | | | 0.25 | 0.7 | 0.70 .. 0.95 |
+
 Ordinary soft cuts under MD3 draw from `EngineConfig::md3_transition_patterns` (default: the 13 patterns MD3 enables
 without a `[transitions]` section: zoom side plasma plasma2 plasma3 cercle snail triangle corner patches clock arrow
 curtain; empty = zoom only; `Engine::set_md3_transition_patterns`); `Engine::set_md2_blend_pattern(Some(k))` forces any
@@ -573,7 +639,7 @@ the header, the half names, the phase (`DoubleMode`) and the blend's progress fo
 
 Every `Compat::MilkDrop3` blend runs through the same `BlendState` as MD2's (`ProgressMode` carries `progressMode`,
 the target `P` and the no-borders flag; `ProgressMode::Normal` is MD2's ramp and is all `Compat::MilkDrop2` ever uses).
-A resize regenerates the frozen pattern for the new aspect.
+A resize regenerates the frozen pattern for the new aspect (`Engine::resize` is fallible and keeps the old size when a renderer refuses the new one).
 
 ### Deviations from MD3 and open points
 
@@ -703,6 +769,21 @@ preset sprites, output unchanged).
   second. GDI+ therefore composes full-canvas frames the way `decode_gif` does. Frame choice: `t = fmod(time since the
   sprite started, total)`, the first frame
   whose cumulative delay is strictly greater than `t` (`gif_frame_index`, unit-tested with the `[10, 20, 5]` vector).
+- **Decode caps** (`lactea::decode_gif`, `crates/lactea/src/media.rs`). Canvas side at most 16384 px and canvas
+  `w * h * 4` at most 256 MiB, else the GIF is an error; every frame is stored as a full canvas, and frames past a total
+  of 256 MiB are dropped (the frames already read stay, at least one). A logical screen of size 0 takes the first
+  frame's extent (`left + width`, `top + height`); a stream that breaks after at least one frame keeps those frames; no
+  frame is an error; a frame outside the canvas is clipped. The engine's decoded-media cache is an LRU of 128 MiB.
+  Registering an image fails (a report warning, the preset runs without the sprite) for a zero size, a frame of the
+  wrong byte length or a side beyond the device's `max_texture_dimension_2d`.
+- **Clamps** (`SpriteRt::frame`, `sprites.rs`; `clamp(v, lo, hi)` is `min(hi, max(lo, v))`, so NaN becomes `lo`).
+  Per frame: `x`, `y`: `clamp(2 v - 1, -1000, 1000)` plus `SpriteX` / `SpriteY`; `sx`, `sy`: `clamp(v, -1000, 1000)` plus
+  `SpriteSX` / `SpriteSY`; `repeatx`, `repeaty`: `clamp(v, 0.01, 100)` times `SpriteRepeatX` / `SpriteRepeatY`; `r`, `g`,
+  `b`: `clamp(v, 0, 1)`; `a`: `clamp(v, 0, 1)` times `SpriteAlpha` (not clamped again); `rot`, `flipx`, `flipy`, `done`
+  and `burn` are not clamped (`flip*` and `done` mean `!= 0`). Keys: `SpriteLayer` outside `0..=4` is never drawn,
+  `SpriteBlend` outside `0..=10` acts as 0, `SpriteBurn` 0 never burns / 1 always / any other value follows the code's
+  `burn`; the missing keys default to `SpriteBlend=4`, `SpriteAlpha=1`, `SpriteBurn=1`, `SpriteSX=SpriteSY=-0.5`,
+  `SpriteRepeatX=SpriteRepeatY=1`, the rest 0.
 - **Blend modes.** 11 pipelines, one fragment entry point per mode (stage-0 colour / alpha) and the table's
   blend factors (`crates/lactea-render/src/sprite.rs`); vertex colours quantised like `D3DCOLOR`. Tested on the GPU,
   all 11 modes x two colours x opaque / keyed texel, against a CPU model of the table (and the CPU model against the
@@ -727,9 +808,12 @@ preset sprites, output unchanged).
   `sprites\x.png`; a directory that is the root works as is. Deviation: a sprite path found nowhere is looked up by
   file name in the given folders (MD3 would show an error banner). `.dds` stills are not decoded.
 
-Not done: `sprites.ini` / digit-key launched sprites and the user sprite (host features), the two 100-entry
+Not done: `sprites.ini` / digit-key launched sprites (host features), the two 100-entry
 texture caches and `PreLoadSprites`, the webcam layers, Spout. The colour-key quirk (a global flag that disables
-the key for later loads) is not replicated.
+the key for later loads) is not replicated. The projectM user sprites (`Engine::sprite_create` and the other
+`Engine::sprite_*`, `lactea_sprite_*`) are a separate feature that works in every compat mode: during a soft cut they
+are drawn after the blend onto the output (the transition does not distort them), `burn` goes into both presets'
+feedback.
 
 ### Verification
 
@@ -982,8 +1066,12 @@ Test: `crates/lactea/tests/encrypted_shader_override.rs` (stub colour, then over
 ### `.milk2`
 
 MD3 never reads `MD31` / `MD32` inside a `.milk2` half: the halves are loaded as plain presets, so an encrypted shader
-in a double preset stays its stub. Lactea's override lookup is per preset text, so a half whose own header carries
-`MD31` / `MD32` and a registered handle would be substituted; that is a Lactea extension, MD3 itself does not do it.
+in a double preset stays its stub. The `.milk2` header reader (`lactea_preset::milk2`) knows only `sprite=1`,
+`blending_pattern`, `blending_progress`, `blending_direction` and `random_1..5`; it never looks at `MD31` / `MD32`.
+Each half is built through the normal load path from its own text, where `Preset::md31_handle` / `md32_handle` read the
+first `MD31=` / `MD32=` line of that half and the override lookup applies. So a half whose own text carries
+`MD31` / `MD32` and a registered handle is substituted (a Lactea extension: MD3 itself does not do it), while such a
+line in the container header outside both halves is read by nothing but `detect_compat` (`EncryptedShaderKey`).
 
 ## Version history (3.x revisions)
 

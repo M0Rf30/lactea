@@ -15,6 +15,7 @@
     clippy::manual_clamp
 )]
 
+use super::blend_patterns::{PlasmaGrid, Span, band_entry, extent, gen_plasma};
 use super::md2_blend::{randomize_blend_pattern, start_blend_from};
 use super::{LastFrame, Slot};
 use crate::rng::StreamRng;
@@ -149,52 +150,6 @@ pub struct Md3PatternInstance {
 // the generators (pure)
 // ---------------------------------------------------------------------------------------------
 
-/// `GenPlasma` with `FRAND` replaced by the five stored randoms: midpoint displacement of `h[y][x]` (row-major,
-/// `gx + 1` wide). The edge midpoints use `r1..r4` by position, the centre `r5`, at every level.
-#[allow(clippy::too_many_arguments)]
-fn gen_plasma(
-    h: &mut [f32],
-    gx: usize,
-    aspect: (f32, f32),
-    r: &[f32; 5],
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    dt: f32,
-) {
-    let w = gx + 1;
-    let (mx, my) = ((x0 + x1) / 2, (y0 + y1) / 2);
-    let (t00, t01, t10, t11) = (
-        h[y0 * w + x0],
-        h[y0 * w + x1],
-        h[y1 * w + x0],
-        h[y1 * w + x1],
-    );
-    if y1 - y0 >= 2 {
-        if x0 == 0 {
-            h[my * w + x0] = 0.5 * (t00 + t10) + (r[0] * 2.0 - 1.0) * dt * aspect.1;
-        }
-        h[my * w + x1] = 0.5 * (t01 + t11) + (r[1] * 2.0 - 1.0) * dt * aspect.1;
-    }
-    if x1 - x0 >= 2 {
-        if y0 == 0 {
-            h[y0 * w + mx] = 0.5 * (t00 + t01) + (r[2] * 2.0 - 1.0) * dt * aspect.0;
-        }
-        h[y1 * w + mx] = 0.5 * (t10 + t11) + (r[3] * 2.0 - 1.0) * dt * aspect.0;
-    }
-    if y1 - y0 < 2 || x1 - x0 < 2 {
-        return;
-    }
-    h[my * w + mx] = 0.25 * (h[y0 * w + mx] + h[y1 * w + mx] + h[my * w + x0] + h[my * w + x1])
-        + (r[4] * 2.0 - 1.0) * dt;
-    let half = dt * 0.5;
-    gen_plasma(h, gx, aspect, r, x0, mx, y0, my, half);
-    gen_plasma(h, gx, aspect, r, mx, x1, y0, my, half);
-    gen_plasma(h, gx, aspect, r, x0, mx, my, y1, half);
-    gen_plasma(h, gx, aspect, r, mx, x1, my, y1, half);
-}
-
 /// Fill the `(gx + 1) * (gy + 1)` mesh `vi` (`vi[y * (gx + 1) + x] = (a, c)`) with the pattern. `aspect` is
 /// `(m_fAspectX, m_fAspectY)`. Pure: the same instance gives the same mesh, nothing is read from `vi`.
 ///
@@ -234,7 +189,7 @@ pub fn md3_fill_vertinfo(
     // `emit(t, k)`: `a = (B + k) / B`, `c = t / B - 1 / B`
     let banded = |vi: &mut [[f32; 2]], band: f32, k: f32, t: &dyn Fn(f32, f32) -> f32| {
         let ib = 1.0 / band;
-        each(vi, &|x, y| [(band + k) * ib, t(x, y) * ib - ib]);
+        each(vi, &|x, y| band_entry(ib, band + k, t(x, y)));
     };
     // `(dx, dy)` of the centred patterns
     let centred = |x: f32, y: f32| ((x - 0.5) * ax, (y - 0.5) * ay);
@@ -253,8 +208,7 @@ pub fn md3_fill_vertinfo(
             let b = 0.1 + 0.2 * r2;
             let ib = 1.0 / b;
             each(vi, &|x, y| {
-                let t = wipe(x * ax, y * ay, vx, vy);
-                [(1.0 + b) * ib, t * ib - ib]
+                band_entry(ib, 1.0 + b, wipe(x * ax, y * ay, vx, vy))
             });
         }
         Md3Pattern::Plasma | Md3Pattern::Plasma2 | Md3Pattern::Plasma3 => {
@@ -269,28 +223,34 @@ pub fn md3_fill_vertinfo(
             h[gx] = r3;
             h[gy * w] = r4;
             h[gy * w + gx] = r5;
-            gen_plasma(&mut h, gx, aspect, &inst.r, 0, gx, 0, gy, dt);
+            let r = inst.r;
+            gen_plasma(
+                &mut h,
+                |v| v,
+                PlasmaGrid { gx, aspect },
+                &mut |k| r[k],
+                Span {
+                    x0: 0,
+                    x1: gx,
+                    y0: 0,
+                    y1: gy,
+                },
+                dt,
+            );
             // `plasma3` seeds both extremes with half of h(0, 0)
             let seed = if inst.pattern == Md3Pattern::Plasma3 {
                 0.5 * h[0]
             } else {
                 h[0]
             };
-            let (mut mn, mut mx) = (seed, seed);
-            for &v in &h {
-                if mn > v {
-                    mn = v;
-                }
-                if mx < v {
-                    mx = v;
-                }
-            }
+            let (mn, mx) = extent(seed, h.iter().copied());
             for (v, out) in h.iter().zip(vi.iter_mut()) {
-                let c = if inst.pattern == Md3Pattern::Plasma {
-                    (v - mn) * (1.0 / (mx - mn)) * ib - ib
+                let t = if inst.pattern == Md3Pattern::Plasma {
+                    (v - mn) * (1.0 / (mx - mn))
                 } else {
-                    ((v - mn) * 2.0 / (mx - mn)).sin() * ib - ib
+                    ((v - mn) * 2.0 / (mx - mn)).sin()
                 };
+                let [_, c] = band_entry(ib, 0.0, t);
                 *out = [(1.0 + b) / b, c];
             }
         }
@@ -990,6 +950,7 @@ impl super::Engine {
                 let user = self.cfg.blend_time_user;
                 if let Err(e) = self.load_preset_blend(&bytes, &name, user, launch) {
                     // PRESET1 stays alone on screen
+                    log::error!("preset '{name}' failed to load: {e}");
                     self.on_switch_failed
                         .fire(&crate::callbacks::SwitchFailure {
                             name,
@@ -1382,15 +1343,7 @@ mod tests {
     #[test]
     fn double_preset_leaves_preset2s_fft_params() {
         use crate::{Compat, Engine, EngineConfig, Transition};
-        let device_queue = {
-            let instance = wgpu::Instance::default();
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()
-                .and_then(|a| {
-                    pollster::block_on(a.request_device(&wgpu::DeviceDescriptor::default())).ok()
-                })
-        };
-        let Some((device, queue)) = device_queue else {
+        let Some((device, queue)) = lactea_testutil::gpu() else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
@@ -1414,7 +1367,8 @@ mod tests {
                 compat: Compat::MilkDrop3,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let p1 = half("FFTAttack=0.9\nFFTDecay=0.2\n");
         let p2 = half("FFTAttack=0.3\nFFTDecay=0.4\n");
         e.load_preset(file(&p1, &p2).as_bytes(), "pair.milk2", Transition::Cut)
@@ -1438,15 +1392,7 @@ mod tests {
     #[test]
     fn halves_of_a_double_preset_have_their_own_shader_start_times() {
         use crate::{Compat, Engine, EngineConfig, FrameClock, Transition};
-        let device_queue = {
-            let instance = wgpu::Instance::default();
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()
-                .and_then(|a| {
-                    pollster::block_on(a.request_device(&wgpu::DeviceDescriptor::default())).ok()
-                })
-        };
-        let Some((device, queue)) = device_queue else {
+        let Some((device, queue)) = lactea_testutil::gpu() else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
@@ -1480,7 +1426,8 @@ mod tests {
                 blend_time_user: 1.0,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let mut frame = 0u32;
         let mut run = |e: &mut Engine, until: f64| {
             while f64::from(frame) / 60.0 <= until {
@@ -1536,15 +1483,7 @@ mod tests {
     #[test]
     fn the_mxd3q_block_reads_the_current_states_q64_after_its_per_frame_code() {
         use crate::{Compat, Engine, EngineConfig, FrameClock, Transition};
-        let device_queue = {
-            let instance = wgpu::Instance::default();
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()
-                .and_then(|a| {
-                    pollster::block_on(a.request_device(&wgpu::DeviceDescriptor::default())).ok()
-                })
-        };
-        let Some((device, queue)) = device_queue else {
+        let Some((device, queue)) = lactea_testutil::gpu() else {
             eprintln!("skipping: no wgpu adapter");
             return;
         };
@@ -1575,7 +1514,8 @@ mod tests {
                     compat: Compat::MilkDrop3,
                     ..Default::default()
                 },
-            );
+            )
+            .unwrap();
             e.load_preset(preset.as_bytes(), name, Transition::Cut)
                 .unwrap();
             for frame in 0..10u32 {

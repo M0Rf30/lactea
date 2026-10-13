@@ -13,6 +13,7 @@ trait Visualizer {
     fn set_auto_hard_cut_mode(&mut self, mode: u8) {}               // default-implemented
     fn auto_hard_cut_mode(&self) -> Option<u8> { None }             // None = no such feature / compat does not support it
     fn current_compat(&self) -> Option<CompatArg> { None }          // resolved compat of the last load (never Auto); None = no compat modes
+    fn set_loaded_preset_duration(&mut self, seconds: f64) {}       // default-implemented: sampled display time of the preset just loaded (`progress` runs over it)
 }
 ```
 
@@ -22,6 +23,7 @@ Implementations: `EngineVisualizer` (feature `engine`, default; adapter in `src/
 ```text
 cargo build -p lactea-app                      # PipeWire + engine (default features)
 cargo build -p lactea-app --no-default-features   # cpal capture only, scope only
+cargo build -p lactea-app --features gles         # GLES backend in addition to Vulkan / DX12 / Metal
 lactea --dir /usr/share/projectM/presets        # engine, PipeWire monitor capture
 ```
 
@@ -37,12 +39,18 @@ mode-dependent state and does a **hard cut** whatever `--transition-duration` sa
 The host follows the resolved mode after every successful load (`Visualizer::current_compat`): MD3 display-time
 randomisation, the F8 key, the window title and the log. `CompatArg::md3()` is true only for the fixed `milkdrop3`.
 
+Engine inputs the app feeds: the mouse (`Visualizer::set_mouse`, every frame: MilkDrop 3's shader `mouse` / `_c14`, and
+under MilkDrop 2 BeatDrop's `mousex .. mouseclick`). It does not feed the Ctrl + arrow keys (`Engine::set_ctrl_keys`)
+or the wall clock (`Engine::set_date_time`): under MilkDrop 2 those variables read 0 and the time of day follows the
+frame clock.
+
 ### Build
 
 Build needs `libpipewire-0.3` headers + clang (bindgen) for the `pipewire` feature and ALSA headers
 for cpal. Version choices: winit 0.30.13 (0.31 is still beta), wgpu 30, cpal 0.18, pipewire 0.10,
-symphonia 0.5.5, rtrb 0.4. `lactea-app` is not published to crates.io (`publish = false`): it
-depends on a pinned git fork of symphonia, which crates.io does not accept.
+symphonia 0.6.1 (M0Rf30's git fork, default features off; formats mp3, flac, vorbis, ogg, wav, pcm, isomp4, aac,
+alac, plus all metadata readers), rtrb 0.4. `lactea-app` is not published to crates.io (`publish = false`): it
+depends on that git fork, which crates.io does not accept. The `gles` feature enables `wgpu/gles`.
 
 ## Keys
 
@@ -50,7 +58,7 @@ depends on a pinned git fork of symphonia, which crates.io does not accept.
 |---|---|
 | N, Right, Space | next preset |
 | P, Left | previous preset (history, then wraps) |
-| R | random preset |
+| R | random preset (the pick can be the current preset again) |
 | L | lock / unlock auto-advance |
 | F, F11, double-click | fullscreen (cursor hidden while fullscreen) |
 | Esc, Q | quit |
@@ -69,6 +77,21 @@ logs it once, shows the engine's built-in idle preset and does not retry until y
 with no presets found at all (no default directory, an empty directory) it also shows the idle preset.
 An explicit `--preset FILE` or `--dir DIR` that does not exist exits 1 before a window opens. The window title shows
 `preset [compat] [i/n] | LOCKED | hardcut<N> | audio status | fps` (`[compat]`, e.g. `[MilkDrop 3]`, only under `--compat auto`; `LOCKED` only while locked, `hardcut<N>` only while an auto hard cut mode is on). Every load also logs `preset <name>: compat <mode>` at info level.
+
+### Preset browser (`src/presets.rs`)
+
+`--dir` is scanned by `lactea_host::scan_preset_files`: recursive, each directory visited once (symlink loops and
+aliases cannot recurse), sorted by path, `.milk` and `.prjm` in any case, plus `.milk2` under `--compat auto` /
+`milkdrop3`. With the `engine` feature `PresetBrowser` runs on the engine's own `lactea::Playlist` (items are indices
+into the entry list; history, shuffle) and `lactea::PresetControl` (display time, lock, MD3 `TimeBetweenPresetsRand`
+draw from the browser's seeded stream), so the app and the C API follow one rule. Consequences: Random (`R`,
+`--shuffle`) can pick the current preset again; Prev uses `Playlist::last_index` (a failed pick stays in the history);
+`auto_due(&mut self, now)` is true once per preset (`commit` of the next one re-arms it). Without the `engine`
+feature the older standalone implementation under `cfg(not(feature = "engine"))` is used.
+
+After every successful load `app.rs` calls `Visualizer::set_loaded_preset_duration(PresetBrowser::loaded_duration())`;
+`EngineVisualizer` forwards it to `Engine::set_loaded_preset_duration`, so the engine's `progress` variable runs over
+the display time sampled for that preset, as in projectM. The scope visualizer ignores it.
 
 ### MD3 auto hard cuts (MilkDrop 3 mode)
 
@@ -89,13 +112,14 @@ host switches this on or off after each successful load, following the preset's 
 
 ```text
 --preset FILE          show FILE first (alone unless --dir is also given)
---dir DIR              recursive *.milk scan (repeatable); default: first existing of
+--dir DIR              recursive *.milk / *.prjm scan (*.milk2 too under auto / milkdrop3) (repeatable); default: first existing of
                        /usr/share/projectM/presets, /usr/local/share/projectM/presets,
                        /opt/homebrew/share/projectM/presets (none on Windows: pass --dir)
 --duration S           auto-advance period (30; 0 = never)      --shuffle
 --transition-duration S  soft cut length (3; 0 = hard cuts)
 --auto-hard-cut N      MD3 AutoHardCutMode 0..7 (0 = off; 1..6 hard cuts, 7 composite effects; MilkDrop 3 mode only; F8 cycles)
 --duration-rand S      MD3 TimeBetweenPresetsRand (10; MilkDrop 3 mode only)
+                       (--duration, --transition-duration and --duration-rand must be finite and at most 1e9 s)
 --fps N                frame cap (default: vsync only; --deterministic: 60)
 --no-vsync             Mailbox/Immediate instead of Fifo
 --size WxH [--pixels]  initial window size, logical (HiDPI) units unless --pixels
@@ -126,7 +150,9 @@ stats, `RUST_LOG=lactea::level=trace` prints `epoch_ms peak frames` per frame, `
   `EngineConfig::output_format`). Present mode Fifo; `--no-vsync` prefers Mailbox, then Immediate.
 * Rendering is always at physical pixels (HiDPI aware); `Resized` events are coalesced into one
   reconfigure per frame and forwarded to `Visualizer::resize` (the engine clears its feedback image
-  on resize, so mid-run resizes visibly restart the feedback).
+  on resize, so mid-run resizes visibly restart the feedback). `Engine::resize` is fallible (a size beyond the
+  device's texture limit): the adapter logs `engine resize to WxH failed: ...` at warning level and the engine keeps
+  its old size.
 * Surface loss: `Timeout`/`Occluded` skip the frame (and throttle to ~60 Hz), `Outdated`
   reconfigures, `Lost` recreates the surface, `Suboptimal` presents and reconfigures. Device loss
   rebuilds device + surface + visualizer and reloads the current preset (3 attempts).
@@ -200,9 +226,12 @@ Windows and macOS behaviour is not exercised by the Linux test suite: the select
 
 ### `--audio-file` — `src/audio/player.rs`
 
-symphonia decodes in a thread into a ring at the device rate (the output stream is opened at the
+symphonia decodes in a thread (wav, flac, mp3, ogg/vorbis, mp4/m4a with aac or alac, raw PCM) into a ring at
+the device rate (the output stream is opened at the
 file's native rate when the device supports it; otherwise a windowed-sinc resampler,
-`resample.rs`, converts). The cpal output callback feeds the device and mirrors every frame it
+`resample.rs`, converts). When the container reports `ResetRequired` (chained Ogg, changed tracks) the decoder is
+rebuilt from the new default track and decoding continues; if the sample rate changed, decoding ends with an error.
+The cpal output callback feeds the device and mirrors every frame it
 hands out into a *tap* ring, together with `ClockSample { tapped_before, at, latency }` where
 `latency = playback - callback` from cpal's timestamps. The render thread keeps the tapped frames
 in a history and releases up to the **audible position**
@@ -241,23 +270,28 @@ The monitor watches two things per frame: do **frames arrive** (source counter) 
 
 If the input cannot be opened at all the app still starts and shows `audio: FAILED (reason)`.
 
-## Textures — `src/textures.rs`
+## Textures — `lactea_host::DirTextures`, `src/textures.rs`
 
-`FsTextureProvider::new(dirs)` indexes the directories recursively once (earlier directories win,
-then jpg > jpeg > png > tga > bmp); `load(name)` matches the base name case-insensitively with or
-without extension/directory and decodes with `image` to RGBA8 (cached); `random_pool()` returns the
-lowercase stems of every indexed file, sorted (the engine's `TextureProvider` contract, one entry
-per file like projectM's scan). `engine_vis::FsProvider` wraps it for `lactea::TextureProvider`.
-Default directories: `oracle/build/texpack` of the repository (found from the cwd, the executable's
-location or the build-time source tree) and `/usr/share/projectM/textures`; `--texture-dir` entries
-come first.
+The app's `--texture-dir` entries followed by `textures::default_dirs()` (`oracle/build/texpack` of the repository,
+found from the cwd, the executable's location or the build-time source tree, then `/usr/share/projectM/textures`;
+only existing directories) go to `lactea_host::DirTextures::new(..).with_cache()`; `default_dirs()` is the only
+texture code left in `src/textures.rs`. `DirTextures` mirrors projectM's scan: recursive to depth 8, one entry per
+file with a plain-texture extension (`jpg`, `jpeg`, `dds`, `png`, `tga`, `bmp`, `dib`), priority = directory order,
+then path order within a directory (no extension ranking). `load(name)` lowercases the name, strips a directory
+prefix and a known extension, and returns the first indexed file of that stem that decodes (the result, including a
+miss, is cached). `random_pool()` returns the lowercase stem of every indexed file, sorted, one entry per file.
+Decoding is `lactea_host::decode_image`: JPEG (by content) only through the stb-exact `lactea-jpeg` decoder, and one
+it rejects is an error with no fallback; png, tga and bmp through the `image` crate. A `dds` file is indexed but
+cannot be decoded. MD3 sprites, GIFs and shader textures come from the same directories (`MediaFiles` index).
 
 ## Testing
 
 `cargo test -p lactea-app` — unit tests for the ring/stereo conversion, resampler (SNR,
 alias rejection, identity), symphonia decode, audible-position maths and tap history,
 monitor state machine, `pcm_range` tiling, key bindings, preset navigation/lock/skip/scan
-(symlink loops, 20k-entry dedupe), texture lookup, surface format/present-mode choice, CLI.
+(`.prjm` / `.milk2` listing, symlink loops, 20k-entry dedupe, the Playlist/PresetControl timing, MD3 display-time
+draws), default texture directories, surface format/present-mode choice, CLI (including the rejection of non-finite
+or huge durations). Texture lookup and decoding are tested in `lactea-host`.
 
 Visual checks never touch the desktop: `--screenshot F.png --screenshot-frame N` reads the
 swapchain image back (`COPY_SRC`) and exits. With `--audio-wav ... --deterministic --pixels

@@ -3,6 +3,7 @@
 
 use crate::media::Media;
 use crate::rng::StreamRng;
+use lactea_render::CompatRules;
 
 /// A decoded texture: RGBA8, row 0 = top.
 #[derive(Clone, Debug)]
@@ -78,25 +79,40 @@ pub(crate) fn shape_image(full: &str) -> Option<lactea_render::ShapeImage> {
     })
 }
 
-/// `randNN` / `randNN_prefix` sampler names: returns the slot (0..=15) when `root` (the sampler
-/// name without the `sampler_` prefix, lowercase) is one.
-pub(crate) fn rand_slot(root: &str) -> Option<usize> {
-    let b = root.as_bytes();
-    if b.len() >= 6 && &b[..4] == b"rand" && b[4].is_ascii_digit() && b[5].is_ascii_digit() {
-        let slot = usize::from(b[4] - b'0') * 10 + usize::from(b[5] - b'0');
-        if slot <= 15 {
-            return Some(slot);
-        }
-    }
-    None
+/// The random-texture slot of the sampler `root` (its name without `sampler_` and without the quality prefix,
+/// lowercase), or `None` for an ordinary texture. One parser serves the sampler binding and `texsize_randNN`
+/// ([`lactea_hlsl::rand_slot`]); the compat rules say which slots and which spellings count.
+pub(crate) fn rand_slot(root: &str, rules: &CompatRules) -> Option<usize> {
+    lactea_hlsl::rand_slot(root, rules.max_rand_slot, !rules.rand_filter_raw_name)
 }
 
-/// projectM's `TextureManager::GetRandomTexture`: `name` is the sampler name as projectM sees it
-/// (text after `sampler_`, e.g. `rand03_smalltiled` or `fw_rand03`). A `_prefix` suffix filters
-/// the pool by file-name prefix **only when** the name starts with `randNN_` (a `fw_` style
-/// quality prefix defeats the filter in projectM, and so here). The pick uses the named stream
-/// `randtex_<name>` of the run seed over the sorted pool.
-pub(crate) fn pick_random(seed: u64, name: &str, pool: &[String]) -> Option<String> {
+/// The pick of a random texture for the sampler `raw` (text after `sampler_`, e.g. `fw_rand03_smalltiled`; `root` is
+/// the same name without its quality prefix) from the sorted `pool`.
+///
+/// The `_prefix` of `randNN_prefix` filters the pool by file-name prefix. projectM
+/// (`CompatRules::rand_filter_raw_name`) looks for it in the raw name (`TextureManager::GetRandomTexture` tests byte 6
+/// for `_`), so a quality prefix such as `fw_` moves it out of place and the whole pool is used; MD2 filters on the
+/// prefix-stripped name. The pick uses the named stream `randtex_<name>` of the run seed.
+pub(crate) fn pick_for_sampler(
+    seed: u64,
+    rules: &CompatRules,
+    raw: &str,
+    root: &str,
+    pool: &[String],
+) -> Option<String> {
+    pick_random(
+        seed,
+        if rules.rand_filter_raw_name {
+            raw
+        } else {
+            root
+        },
+        pool,
+    )
+}
+
+/// `name`: the name whose byte 6 may carry the pool filter (`randNN_prefix`), see [`pick_for_sampler`].
+fn pick_random(seed: u64, name: &str, pool: &[String]) -> Option<String> {
     if pool.is_empty() {
         return None;
     }
@@ -126,33 +142,48 @@ pub(crate) fn pick_random(seed: u64, name: &str, pool: &[String]) -> Option<Stri
 mod tests {
     use super::*;
 
+    use lactea_render::Compat;
+
     #[test]
-    fn slots() {
-        assert_eq!(rand_slot("rand03"), Some(3));
-        assert_eq!(rand_slot("rand15_smalltiled"), Some(15));
-        assert_eq!(rand_slot("rand16"), None);
-        assert_eq!(rand_slot("randx1"), None);
-        assert_eq!(rand_slot("clouds"), None);
+    fn slot_range_and_spelling_follow_the_compat_rules() {
+        let (pm, md2) = (Compat::ProjectM.rules(), Compat::MilkDrop2.rules());
+        assert_eq!(rand_slot("rand15_smalltiled", &pm), Some(15));
+        assert_eq!(rand_slot("rand16", &pm), None);
+        assert_eq!(rand_slot("rand16", &md2), Some(16));
+        assert_eq!(rand_slot("rand99", &md2), Some(99));
+        // projectM takes any name that starts with `randNN`, MD2 only `randNN` / `randNN_...`
+        assert_eq!(rand_slot("rand03x", &pm), Some(3));
+        assert_eq!(rand_slot("rand03x", &md2), None);
+        assert_eq!(rand_slot("randx1", &pm), None);
+        assert_eq!(rand_slot("clouds", &md2), None);
     }
 
     #[test]
-    fn pick_filters_by_prefix_only_without_quality_prefix() {
+    fn pool_filter_survives_a_quality_prefix_only_in_md2() {
         let pool: Vec<String> = ["clouds", "smalltiled_a", "smalltiled_b", "zzz"]
             .iter()
             .map(|s| s.to_string())
             .collect();
+        let (pm, md2) = (Compat::ProjectM.rules(), Compat::MilkDrop2.rules());
+        let (raw, root) = ("fw_rand03_smalltiled", "rand03_smalltiled");
+        // MD2 peels `fw_` before it looks for the filter
         for seed in 0..20 {
-            let p = pick_random(seed, "rand03_smalltiled", &pool).unwrap();
+            let p = pick_for_sampler(seed, &md2, raw, root, &pool).unwrap();
             assert!(p.starts_with("smalltiled"));
         }
-        // quality prefix: the whole pool is used
+        // projectM reads byte 6 of the raw name: the quality prefix defeats the filter, the whole pool is used
         let mut seen = std::collections::HashSet::new();
         for seed in 0..64 {
-            seen.insert(pick_random(seed, "fw_rand03_smalltiled", &pool).unwrap());
+            seen.insert(pick_for_sampler(seed, &pm, raw, root, &pool).unwrap());
         }
         assert!(seen.len() > 2);
-        assert!(pick_random(1, "rand01", &[]).is_none());
-        assert!(pick_random(1, "rand01_nomatch", &pool).is_none());
+        // without a quality prefix both filter
+        for seed in 0..20 {
+            let p = pick_for_sampler(seed, &pm, root, root, &pool).unwrap();
+            assert!(p.starts_with("smalltiled"));
+        }
+        assert!(pick_for_sampler(1, &pm, "rand01", "rand01", &[]).is_none());
+        assert!(pick_for_sampler(1, &pm, "rand01_nomatch", "rand01_nomatch", &pool).is_none());
     }
 
     /// `TextureManager::ExtractTextureSettings` (`TextureManager.cpp:375-421`).

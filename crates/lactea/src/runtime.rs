@@ -38,6 +38,8 @@ pub struct Env {
     /// `renderContext.aspectX/Y` and their inverses.
     pub aspect: [f32; 2],
     pub inv_aspect: [f32; 2],
+    /// BeatDrop's host variables of this frame (`CompatRules::md2_input_vars`); `None` outside MilkDrop 2.
+    pub md2: Option<crate::md2_inputs::Md2Vars>,
 }
 
 /// Compile `src` (a joined code block, see `lactea_preset`) into `ctx`; empty source gives `None` (projectM leaves
@@ -110,6 +112,8 @@ pub struct PerFrame {
     pub v: PfVars,
     pub prog: Option<Program>,
     pub q_after_init: [f64; MAX_Q],
+    /// BeatDrop's mouse / key / date variables, registered by [`PerFrame::extend_md2_inputs`].
+    pub host: Option<crate::vars::HostVars>,
 }
 
 impl PerFrame {
@@ -122,6 +126,7 @@ impl PerFrame {
             v,
             prog: None,
             q_after_init: [0.0; MAX_Q],
+            host: None,
         }
     }
 
@@ -130,6 +135,11 @@ impl PerFrame {
     /// grammar has no dotted identifiers, so preset code cannot read them (the mouse is a shader input only).
     pub fn extend_md3(&mut self) {
         crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
+    }
+
+    /// MilkDrop 2 (`CompatRules::md2_input_vars`): `mousex .. totalseconds` join the context's variables.
+    pub fn extend_md2_inputs(&mut self) {
+        self.host = Some(crate::vars::register_host(&mut self.ctx, true));
     }
 
     pub fn q(&self, i: usize) -> f64 {
@@ -223,6 +233,17 @@ impl PerFrame {
         set(c, v.blur2_max, f(b.blur2_max));
         set(c, v.blur3_max, f(b.blur3_max));
         set(c, v.blur1_edge_darken, f(b.blur1_edge_darken));
+        if let (Some(h), Some(m)) = (&self.host, &e.md2) {
+            for (var, x) in h.mouse.iter().zip(m.mouse) {
+                c.set(*var, x);
+            }
+            for (var, x) in h.ctrl.iter().zip(m.ctrl) {
+                c.set(*var, x);
+            }
+            for (var, x) in h.date.iter().zip(m.date) {
+                c.set(*var, x);
+            }
+        }
     }
 
     pub fn run(&mut self) {
@@ -248,6 +269,8 @@ pub struct PerPixel {
     pub ctx: Context,
     pub v: PpVars,
     pub prog: Option<Program>,
+    /// BeatDrop's mouse / key variables, registered by [`PerPixel::extend_md2_inputs`].
+    pub host: Option<crate::vars::HostVars>,
 }
 
 impl PerPixel {
@@ -255,12 +278,23 @@ impl PerPixel {
         let mut ctx = Context::new(gm.clone());
         ctx.reset_vars();
         let v = PpVars::register(&mut ctx);
-        Self { ctx, v, prog: None }
+        Self {
+            ctx,
+            v,
+            prog: None,
+            host: None,
+        }
     }
 
     /// MilkDrop 3: `q33..q64` join the context's variables.
     pub fn extend_md3(&mut self) {
         crate::vars::extend_md3(&mut self.ctx, &mut self.v.q, &mut self.v.t);
+    }
+
+    /// MilkDrop 2 (`CompatRules::md2_input_vars`): `mousex .. ctrlup` join the context's variables (the date
+    /// variables exist in the per-frame context only).
+    pub fn extend_md2_inputs(&mut self) {
+        self.host = Some(crate::vars::register_host(&mut self.ctx, false));
     }
 
     /// `PerPixelContext::LoadStateReadOnlyVariables` (note: `aspectx/y` are the *non*-inverse
@@ -285,6 +319,17 @@ impl PerPixel {
         set(c, v.pixelsy, f64::from(e.pixels[1]));
         set(c, v.aspectx, f64::from(e.aspect[0]));
         set(c, v.aspecty, f64::from(e.aspect[1]));
+        // `milkdropfs.cpp:798-805`: the per-vertex copies of the per-frame mouse / key variables
+        if let (Some(h), Some(src)) = (&self.host, &pf.host) {
+            for (dst, from) in h
+                .mouse
+                .iter()
+                .zip(&src.mouse)
+                .chain(h.ctrl.iter().zip(&src.ctrl))
+            {
+                c.set(*dst, pf.ctx.get(*from));
+            }
+        }
     }
 
     /// `PerPixelContext::LoadPerFrameQVariables` (once per frame, not per vertex).

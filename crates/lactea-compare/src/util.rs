@@ -45,6 +45,25 @@ pub fn default_jobs() -> usize {
         .unwrap_or(1)
 }
 
+/// Sorted, de-duplicated base names of the files in `dir` whose extension satisfies `ext_ok`
+/// (a missing or unreadable directory lists nothing).
+pub(crate) fn file_stems(dir: &std::path::Path, ext_ok: impl Fn(&str) -> bool) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut v: Vec<String> = rd
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let (stem, ext) = name.rsplit_once('.')?;
+            ext_ok(ext).then(|| stem.to_string())
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// Median of a slice (NaN-free expected; `inf` allowed). Empty -> NaN.
 pub(crate) fn median(v: &[f64]) -> f64 {
     if v.is_empty() {

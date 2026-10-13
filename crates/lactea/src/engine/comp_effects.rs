@@ -5,7 +5,7 @@ use super::*;
 use crate::auto_cut::{Effect, toggle_effect};
 
 impl Engine {
-    /// The `AutoHardCutMode` that was set (0 = off), whatever the compat mode; see
+    /// The configured `AutoHardCutMode` (0 = off), whatever the compat mode; see
     /// [`Engine::auto_hard_cut_active`].
     pub fn auto_hard_cut_mode(&self) -> u8 {
         self.auto_cut.mode()

@@ -196,7 +196,8 @@ impl<'a> Parser<'a> {
         let def = match name {
             "/*or*/" => BITOR_DEF,
             "/*and*/" => BITAND_DEF,
-            _ => lookup_func(name).expect("operator/function names passed here are in the table"),
+            _ => lookup_func(name)
+                .ok_or_else(|| self.err_at(at, format!("unknown function \"{name}\"")))?,
         };
         let def = if self.ns { to_ns(def) } else { def };
         self.func(def, name, args, at)
@@ -227,10 +228,8 @@ impl<'a> Parser<'a> {
         let ns = self.ns;
 
         let mut it = args.into_iter().map(|a| a.node);
-        let mut next = || {
-            it.next()
-                .expect("arity was checked against the function definition")
-        };
+        // `args.len() == def.argc` was checked above, so the default is never produced.
+        let mut next = || it.next().unwrap_or(Node::Const(0.0));
         let node = match def.kind {
             FuncKind::If => {
                 let s = self.alloc();
@@ -370,7 +369,8 @@ impl<'a> Parser<'a> {
             CNode {
                 node: Node::List {
                     s,
-                    items: vec![list.node],
+                    init: Vec::new(),
+                    last: Box::new(list.node),
                 },
                 is_list: true,
                 ic: list.ic,
@@ -383,11 +383,13 @@ impl<'a> Parser<'a> {
         } else {
             list
         };
-        if let Node::List { items, .. } = &mut node.node {
-            if items.len() >= 2 && !node.is {
-                items.pop();
+        if let Node::List { init, last, .. } = &mut node.node {
+            // A list of >= 2 statements whose tail is not state-changing drops that tail.
+            if init.is_empty() || node.is {
+                init.push(std::mem::replace(&mut **last, instr.node));
+            } else {
+                **last = instr.node;
             }
-            items.push(instr.node);
         }
         node.ic = instr.lc;
         node.is = instr.ls;
@@ -488,7 +490,8 @@ impl<'a> Parser<'a> {
                     args.push(self.parse_instr_list()?);
                 }
                 self.expect(b')')?;
-                let def = lookup_func(&name).expect("lexer only emits Tok::Func for known names");
+                let def = lookup_func(&name)
+                    .ok_or_else(|| self.err_at(at, format!("unknown function \"{name}\"")))?;
                 self.func(def, &name, args, at)
             }
             Tok::Gmem => {
@@ -590,8 +593,8 @@ impl<'a> Parser<'a> {
                     args.push(self.ns_expr(0)?);
                 }
                 self.expect(b')')?;
-                let def =
-                    lookup_func_ns(&name).expect("lexer only emits Tok::Func for known names");
+                let def = lookup_func_ns(&name)
+                    .ok_or_else(|| self.err_at(at, format!("unknown function \"{name}\"")))?;
                 self.func(def, &name, args, at)
             }
             Tok::Ch(b'(') => {

@@ -291,7 +291,7 @@ pub struct WavePoint {
 
 /// One evaluated custom wave (`CWave`). `points.len()` is the `samples` actually produced
 /// (<= 512). Spectrum / `sep` / smoothing / scaling are the engine's job (see
-/// [`crate::wavegen::custom_wave_values`]).
+/// [`crate::wavegen::custom_wave_values_into`]).
 #[derive(Clone, Debug, Default)]
 pub struct CustomWave {
     /// The evaluated points.

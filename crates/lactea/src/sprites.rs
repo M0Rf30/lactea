@@ -98,7 +98,7 @@ impl Vars {
 }
 
 /// `min(hi, max(lo, v))` with C's `fminf` / `fmaxf` NaN behaviour (a NaN becomes `lo`).
-fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
+pub(crate) fn clampf(v: f32, lo: f32, hi: f32) -> f32 {
     hi.min(lo.max(v))
 }
 

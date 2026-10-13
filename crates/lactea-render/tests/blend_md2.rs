@@ -11,17 +11,10 @@ use lactea_render::{
     BlurParams, Compat, CompiledShader, FrameInput, Md2Blend, Md2OldPass, RenderConfig, Renderer,
     ShaderExt,
 };
+use lactea_testutil::{gpu_or_skip, quiet_input};
 
 const W: u32 = 64;
 const H: u32 = 48;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
 
 fn cfg() -> RenderConfig {
     RenderConfig {
@@ -47,18 +40,6 @@ fn const_shader(r: f32, g: f32, b: f32, blur: u8) -> CompiledShader {
         },
         folds: Vec::new(),
     }
-}
-
-fn quiet_input() -> FrameInput {
-    let mut f = FrameInput::default();
-    f.post.decay = 1.0;
-    f.post.gamma = 1.0;
-    f.post.wrap = false;
-    f.main_wave.rgba[3] = 0.0;
-    f.mv.rgba[3] = 0.0;
-    f.borders.ob_rgba[3] = 0.0;
-    f.borders.ib_rgba[3] = 0.0;
-    f
 }
 
 /// Vertex alpha by mesh column: 0 left of column 8, 128 on it, 255 right of it (17 x 13 vertices).
@@ -106,14 +87,7 @@ fn pixel(img: &[u8], x: u32, y: u32) -> [u8; 3] {
 /// injected mid-grey).
 #[test]
 fn warp_pass_pairs_follow_the_vertex_alpha() {
-    let Some((device, queue)) = gpu() else {
-        assert!(
-            std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-            "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-        );
-        eprintln!("SKIP: no wgpu adapter");
-        return;
-    };
+    let (device, queue) = gpu_or_skip!();
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let grey = vec![128u8; (W * H * 4) as usize];
     let target = device.create_texture(&wgpu::TextureDescriptor {
@@ -204,14 +178,7 @@ fn warp_pass_pairs_follow_the_vertex_alpha() {
 /// (`set_old_shader_state(None)`, the end of a blend) drops both.
 #[test]
 fn old_shaders_are_kept_and_count_for_blur_levels() {
-    let Some((device, queue)) = gpu() else {
-        assert!(
-            std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-            "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-        );
-        eprintln!("SKIP: no wgpu adapter");
-        return;
-    };
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg()).unwrap();
     r.set_comp_shader(Some(const_shader(1.0, 1.0, 1.0, 2)))
         .unwrap();

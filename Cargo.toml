@@ -13,7 +13,9 @@ members = [
     "crates/lactea",
     "crates/lactea-cli",
     "crates/lactea-capi",
+    "crates/lactea-host",
     "crates/lactea-app",
+    "crates/lactea-testutil",
 ]
 
 [workspace.package]
@@ -35,18 +37,20 @@ lactea-jpeg = { path = "crates/lactea-jpeg", version = "0.1.2" }
 lactea-render = { path = "crates/lactea-render", version = "0.1.2" }
 lactea-compare = { path = "crates/lactea-compare", version = "0.1.2" }
 lactea = { path = "crates/lactea", version = "0.1.2" }
+lactea-host = { path = "crates/lactea-host", version = "0.1.2" }
+lactea-testutil = { path = "crates/lactea-testutil" }
 
-wgpu = "30"
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl"] }
 naga = "30"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+log = "0.4"
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 clap = { version = "4", features = ["derive"] }
 pollster = "1"
-rustfft = "6"
 cc = "1"
 insta = "1"
 proptest = "1"
@@ -55,4 +59,6 @@ proptest = "1"
 opt-level = 2
 
 [profile.release]
-debug = 1
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

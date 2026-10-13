@@ -66,19 +66,42 @@ fn expo_len(b: &[u8], i: usize) -> usize {
     0
 }
 
-/// `strtoul(.., 16)` on a 64-bit `unsigned long` (projectm-eval); saturates at `ULONG_MAX`.
-fn strtoul16(digits: &[u8]) -> f64 {
+/// `isspace` in the C locale.
+pub(crate) fn is_space(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
+
+/// Leading hex digits of `s` as `strtoul(.., 16)` reads them: the value saturated at `max`, whether
+/// it saturated, and the number of digits consumed.
+pub(crate) fn hex_prefix(s: &[u8], max: u64) -> (u64, bool, usize) {
     let mut v: u64 = 0;
-    for &d in digits {
-        let n = (d as char)
-            .to_digit(16)
-            .expect("caller passes only ASCII hex digits") as u64;
-        match v.checked_mul(16).and_then(|x| x.checked_add(n)) {
-            Some(x) => v = x,
-            None => return u64::MAX as f64,
+    let mut over = false;
+    let mut used = 0;
+    for &d in s {
+        let Some(n) = (d as char).to_digit(16) else {
+            break;
+        };
+        used += 1;
+        if !over {
+            match v
+                .checked_mul(16)
+                .and_then(|x| x.checked_add(u64::from(n)))
+                .filter(|&x| x <= max)
+            {
+                Some(x) => v = x,
+                None => {
+                    v = max;
+                    over = true;
+                }
+            }
         }
     }
-    v as f64
+    (v, over, used)
+}
+
+/// `strtoul(.., 16)` on a 64-bit `unsigned long` (projectm-eval); saturates at `ULONG_MAX`.
+fn strtoul16(digits: &[u8]) -> f64 {
+    hex_prefix(digits, u64::MAX).0 as f64
 }
 
 /// Length of the ns-eel2 scanner's decimal literal at `i` (`[0-9]*\.[0-9]*([eE][0-9]*)?`, which
@@ -276,14 +299,12 @@ pub(crate) fn lex(src: &str, ns: bool) -> Vec<Token> {
                     push!(Tok::Undef(b'.'), start, 1);
                     i += 1;
                 } else {
-                    // Every numeric literal, integers included, is parsed as a C `atof` would
-                    // (projectm-eval's `FLOAT` rule also matches plain digit strings), so large
-                    // integers lose precision instead of wrapping like `atoi`.
-                    let text = &src.as_bytes()[start..end];
-                    let v = std::str::from_utf8(text)
-                        .expect("literal scanned from ASCII digits, '.', 'e' and sign")
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
+                    // Every numeric literal, integers included, is a C `atof`: projectM's vendored
+                    // projectm-eval `Scanner.l` defines `FLOAT = ({DIGIT}+|...){EXPO}?`, which matches plain
+                    // digit strings and precedes `INT`, so its `atoi` rule never fires (newer projectm-eval
+                    // releases route them to `atoi`; the eel oracle patches that back, `docs/eel.md`).
+                    // Large integers therefore lose precision instead of wrapping.
+                    let v = src[start..end].parse::<f64>().unwrap_or(0.0);
                     push!(Tok::Num(v), start, end - start);
                     i = end;
                 }

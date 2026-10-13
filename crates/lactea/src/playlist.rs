@@ -8,7 +8,8 @@
 //! and *preset load* events.
 //!
 //! What it does not do: touch the filesystem or the engine. Scanning directories (`add_path`) is the
-//! host's job (the app has `scan_dir`; feed the result to [`Playlist::add_presets`]); loading is a
+//! host's job (`lactea_host::PlaylistFs::add_path` / `insert_path`, or feed any list to
+//! [`Playlist::add_presets`]); loading is a
 //! closure the host passes to the `play_*` methods ([`Playlist::play_next`] ...), which either loads
 //! the preset (`Ok`) or reports why it could not (`Err(message)`); that is the equivalent of
 //! `projectm_playlist_set_preset_load_event_callback` plus projectM's failure event.

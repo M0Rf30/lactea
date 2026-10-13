@@ -35,12 +35,12 @@ pub struct WaveGeom {
 }
 
 /// `RenderFrame`: scale (`fWaveScale/128`) and IIR-smooth the raw 576-sample waveform.
-pub fn prepare_main_waveform(mw: &MainWave) -> (Vec<f32>, Vec<f32>) {
+pub fn prepare_main_waveform(mw: &MainWave) -> ([f32; NUM_WAVE_INPUT], [f32; NUM_WAVE_INPUT]) {
     let scale = mw.scale / 128.0;
     let mix2 = mw.smoothing;
     let mix1 = scale * (1.0 - mix2);
-    let process = |src: &[f32]| -> Vec<f32> {
-        let mut w = vec![0.0f32; NUM_WAVE_INPUT];
+    let process = |src: &[f32]| -> [f32; NUM_WAVE_INPUT] {
+        let mut w = [0.0f32; NUM_WAVE_INPUT];
         for (d, s) in w.iter_mut().zip(src.iter()) {
             *d = *s;
         }
@@ -53,9 +53,72 @@ pub fn prepare_main_waveform(mw: &MainWave) -> (Vec<f32>, Vec<f32>) {
     (process(&mw.wave[0]), process(&mw.wave[1]))
 }
 
+/// `DrawWave`'s alpha tail: optional volume modulation, then clamp to 0..1.
+pub(crate) fn finish_alpha(mw: &MainWave, imm_rel: [f32; 3], alpha: f32) -> f32 {
+    let a = if mw.mod_alpha_by_volume {
+        alpha * volume_alpha_mod(mw, imm_rel)
+    } else {
+        alpha
+    };
+    a.clamp(0.0, 1.0)
+}
+
+/// Wave modes 0, 1 and 4 wrap `wave_mystery` outside `[-1, 1]` into that range; the other modes use it as is.
+pub(crate) fn wrap_param2(mode: i32, param: f32) -> f32 {
+    if matches!(mode, 0 | 1 | 4) && (param < -1.0 || param > 1.0) {
+        let q = param * 0.5 + 0.5;
+        (q - q.floor()).abs() * 2.0 - 1.0
+    } else {
+        param
+    }
+}
+
+/// Alpha gain of the texture-width table shared by the spiro / explosive modes (1 for other widths).
+pub(crate) fn size_gain(tex_w: u32) -> f32 {
+    match tex_w {
+        256 => 0.07,
+        512 => 0.09,
+        1024 => 0.11,
+        2048 => 0.13,
+        _ => 1.0,
+    }
+}
+
+/// Vertices of one strip along the clipped line `(ex, ey)` (the "angled line" helper of modes 6..11): `n` points
+/// from the first edge towards the second one (the far end is never reached), displaced along the perpendicular by
+/// `amp(i)`; `x_off` shifts the whole strip in x after clipping (MD3 mode 11).
+pub(crate) fn line_strip(
+    ex: [f32; 2],
+    ey: [f32; 2],
+    n: usize,
+    x_off: f32,
+    amp: impl Fn(usize) -> f32,
+) -> Vec<[f32; 2]> {
+    let dx = (ex[1] - ex[0]) / n as f32;
+    let dy = (ey[1] - ey[0]) / n as f32;
+    let ang2 = dy.atan2(dx);
+    let perp_dx = (ang2 + 1.57).cos();
+    let perp_dy = (ang2 + 1.57).sin();
+    (0..n)
+        .map(|i| {
+            let a = amp(i);
+            [
+                ex[0] + x_off + dx * i as f32 + perp_dx * a,
+                ey[0] + dy * i as f32 + perp_dy * a,
+            ]
+        })
+        .collect()
+}
+
+/// MD2's `alpha *= (vol - start) / (end - start)`. A zero-width band is a step at `start` (the C division yields
+/// `+-inf` / NaN, which the following clamp turns into 0 / 1 or keeps as NaN).
 pub(crate) fn volume_alpha_mod(mw: &MainWave, imm_rel: [f32; 3]) -> f32 {
-    ((imm_rel[0] + imm_rel[1] + imm_rel[2]) * 0.333 - mw.mod_alpha_start)
-        / (mw.mod_alpha_end - mw.mod_alpha_start)
+    let above = (imm_rel[0] + imm_rel[1] + imm_rel[2]) * 0.333 - mw.mod_alpha_start;
+    let width = mw.mod_alpha_end - mw.mod_alpha_start;
+    if width == 0.0 {
+        return if above > 0.0 { 1.0 } else { 0.0 };
+    }
+    above / width
 }
 
 /// `DrawWave`'s colour: `wave_r/g/b` clamped to 0..1, then "maximize colour" (`wave_brighten`) divides by the largest
@@ -181,6 +244,9 @@ pub fn main_wave_geometry_raw(
     blending: bool,
 ) -> Option<WaveGeom> {
     let (asp_x, asp_y) = aspect;
+    if wl.len() < NUM_WAVE_INPUT || wr.len() < NUM_WAVE_INPUT {
+        return None;
+    }
     let fl = wl;
     let fr = wr;
 
@@ -198,41 +264,18 @@ pub fn main_wave_geometry_raw(
     let mut brk: Option<usize> = None;
     let mut sample_offset = 0usize;
 
-    let mut param2 = mw.mystery;
-    if matches!(wave, 0 | 1 | 4) && (param2 < -1.0 || param2 > 1.0) {
-        param2 = param2 * 0.5 + 0.5;
-        param2 -= param2.floor();
-        param2 = param2.abs();
-        param2 = param2 * 2.0 - 1.0;
-    }
+    let param2 = wrap_param2(wave, mw.mystery);
 
     let mut alpha = mw.rgba[3];
     let mut v: Vec<[f32; 2]> = Vec::new();
-
-    let apply_vol = |alpha: f32| -> f32 {
-        if mw.mod_alpha_by_volume {
-            alpha * volume_alpha_mod(mw, imm_rel)
-        } else {
-            alpha
-        }
-    };
-    let size_alpha_mul = |alpha: f32| -> f32 {
-        match tex_w {
-            256 => alpha * 0.07,
-            512 => alpha * 0.09,
-            1024 => alpha * 0.11,
-            2048 => alpha * 0.13,
-            _ => alpha,
-        }
-    };
+    let finish = |alpha: f32| finish_alpha(mw, imm_rel, alpha);
 
     match wave {
         0 => {
             // circular wave
             n_verts /= 2;
             sample_offset = (NUM_WAVEFORM_SAMPLES - n_verts) / 2;
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha);
             let inv = 1.0 / (n_verts as f32 - 1.0);
             v.resize(n_verts, [0.0; 2]);
             for i in 0..n_verts {
@@ -262,9 +305,7 @@ pub fn main_wave_geometry_raw(
         }
         1 => {
             // x-y oscillator in a spiral, in time
-            alpha *= 1.25;
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha * 1.25);
             n_verts /= 2;
             v.resize(n_verts, [0.0; 2]);
             for i in 0..n_verts {
@@ -278,9 +319,7 @@ pub fn main_wave_geometry_raw(
         }
         2 => {
             // centered spiro (constant faint alpha)
-            alpha = size_alpha_mul(alpha);
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha * size_gain(tex_w));
             v.resize(n_verts, [0.0; 2]);
             for i in 0..n_verts {
                 v[i] = [fr[i] * asp_y + pos_x, fl[i + 32] * asp_x + pos_y];
@@ -297,8 +336,7 @@ pub fn main_wave_geometry_raw(
             };
             alpha *= 1.3;
             alpha *= treble_rel.powf(2.0);
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha);
             v.resize(n_verts, [0.0; 2]);
             for i in 0..n_verts {
                 v[i] = [fr[i] * asp_y + pos_x, fl[i + 32] * asp_x + pos_y];
@@ -311,8 +349,7 @@ pub fn main_wave_geometry_raw(
                 n_verts = cap;
             }
             sample_offset = (NUM_WAVEFORM_SAMPLES - n_verts) / 2;
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha);
             let w1 = 0.45 + 0.5 * (param2 * 0.5 + 0.5);
             let w2 = 1.0 - w1;
             let inv = 1.0 / n_verts as f32;
@@ -329,9 +366,7 @@ pub fn main_wave_geometry_raw(
         }
         5 => {
             // weird explosive complex-number thingy
-            alpha = size_alpha_mul(alpha);
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha * size_gain(tex_w));
             let cos_rot = (time * 0.3).cos();
             let sin_rot = (time * 0.3).sin();
             v.resize(n_verts, [0.0; 2]);
@@ -355,60 +390,32 @@ pub fn main_wave_geometry_raw(
             } else {
                 sample_offset = (NUM_WAVEFORM_SAMPLES - n_verts) / 2;
             }
-            alpha = apply_vol(alpha);
-            alpha = alpha.clamp(0.0, 1.0);
+            alpha = finish(alpha);
 
-            let ang = 1.57 * param2;
-            let (ex, ey) = line_edges(pos_x, ang);
-            let dx = (ex[1] - ex[0]) / n_verts as f32;
-            let dy = (ey[1] - ey[0]) / n_verts as f32;
-            let ang2 = dy.atan2(dx);
-            let perp_dx = (ang2 + 1.57).cos();
-            let perp_dy = (ang2 + 1.57).sin();
-
-            if wave == 6 {
-                v.resize(n_verts, [0.0; 2]);
-                for i in 0..n_verts {
-                    let s = (fl[i + sample_offset] + fr[i + sample_offset]) * 0.5;
-                    v[i] = [
-                        ex[0] + dx * i as f32 + perp_dx * 0.25 * s,
-                        ey[0] + dy * i as f32 + perp_dy * 0.25 * s,
-                    ];
+            let (ex, ey) = line_edges(pos_x, 1.57 * param2);
+            let so = sample_offset;
+            v = match wave {
+                6 => line_strip(ex, ey, n_verts, 0.0, |i| {
+                    0.25 * ((fl[i + so] + fr[i + so]) * 0.5)
+                }),
+                8 => line_strip(ex, ey, n_verts, 0.0, |i| {
+                    0.1 * ((spec_l.get(i * 2).copied().unwrap_or(0.0)
+                        + spec_l.get(i * 2 + 1).copied().unwrap_or(0.0)
+                        + spec_r.get(i * 2).copied().unwrap_or(0.0)
+                        + spec_r.get(i * 2 + 1).copied().unwrap_or(0.0))
+                        * 0.5)
+                        .ln()
+                }),
+                _ => {
+                    let sep = (pos_y * 0.5 + 0.5).powf(2.0);
+                    let mut a = line_strip(ex, ey, n_verts, 0.0, |i| 0.25 * fl[i + so] + sep);
+                    a.extend(line_strip(ex, ey, n_verts, 0.0, |i| {
+                        0.25 * fr[i + so] - sep
+                    }));
+                    brk = Some(n_verts);
+                    a
                 }
-            } else if wave == 8 {
-                v.resize(n_verts, [0.0; 2]);
-                for i in 0..n_verts {
-                    let f = 0.1
-                        * ((spec_l.get(i * 2).copied().unwrap_or(0.0)
-                            + spec_l.get(i * 2 + 1).copied().unwrap_or(0.0)
-                            + spec_r.get(i * 2).copied().unwrap_or(0.0)
-                            + spec_r.get(i * 2 + 1).copied().unwrap_or(0.0))
-                            * 0.5)
-                            .ln();
-                    v[i] = [
-                        ex[0] + dx * i as f32 + perp_dx * f,
-                        ey[0] + dy * i as f32 + perp_dy * f,
-                    ];
-                }
-            } else {
-                let sep = (pos_y * 0.5 + 0.5).powf(2.0);
-                v.resize(n_verts * 2, [0.0; 2]);
-                for i in 0..n_verts {
-                    let s = 0.25 * fl[i + sample_offset] + sep;
-                    v[i] = [
-                        ex[0] + dx * i as f32 + perp_dx * s,
-                        ey[0] + dy * i as f32 + perp_dy * s,
-                    ];
-                }
-                for i in 0..n_verts {
-                    let s = 0.25 * fr[i + sample_offset] - sep;
-                    v[i + n_verts] = [
-                        ex[0] + dx * i as f32 + perp_dx * s,
-                        ey[0] + dy * i as f32 + perp_dy * s,
-                    ];
-                }
-                brk = Some(n_verts);
-            }
+            };
         }
         _ => return None,
     }
@@ -463,6 +470,13 @@ pub struct PmWaveGeom {
 /// keep the previous frame's smoothed values as their "input" (`s[i] = s[i]*mix1 + s[i-1]*mix2` with the old `s[i]`).
 /// Modes that read `buf[i + 32]` for `i >= 448` (1, 2, 3, 5, 12, 15, ...) see that state. Zero at preset load.
 pub type PmWaveTail = [[f32; PM_WAVE_POINTS - NUM_WAVEFORM_SAMPLES]; 2];
+
+/// Reusable vertex buffers of [`main_wave_geometry_projectm`] (contents are overwritten every call).
+#[derive(Default)]
+pub struct PmWaveScratch {
+    w1: Vec<[f32; 2]>,
+    w2: Vec<[f32; 2]>,
+}
 
 /// `WaveformMath::GetVertices`' sample preparation: copy, scale by `scale/128`, IIR smoothing over 512 slots.
 ///
@@ -566,6 +580,7 @@ pub fn main_wave_geometry_projectm(
     bass_mid_treb: [f32; 3],
     viewport: (u32, u32),
     tail: &mut PmWaveTail,
+    scratch: &mut PmWaveScratch,
 ) -> Option<PmWaveGeom> {
     let mode = mw.mode;
     if !(0..PM_WAVE_MODES).contains(&mode) {
@@ -581,18 +596,13 @@ pub fn main_wave_geometry_projectm(
     }
     let wave_x = 2.0 * mw.x - 1.0;
     let wave_y = 2.0 * mw.y - 1.0;
-    let mut myst = mw.mystery;
-    if matches!(mode, 0 | 1 | 4) && (myst < -1.0 || myst > 1.0) {
-        myst = myst * 0.5 + 0.5;
-        myst -= myst.floor();
-        myst = myst.abs();
-        myst = myst * 2.0 - 1.0;
-    }
+    let myst = wrap_param2(mode, mw.mystery);
     let vp3 = viewport.0 / 3;
     // samples for the line-like modes: 240, divided by 3 when above viewport_x / 3
     let line_samples = |base: usize| -> usize { if base as u32 > vp3 { base / 3 } else { base } };
-    let mut w1: Vec<[f32; 2]> = Vec::new();
-    let mut w2: Vec<[f32; 2]> = Vec::new();
+    let (w1, w2) = (&mut scratch.w1, &mut scratch.w2);
+    w1.clear();
+    w2.clear();
     let n; // m_samples (the smoothing uses it for the point count)
     let mut is_loop = false;
 
@@ -823,7 +833,7 @@ pub fn main_wave_geometry_projectm(
             smooth_wave(&v[..n.min(v.len())])
         }
     };
-    let strips: Vec<Vec<[f32; 2]>> = [smooth(&w1), smooth(&w2)]
+    let strips: Vec<Vec<[f32; 2]>> = [smooth(&w1[..]), smooth(&w2[..])]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
@@ -833,10 +843,10 @@ pub fn main_wave_geometry_projectm(
     if mw.brighten {
         let max = cr.max(cg).max(cb);
         if max > 0.01 {
-            // fMaximizeWaveColorAmount = 1: `c / max * 1 + c * (1 - 1)`
-            cr = cr / max + cr * 0.0;
-            cg = cg / max + cg * 0.0;
-            cb = cb / max + cb * 0.0;
+            // fMaximizeWaveColorAmount = 1: `c / max * 1 + c * (1 - 1)`, the second term is exactly 0
+            cr /= max;
+            cg /= max;
+            cb /= max;
         }
     }
     Some(PmWaveGeom {
@@ -849,16 +859,25 @@ pub fn main_wave_geometry_projectm(
 
 /// `SmoothWave`: "better-than-linear" smoothing, roughly doubles the vertex count.
 pub fn smooth_wave(vi: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut out = Vec::new();
+    smooth_wave_into(&mut out, vi);
+    out
+}
+
+/// [`smooth_wave`] into a reusable buffer (cleared first).
+pub fn smooth_wave_into(out: &mut Vec<[f32; 2]>, vi: &[[f32; 2]]) {
+    out.clear();
     let n = vi.len();
     if n < 2 {
-        return vi.to_vec();
+        out.extend_from_slice(vi);
+        return;
     }
     const C1: f32 = -0.15;
     const C2: f32 = 1.15;
     const C3: f32 = 1.15;
     const C4: f32 = -0.15;
     let inv_sum = 1.0 / (C1 + C2 + C3 + C4);
-    let mut out = Vec::with_capacity(n * 2);
+    out.reserve(n * 2);
     let mut i_below = 0usize;
     let mut i_above2 = 1usize;
     for i in 0..n - 1 {
@@ -874,7 +893,6 @@ pub fn smooth_wave(vi: &[[f32; 2]]) -> Vec<[f32; 2]> {
         i_below = i;
     }
     out.push(vi[n - 1]);
-    out
 }
 
 /// Parameters of one custom wave's sample preparation (`CWave` fields + `fWaveScale`).
@@ -895,21 +913,26 @@ pub struct CustomWaveSampling {
 }
 
 /// Port of the sample-preparation block of `DrawCustomWaves`: resampling, forward + backward
-/// smoothing and scaling. Returns `(value1, value2)` per point for the engine's per-point code.
-/// `data1`/`data2` are `m_sound.fWaveform[0/1]` (480 valid samples) or `fSpectrum[0/1]` (512).
-pub fn custom_wave_values(p: &CustomWaveSampling, data1: &[f32], data2: &[f32]) -> Vec<[f32; 2]> {
-    let max_out = 512i32;
+/// smoothing and scaling. Fills `out` (cleared first) with `(value1, value2)` per point for the engine's per-point
+/// code. `data1`/`data2` are `m_sound.fWaveform[0/1]` (480 valid samples) or `fSpectrum[0/1]` (512).
+pub fn custom_wave_values_into(
+    out: &mut Vec<[f32; 2]>,
+    p: &CustomWaveSampling,
+    data1: &[f32],
+    data2: &[f32],
+) {
+    const MAX_OUT: usize = 512;
+    out.clear();
     let max_in = if p.spectrum {
         512
     } else {
         NUM_WAVEFORM_SAMPLES as i32
     };
-    let n = max_out.min(p.samples.max(0));
-    let separator = (n - 1).min(p.sep.max(0));
-    let use_dots_ok = n >= 1;
-    if n < 2 && !use_dots_ok {
-        return Vec::new();
+    let n = (MAX_OUT as i32).min(p.samples.max(0));
+    if n < 1 {
+        return;
     }
+    let separator = (n - 1).min(p.sep.max(0));
     let n = n as usize;
     let mult = (if p.spectrum { 0.15 } else { 0.004 }) * p.scaling * p.wave_scale;
     let mut sample_scale = 1.0f32;
@@ -921,8 +944,8 @@ pub fn custom_wave_values(p: &CustomWaveSampling, data1: &[f32], data2: &[f32]) 
     let mix1 = (p.smoothing * 0.98).powf(0.5);
     let mix2 = 1.0 - mix1;
     let at = |d: &[f32], i: usize| d.get(i).copied().unwrap_or(0.0);
-    let mut t0 = vec![0.0f32; n];
-    let mut t1 = vec![0.0f32; n];
+    let mut t0 = [0.0f32; MAX_OUT];
+    let mut t1 = [0.0f32; MAX_OUT];
     t0[0] = at(data1, 0);
     t1[0] = at(data2, 0);
     for j in 1..n {
@@ -934,7 +957,7 @@ pub fn custom_wave_values(p: &CustomWaveSampling, data1: &[f32], data2: &[f32]) 
         t0[j] = t0[j] * mix2 + t0[j + 1] * mix1;
         t1[j] = t1[j] * mix2 + t1[j + 1] * mix1;
     }
-    (0..n).map(|j| [t0[j] * mult, t1[j] * mult]).collect()
+    out.extend((0..n).map(|j| [t0[j] * mult, t1[j] * mult]));
 }
 
 #[cfg(test)]
@@ -1197,7 +1220,8 @@ mod tests {
             wave_scale: 1.0,
         };
         let d = vec![100.0f32; 480];
-        let v = custom_wave_values(&p, &d, &d);
+        let mut v = Vec::new();
+        custom_wave_values_into(&mut v, &p, &d, &d);
         assert_eq!(v.len(), 64);
         // constant input -> constant output = 100 * 0.004
         assert!(v.iter().all(|x| (x[0] - 0.4).abs() < 1e-4));
@@ -1205,7 +1229,8 @@ mod tests {
             samples: 1,
             ..p.clone()
         };
-        assert!(custom_wave_values(&p2, &d, &d).len() <= 1);
+        custom_wave_values_into(&mut v, &p2, &d, &d);
+        assert!(v.len() <= 1);
     }
 
     // ---- projectM main waveform (Waveforms/*.cpp) ------------------------------------------------
@@ -1223,8 +1248,15 @@ mod tests {
     }
 
     fn pm(mw: &MainWave) -> PmWaveGeom {
-        main_wave_geometry_projectm(mw, 1.25, [1.0; 3], (640, 360), &mut PmWaveTail::default())
-            .unwrap()
+        main_wave_geometry_projectm(
+            mw,
+            1.25,
+            [1.0; 3],
+            (640, 360),
+            &mut PmWaveTail::default(),
+            &mut PmWaveScratch::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1258,6 +1290,7 @@ mod tests {
             [1.0; 3],
             (1920, 1080),
             &mut PmWaveTail::default(),
+            &mut PmWaveScratch::default(),
         )
         .unwrap();
         assert_eq!(g.strips[0].len(), 479);
@@ -1267,6 +1300,7 @@ mod tests {
             [1.0; 3],
             (1920, 1080),
             &mut PmWaveTail::default(),
+            &mut PmWaveScratch::default(),
         )
         .unwrap();
         assert_eq!(g.strips[0].len(), 959);
@@ -1276,7 +1310,8 @@ mod tests {
                 0.0,
                 [1.0; 3],
                 (640, 360),
-                &mut PmWaveTail::default()
+                &mut PmWaveTail::default(),
+                &mut PmWaveScratch::default()
             )
             .is_none()
         );
@@ -1324,8 +1359,11 @@ mod tests {
         mw.smoothing = 0.5;
         mw.scale = 128.0;
         let mut tail = PmWaveTail::default();
-        let a = main_wave_geometry_projectm(&mw, 0.0, [1.0; 3], (640, 360), &mut tail).unwrap();
-        let b = main_wave_geometry_projectm(&mw, 0.0, [1.0; 3], (640, 360), &mut tail).unwrap();
+        let mut sc = PmWaveScratch::default();
+        let a = main_wave_geometry_projectm(&mw, 0.0, [1.0; 3], (640, 360), &mut tail, &mut sc)
+            .unwrap();
+        let b = main_wave_geometry_projectm(&mw, 0.0, [1.0; 3], (640, 360), &mut tail, &mut sc)
+            .unwrap();
         let last = a.strips[0].len() - 1;
         assert_ne!(a.strips[0][last], b.strips[0][last]);
         assert_eq!(a.strips[0][0], b.strips[0][0]);
@@ -1359,9 +1397,16 @@ mod tests {
     #[test]
     fn pm_alpha_rules() {
         let tre = |mw: &MainWave, vp: (u32, u32), bmt: [f32; 3]| {
-            main_wave_geometry_projectm(mw, 0.0, bmt, vp, &mut PmWaveTail::default())
-                .unwrap()
-                .alpha
+            main_wave_geometry_projectm(
+                mw,
+                0.0,
+                bmt,
+                vp,
+                &mut PmWaveTail::default(),
+                &mut PmWaveScratch::default(),
+            )
+            .unwrap()
+            .alpha
         };
         // centered spiro / hash: texsize factor with `<=` thresholds (640 -> 0.11, 256 -> 0.07, 4096 -> 0.15)
         let m = pm_wave(2);

@@ -14,10 +14,12 @@
 #![warn(missing_docs)]
 
 mod align;
+mod beatdrop;
 mod fft;
 mod md3;
 
 use align::Aligner;
+pub use beatdrop::{BeatDropShaderFft, SHADER_FFT_BINS, SHADER_FFT_WINDOW, SHADER_WAVE_SAMPLES};
 use fft::{Fft, FftStyle};
 pub use md3::{ShaderFft, md3_spectrum};
 
@@ -223,11 +225,13 @@ impl Analyzer {
 
     /// Set the linear gain applied to the 8-bit quantised waveform of every
     /// [`AnalysisMode::Md3`] update, before the alignment and the analysis. It is used as given
-    /// (no clamping, so the waveform may exceed +-128; the value must be finite) and does not
-    /// recover clipped peaks. Ignored by [`AnalysisMode::ProjectM`] and
+    /// (no clamping, so the waveform may exceed +-128) and does not recover clipped peaks. A
+    /// non-finite value is ignored (the previous gain stays). Ignored by [`AnalysisMode::ProjectM`] and
     /// [`AnalysisMode::BeatDrop`].
     pub fn set_volume_sensitivity(&mut self, s: f32) {
-        self.volume_sensitivity = s;
+        if s.is_finite() {
+            self.volume_sensitivity = s;
+        }
     }
 
     /// Append interleaved float PCM (-1..1) (`projectm_pcm_add_float`).  Channel 0 is left,
@@ -272,7 +276,15 @@ impl Analyzer {
         let quantise = self.mode == AnalysisMode::Md3;
         let conv = |s: T| {
             let v = PCM_SCALE * (s.into() - offset) / amplitude;
-            if quantise { md3::quantise_i8(v) } else { v }
+            if quantise {
+                // MD3's capture saturates an infinite sample and turns a NaN into 0
+                md3::quantise_i8(v)
+            } else if v.is_finite() {
+                v
+            } else {
+                // a NaN / infinite sample would poison the averages for good
+                0.0
+            }
         };
         for i in 0..count {
             let off = (self.start + i) % WAVE_BUF;
@@ -301,9 +313,9 @@ impl Analyzer {
         // 1. snapshot the ring, oldest sample first
         let mut wave = [[0.0f32; WAVE_BUF]; 2];
         for (w, ring) in wave.iter_mut().zip(&self.ring) {
-            for (i, v) in w.iter_mut().enumerate() {
-                *v = ring[(self.start + i) % WAVE_BUF];
-            }
+            let (tail, head) = w.split_at_mut(WAVE_BUF - self.start);
+            tail.copy_from_slice(&ring[self.start..]);
+            head.copy_from_slice(&ring[..self.start]);
         }
         // 1b. Md3 (`AnalyzeNewSound`, then `AlignWaves`, then the analysis): the gain applies
         // to the already quantised samples and the alignment precedes the spectra
@@ -415,7 +427,7 @@ impl Analyzer {
         o.treb_att = self.bands[2].avg_rel;
         o.vol = (o.bass + o.mid + o.treb) * 0.333f32;
         o.vol_att = (o.bass_att + o.mid_att + o.treb_att) * 0.333f32;
-        self.frame_no += 1;
+        self.frame_no = self.frame_no.saturating_add(1);
         &self.out
     }
 }

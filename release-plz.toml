@@ -12,6 +12,13 @@ git_release_enable = false
 git_tag_enable = false
 publish_allow_dirty = false
 semver_check = false
+# The squash merge uses the PR body as the commit body: keep it to the `lactea` changelog entry.
+pr_body = """
+{%- for release in releases %}{% if release.package == "lactea" %}Release v{{ release.next_version }}.
+{% if release.changelog %}
+{{ release.changelog }}
+{% endif %}{% endif %}{% endfor -%}
+"""
 
 [[package]]
 name = "lactea"

@@ -13,4 +13,5 @@ Primary:
 | `fdregress.py` | compare two corpus reports (per-stage PSNR regressions) |
 | `corpus_run.py`, `corpus_report.py`, `corpus_sample.py` | whole-corpus run, bucketed report, seeded sample |
 | `release_package.sh` | packages a release archive (used by the release workflow) |
+| `release_notes.sh` | prints a tag's `CHANGELOG.md` section as GitHub release notes (used by the release workflow) |
 | `probes/gen_*.py` | regenerate the one-feature probe presets and lists in `probes/` |

@@ -691,8 +691,14 @@ fn padded_bytes_per_row(row_bytes: u32) -> u32 {
     row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
 }
 
+/// Whether a GPU buffer can be mapped and waited for inside a call. WebGPU maps buffers only once control returns
+/// to the browser's event loop, so such a wait never completes there: the web build reads nothing back and the
+/// motion vector pass uses the CPU port of the warp formula (`cpu_warp_uv`) instead of the GPU's own UVs.
+pub(crate) const SYNC_READBACK: bool = cfg!(not(target_arch = "wasm32"));
+
 /// Read an `Rgba8Unorm`-sized (4 bytes per texel) `w` x `h` texture back as tightly packed RGBA8 (row 0 = top).
-/// Submits its own copy and waits for it, so the frame's command buffers must have been submitted.
+/// Submits its own copy and waits for it, so the frame's command buffers must have been submitted. Always an error
+/// on the web ([`SYNC_READBACK`]).
 pub fn readback_rgba8(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -700,6 +706,11 @@ pub fn readback_rgba8(
     w: u32,
     h: u32,
 ) -> Result<Vec<u8>, RenderError> {
+    if !SYNC_READBACK {
+        return Err(RenderError::Readback(
+            "synchronous GPU readback is not available on the web".to_owned(),
+        ));
+    }
     let bpr = padded_bytes_per_row(w * 4);
     let buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),

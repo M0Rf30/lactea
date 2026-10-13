@@ -1,0 +1,63 @@
+name: pages
+
+# The browser host (examples/web) on GitHub Pages. Needs Settings → Pages → Source: GitHub Actions.
+# Presets: only what is committed under examples/web/presets/ (if present) is deployed; otherwise the page
+# plays its two built-in presets and visitors drop their own files.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/web
+      # release-plz refreshes only the root Cargo.lock: re-sync the lactea path crates (see ci.yml, wasm job)
+      - run: >-
+          cargo update --manifest-path examples/web/Cargo.toml
+          -p lactea -p lactea-abi -p lactea-audio -p lactea-eel -p lactea-hlsl -p lactea-preset -p lactea-render
+          -p lactea-host -p lactea-jpeg
+      - name: wasm-bindgen version from examples/web/Cargo.lock
+        id: wb
+        run: echo "version=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' examples/web/Cargo.lock)" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ steps.wb.outputs.version }}
+      - name: build
+        run: |
+          if [ -d examples/web/presets ]; then export PRESETS="$PWD/examples/web/presets"; fi
+          examples/web/build.sh
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: examples/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

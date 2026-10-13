@@ -56,7 +56,7 @@ impl Renderer {
                 0.001
             };
         if mv_visible && !(rules.mv_skip_first_frame && self.frames_since_resize == 0) {
-            let gpu_uv = if rules.warp_uv_on_gpu && self.prev_warp_gpu.is_some() {
+            let gpu_uv = if rules.warp_uv_on_gpu && SYNC_READBACK && self.prev_warp_gpu.is_some() {
                 self.gpu_warp_vertex_uv().ok()
             } else {
                 None
@@ -425,7 +425,7 @@ impl Renderer {
             (None, slot) => *slot = None,
         }
         // the next frame's motion vector pass reads this frame's GPU UVs: start them now if it is likely to
-        if rules.warp_uv_on_gpu && mv_visible {
+        if rules.warp_uv_on_gpu && SYNC_READBACK && mv_visible {
             self.submit_uv_readback();
         } else if let Some(rb) = &mut self.uv_readback {
             rb.pending = None;

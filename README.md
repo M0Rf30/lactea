@@ -100,23 +100,28 @@ queue.submit([enc.finish()]);
 ### WebAssembly
 
 Library crates compile for `wasm32-unknown-unknown` (`cargo check -p lactea --target
-wasm32-unknown-unknown`, covered by CI). The only native-only code, blocking on shader-validation
-error scopes in `lactea-render`, is `cfg`-gated; on the web target user shaders are not
-pre-validated by the engine (the browser reports validation errors asynchronously). Creating the
-`wgpu` device/surface, audio capture and texture loading are the host's job.
+wasm32-unknown-unknown`, covered by CI). The native-only code is `cfg`-gated: on the web target user shaders
+are not pre-validated by the engine (the browser reports validation errors asynchronously), and nothing is
+read back from the GPU synchronously (WebGPU maps buffers only between frames), so projectM-mode motion
+vectors use the CPU port of the warp formula instead of the GPU's own UVs. Creating the `wgpu`
+device/surface, audio capture and texture loading are the host's job.
 
-`examples/web` is a complete browser host: a wasm-bindgen crate (`Demo::create(canvas)`,
-`load_preset(milk, name, soft_seconds)`, `render(time, pcm)`, `snapshot(time, pcm)`) plus
-`index.html` (two presets, synthetic 120 bpm PCM or the microphone, soft/hard cut buttons). It is
-its own cargo workspace; CI runs `cargo check --locked` on it.
+`examples/web` is a complete browser host and the GitHub Pages showcase: a wasm-bindgen crate
+(`Lactea.create(canvas, sampleRate, seed)`, `load_preset(bytes, name, blend_seconds)`,
+`add_texture(file_name, bytes)`, `push_pcm(interleaved, channels)`, `render(time, frame)`) plus
+`index.html` / `main.js`: a playlist with auto-advance and soft cuts, presets and textures by drag and
+drop or file/folder picker, audio from a file, the microphone or a synthetic 120 bpm beat. It is its own
+cargo workspace; CI runs `cargo check --locked` on it and `.github/workflows/pages.yml` deploys it.
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.128   # must match examples/web/Cargo.lock
 examples/web/build.sh serve                        # http://localhost:8000/ (secure context for WebGPU)
+PRESETS=~/my-presets examples/web/build.sh         # also deploy a preset pack (dist/presets)
 ```
 
-It needs a browser with WebGPU (Chrome/Edge 113+, recent Firefox/Safari).
+Without `PRESETS` (or a committed `examples/web/presets/`) the page plays two built-in presets. It needs
+a browser with WebGPU (Chrome/Edge 113+, Safari 26+, Firefox 141+ on Windows).
 
 ### C / C++ (`lactea-capi`)
 

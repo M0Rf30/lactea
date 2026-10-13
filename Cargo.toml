@@ -19,7 +19,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -28,16 +28,16 @@ homepage = "https://github.com/M0Rf30/lactea"
 authors = ["The Lactea Authors"]
 
 [workspace.dependencies]
-lactea-abi = { path = "crates/lactea-abi", version = "0.1.2" }
-lactea-eel = { path = "crates/lactea-eel", version = "0.1.2" }
-lactea-preset = { path = "crates/lactea-preset", version = "0.1.2" }
-lactea-audio = { path = "crates/lactea-audio", version = "0.1.2" }
-lactea-hlsl = { path = "crates/lactea-hlsl", version = "0.1.2" }
-lactea-jpeg = { path = "crates/lactea-jpeg", version = "0.1.2" }
-lactea-render = { path = "crates/lactea-render", version = "0.1.2" }
-lactea-compare = { path = "crates/lactea-compare", version = "0.1.2" }
-lactea = { path = "crates/lactea", version = "0.1.2" }
-lactea-host = { path = "crates/lactea-host", version = "0.1.2" }
+lactea-abi = { path = "crates/lactea-abi", version = "0.2.0" }
+lactea-eel = { path = "crates/lactea-eel", version = "0.2.0" }
+lactea-preset = { path = "crates/lactea-preset", version = "0.2.0" }
+lactea-audio = { path = "crates/lactea-audio", version = "0.2.0" }
+lactea-hlsl = { path = "crates/lactea-hlsl", version = "0.2.0" }
+lactea-jpeg = { path = "crates/lactea-jpeg", version = "0.2.0" }
+lactea-render = { path = "crates/lactea-render", version = "0.2.0" }
+lactea-compare = { path = "crates/lactea-compare", version = "0.2.0" }
+lactea = { path = "crates/lactea", version = "0.2.0" }
+lactea-host = { path = "crates/lactea-host", version = "0.2.0" }
 lactea-testutil = { path = "crates/lactea-testutil" }
 
 wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl"] }

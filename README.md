@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://m0rf30.github.io/lactea/"><b>Live demo</b></a> ·
   <a href="#install">Install</a> ·
   <a href="#standalone">Standalone</a> ·
   <a href="#embedding">Embedding</a> ·
@@ -24,7 +25,9 @@ GL, WebGPU). It ships as:
   windows or audio devices and never touches the filesystem, so it also builds for the web;
 - **a C library** (`lactea-capi`) for non-Rust hosts, including rendering into a host `VkImage`;
 - **a standalone app** (`lactea-app`, binary `lactea`) with PipeWire "what you hear" capture, file
-  playback and preset browsing.
+  playback and preset browsing;
+- **a web demo** ([try it in your browser](https://m0rf30.github.io/lactea/), WebGPU required; see
+  [WebAssembly](#webassembly)).
 
 ## Features
 
@@ -98,6 +101,10 @@ queue.submit([enc.finish()]);
 ```
 
 ### WebAssembly
+
+**Live demo: <https://m0rf30.github.io/lactea/>** (Chrome/Edge 113+, Safari 26+, Firefox 141+ on Windows).
+Drop your own `.milk` / `.milk2` presets and textures on the page; audio comes from a file, the microphone or
+a built-in synthetic beat.
 
 Library crates compile for `wasm32-unknown-unknown` (`cargo check -p lactea --target
 wasm32-unknown-unknown`, covered by CI). The native-only code is `cfg`-gated: on the web target user shaders

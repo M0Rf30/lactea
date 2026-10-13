@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
+## [0.2.0] - 2026-10-13
+
+### Added
+
+- Audit fixes, projectM API parity, BeatDrop inputs, smaller binaries
+
+
 ### Breaking
 
 - **lactea:** `Engine::new` returns `Result<Engine, EngineError>` (it sanitises the config: mesh clamp, size and fps of at least 1); `Engine::resize` returns `Result<(), EngineError>` and `Engine::set_mesh_size` `Result<[u32; 2], EngineError>`, both keep the old size on failure

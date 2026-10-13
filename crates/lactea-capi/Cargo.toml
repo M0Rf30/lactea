@@ -1,6 +1,6 @@
 [package]
 name = "lactea-capi"
-description = "C ABI for the lactea MilkDrop engine: self-contained wgpu device, RGBA8 read-back. Header: include/lactea.h."
+description = "C ABI for the lactea MilkDrop engine: self-contained wgpu device (or the host's Vulkan device via lactea_create_vulkan), RGBA8 read-back. Header: include/lactea.h."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,12 +11,15 @@ publish = false
 name = "lactea_capi"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+# GLES backend in addition to the native ones (Vulkan / DX12 / Metal).
+gles = ["wgpu/gles"]
+
 [dependencies]
 lactea = { workspace = true }
-lactea-jpeg = { workspace = true }
+log = { workspace = true }
+lactea-host = { workspace = true }
 wgpu = { workspace = true }
-pollster = { workspace = true }
-image = { workspace = true, features = ["jpeg", "tga", "bmp"] }
 
 # Vulkan interop (`lactea_create_vulkan`): raw handles of the host's instance/device go through
 # `wgpu::hal::vulkan`, whose API is ash types. Same ash version as wgpu-hal.
@@ -25,3 +28,6 @@ ash = { version = "0.38", default-features = false }
 
 [build-dependencies]
 cbindgen = { version = "0.29", default-features = false }
+
+[dev-dependencies]
+pollster = { workspace = true }

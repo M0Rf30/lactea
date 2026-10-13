@@ -1,6 +1,7 @@
 //! The engine: preset loading and the per-frame CPU pipeline (projectM `MilkdropPreset`).
 
 use crate::cache::{MediaCache, ShaderCache};
+use crate::md2_inputs::{Md2Frame, Md2Inputs, Md2Vars};
 use crate::md3_inputs::{Md3Frame, Md3Inputs, MouseState, new_analyzer, shader_ext, state_q64};
 use crate::media::Media;
 use crate::rng::{ShaderStream, StreamRng, hue_offsets};
@@ -8,7 +9,7 @@ use crate::runtime::{
     Env, MAX_Q, NUM_Q, PerFrame, PerPixel, ShapeRt, WaveRt, compile_part, eel_dialect,
 };
 use crate::sprites::{SpriteInputs, SpriteRt};
-use crate::textures::{TextureProvider, pick_random, rand_slot};
+use crate::textures::{TextureProvider, pick_for_sampler, rand_slot};
 use crate::{
     EngineConfig, EngineError, ForcedFrame, FrameClock, PresetReport, ShaderFallback,
     ShaderOutcome, ShaderOverride, Transition, TransitionInfo,
@@ -27,14 +28,17 @@ use lactea_render::{
     PassRandom, RenderConfig, Renderer, ShapeInstance, TransitionBlender, TransitionKind,
     TransitionParams, WarpGpu, WavePoint,
 };
+use params::clamp_mesh_size;
 use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+mod blend_patterns;
 mod custom_io;
 mod md2_blend;
 use md2_blend::{BlendBase, BlendState, build_blend_frame};
 mod comp_effects;
+mod md2_host;
 mod md3_blend;
 pub use md3_blend::{
     DoubleMode, DoublePresetInfo, Md3Locks, Md3Pattern, Md3PatternInstance,
@@ -95,6 +99,8 @@ struct Loaded {
     floats: BlendBase,
     /// MD3 preset sprite (`CompatRules::md3_preset_sprites`); gone when its `done` fires or the preset is replaced.
     sprite: Option<SpriteRt>,
+    /// Interfaces of the installed shaders: what [`Engine::reload_textures`] re-resolves user textures from.
+    ifaces: Vec<ShaderInterface>,
 }
 
 /// What the last rendered frame left behind for [`Engine::frame_vars`].
@@ -107,6 +113,28 @@ struct LastFrame {
     progress: f32,
     warp: Option<PassRandom>,
     comp: Option<PassRandom>,
+    scratch: FrameScratch,
+}
+
+/// Per-frame buffers that a frame hands to the renderer and takes back ([`LastFrame::recycle`]), so steady-state
+/// frames do not allocate them.
+#[derive(Default)]
+struct FrameScratch {
+    vertex_vars: Vec<VertexVars>,
+    warp_uv: Vec<[f32; 2]>,
+    wave_values: Vec<[f32; 2]>,
+}
+
+impl LastFrame {
+    /// Take back the buffers of a rendered frame for the next one.
+    fn recycle(&mut self, fi: FrameInput) {
+        if let Some(w) = fi.warp_gpu {
+            self.scratch.vertex_vars = w.vars;
+        }
+        if let Some(uv) = fi.warp_uv {
+            self.scratch.warp_uv = uv;
+        }
+    }
 }
 
 /// A running preset together with the renderer (images, shaders, textures) it draws with: what
@@ -134,36 +162,43 @@ struct PresetClock {
     preset_time_b: f64,
     smoothing: bool,
     soft_cut: f64,
+    /// The configured display time: what a preset starts with until the host reports its sampled one.
     preset_duration: f64,
+    /// `m_presetDurationA` / `B`: the display time `progress` of the shown / incoming preset runs over.
+    duration_a: f64,
+    duration_b: f64,
 }
 
 impl PresetClock {
     fn start_preset(&mut self) {
         self.smoothing = false;
         self.preset_time_a = self.now;
+        self.duration_a = self.preset_duration;
     }
 
     fn start_smoothing(&mut self, soft_cut: f64) {
         self.smoothing = true;
         self.preset_time_b = self.now;
         self.soft_cut = soft_cut;
+        self.duration_b = self.preset_duration;
     }
 
     fn end_smoothing(&mut self) {
         self.smoothing = false;
         self.preset_time_a = self.preset_time_b;
+        self.duration_a = self.duration_b;
     }
 
     fn smooth_ratio(&self) -> f64 {
         (self.now - self.preset_time_b) / self.soft_cut
     }
 
-    /// `PresetProgressA`: 1 while smoothing, else the elapsed fraction of the preset duration.
+    /// `PresetProgressA`: 1 while smoothing, else the elapsed fraction of the preset's (sampled) duration.
     fn progress_a(&self) -> f64 {
         if self.smoothing {
             1.0
         } else {
-            ((self.now - self.preset_time_a) / self.preset_duration).min(1.0)
+            ((self.now - self.preset_time_a) / self.duration_a).min(1.0)
         }
     }
 }
@@ -186,6 +221,9 @@ impl ActiveTransition {
 
     /// `PresetTransition::Progress`.
     fn progress(&self, now: f64) -> f64 {
+        if self.duration <= 0.0 {
+            return 1.0;
+        }
         ((now - self.start) / self.duration).clamp(0.0, 1.0)
     }
 }
@@ -217,7 +255,8 @@ pub struct Engine {
     transition_static: StreamRng,
     forced_kind: Option<TransitionKind>,
     forced_static: Option<[i32; 4]>,
-    last_time: f64,
+    /// Clock time of the last rendered frame; `None` until the first frame (whose `dt` is 0).
+    last_time: Option<f64>,
     last_frame_no: u32,
     forced: Option<ForcedFrame>,
     forced_incoming: Option<ForcedFrame>,
@@ -243,6 +282,10 @@ pub struct Engine {
     pending_auto_cuts: u32,
     /// MilkDrop 3 host inputs (mouse, shader FFT, sticky `FFTAttack` / `FFTDecay`).
     md3: Md3Inputs,
+    /// projectM user sprites (`projectm_sprite_*`).
+    user_sprites: user_sprites::UserSprites,
+    /// BeatDrop host inputs (`CompatRules::md2_input_vars` / `md2_shader_inputs`: mouse, keys, clock, shader FFT).
+    md2_in: Md2Inputs,
 }
 
 fn eel_seed(run_seed: u64) -> u64 {
@@ -254,24 +297,31 @@ fn eel_seed(run_seed: u64) -> u64 {
 
 impl Engine {
     /// Creates an engine rendering into textures on `device`/`queue`, sized and seeded by `cfg`.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, cfg: EngineConfig) -> Self {
-        // the renderer rejects zero sizes and meshes that are not even grids of at least 2x2 cells; a config
-        // that asks for one is rounded to the nearest usable value (a no-op for every valid config)
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        mut cfg: EngineConfig,
+    ) -> Result<Self, EngineError> {
+        // the renderer rejects zero sizes and meshes that are not even grids of at least 2x2 cells; the stored
+        // config is the sanitised one so every consumer (blend patterns, `mesh_size`) agrees with the renderer
+        cfg.width = cfg.width.max(1);
+        cfg.height = cfg.height.max(1);
+        cfg.mesh = clamp_mesh_size(cfg.mesh[0], cfg.mesh[1]);
+        cfg.fps = cfg.fps.max(1);
         let rc = RenderConfig {
-            width: cfg.width.max(1),
-            height: cfg.height.max(1),
-            mesh: cfg.mesh.map(|m| m.max(2).next_multiple_of(2)),
+            width: cfg.width,
+            height: cfg.height,
+            mesh: cfg.mesh,
             texel_offset: cfg.texel_offset,
             output_format: cfg.output_format,
             seed: cfg.seed,
             compat: cfg.compat,
             stroke: Default::default(),
         };
-        let renderer =
-            Renderer::new(device, queue, rc).expect("the render config was sanitised above");
+        let renderer = Renderer::new(device, queue, rc)?;
         let rng_owner = GlobalMemory::with_dialect(eel_dialect(&cfg.compat.rules()));
         rng_owner.set_rng_seed(eel_seed(cfg.seed));
-        Self {
+        Ok(Self {
             analyzer: new_analyzer(&cfg),
             device: device.clone(),
             queue: queue.clone(),
@@ -290,13 +340,15 @@ impl Engine {
                 smoothing: false,
                 soft_cut: 3.0,
                 preset_duration: cfg.preset_duration,
+                duration_a: cfg.preset_duration,
+                duration_b: cfg.preset_duration,
             },
             rng_owner,
             transition_select: StreamRng::new(cfg.seed, "transition_select"),
             transition_static: StreamRng::new(cfg.seed, "transition_static"),
             forced_kind: None,
             forced_static: None,
-            last_time: 0.0,
+            last_time: None,
             last_frame_no: 0,
             forced: None,
             forced_incoming: None,
@@ -313,8 +365,10 @@ impl Engine {
             auto_cut: crate::auto_cut::AutoCut::new(cfg.seed, cfg.auto_hard_cut_mode),
             pending_auto_cuts: 0,
             md3: Md3Inputs::new(),
+            user_sprites: user_sprites::UserSprites::new(),
+            md2_in: Md2Inputs::new(),
             cfg,
-        }
+        })
     }
 
     /// The configuration the engine was created with.
@@ -435,17 +489,25 @@ impl Engine {
     /// Interleaved float PCM (`-1..1`), any channel count (only the first two are used).
     pub fn push_pcm_f32(&mut self, interleaved: &[f32], channels: usize) {
         self.analyzer.push_pcm_f32(interleaved, channels);
+        if self.cfg.compat.rules().md2_shader_inputs {
+            self.md2_in.push_pcm(interleaved, channels);
+        }
     }
 
-    /// MilkDrop 3: the mouse for the following frames (see [`MouseState`]). The engine samples it once per rendered
-    /// frame; ignored (but harmless) under the other compat modes.
+    /// The mouse for the following frames (see [`MouseState`]). The engine samples it once per rendered frame;
+    /// MilkDrop 3 reads it as the shader constant `_c14`, MilkDrop 2 as `mousex .. mouseclick` and BeatDrop's `_c14`;
+    /// ignored (but harmless) under projectM.
     pub fn set_mouse(&mut self, mouse: MouseState) {
         self.md3.set_mouse(mouse);
+        self.md2_in.set_mouse(mouse);
     }
 
     /// MilkDrop 3 `VolumeSensitivity` (linear gain on the quantised input, default 1); only with
     /// [`Compat::MilkDrop3`](crate::Compat::MilkDrop3).
     pub fn set_volume_sensitivity(&mut self, sensitivity: f32) {
+        if !sensitivity.is_finite() {
+            return;
+        }
         self.cfg.volume_sensitivity = sensitivity;
         self.analyzer.set_volume_sensitivity(sensitivity);
     }
@@ -465,16 +527,26 @@ impl Engine {
         v
     }
 
-    /// Resize the render size (clears the feedback image). Presets keep running. A zero size is raised to 1.
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// Resize the render size (clears the feedback image). Presets keep running. A zero size is raised to 1. Fails
+    /// (and leaves the old size in place) when a renderer rejects the size, e.g. beyond the device's texture limit.
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), EngineError> {
         let (width, height) = (width.max(1), height.max(1));
+        let old = (self.cfg.width, self.cfg.height);
+        let result = self
+            .all_renderers_mut()
+            .into_iter()
+            .try_for_each(|r| r.resize(width, height));
+        if let Err(e) = result {
+            for r in self.all_renderers_mut() {
+                // the old size was accepted before
+                let _ = r.resize(old.0, old.1);
+            }
+            return Err(e.into());
+        }
         self.cfg.width = width;
         self.cfg.height = height;
-        for r in self.all_renderers_mut() {
-            // the size is non-zero and the mesh was validated when it was set, so this cannot fail
-            let _ = r.resize(width, height);
-        }
         self.md3_refresh_pattern();
+        Ok(())
     }
 
     /// Teacher forcing for the **next** [`Engine::render`] call only.
@@ -520,6 +592,7 @@ impl Engine {
     ) -> Result<PresetReport, EngineError> {
         let result = self.load_preset_inner(bytes, name, transition);
         if let Err(e) = &result {
+            log::error!("preset '{name}' failed to load: {e}");
             self.on_switch_failed
                 .fire(&crate::callbacks::SwitchFailure {
                     name: name.to_string(),
@@ -798,6 +871,10 @@ impl Engine {
             pf.extend_md3();
             pp.extend_md3();
         }
+        if rules.md2_input_vars {
+            pf.extend_md2_inputs();
+            pp.extend_md2_inputs();
+        }
         let base = preset.base.clone();
 
         // ---- per-frame init + per-frame code, per-vertex code ------------------------------
@@ -973,7 +1050,7 @@ impl Engine {
                 renderer,
                 &gm,
                 &rules,
-                (self.last_time, self.last_frame_no),
+                (self.last_time.unwrap_or(0.0), self.last_frame_no),
                 &mut report,
             ),
             None => {
@@ -997,8 +1074,9 @@ impl Engine {
             has_comp,
             frames: 0,
             floats: Default::default(),
-            start_time: self.last_time,
+            start_time: self.last_time.unwrap_or(0.0),
             sprite,
+            ifaces,
         };
         self.md3.on_preset_loaded(&rules, &loaded.preset.base);
         Ok((loaded, report))
@@ -1008,7 +1086,7 @@ impl Engine {
         let (w, h) = (self.cfg.width, self.cfg.height);
         let (ax, ay) = warp_mesh::aspect_xy(w, h);
         Env {
-            time: self.last_time as f32,
+            time: self.last_time.unwrap_or(0.0) as f32,
             fps: self.cfg.fps as f32,
             frame: self.last_frame_no,
             progress: self.clock.progress_a() as f32,
@@ -1035,7 +1113,10 @@ impl Engine {
         opts.projectm_flavor = !md2;
         let rules = self.cfg.compat.rules();
         opts.md3 = rules.md3_shader_prelude;
+        opts.beatdrop = rules.md2_shader_inputs;
         opts.gl_varying_fold = rules.gl_varying_fold;
+        opts.rand_max_slot = rules.max_rand_slot;
+        opts.rand_strict_name = !rules.rand_filter_raw_name;
         let to_compiled = |t: &lactea_hlsl::Translated, report: &mut PresetReport| {
             report.warnings.extend(t.warnings.iter().cloned());
             CompiledShader {
@@ -1063,6 +1144,7 @@ impl Engine {
                     }
                     Err(e) => {
                         report.warp = ShaderOutcome::Fallback;
+                        log::warn!("warp shader fallback: {e}");
                         report.shader_fallbacks.push(ShaderFallback {
                             pass: PassKind::Warp,
                             reason: e.to_string(),
@@ -1120,6 +1202,7 @@ impl Engine {
                     }
                     Err(e) => {
                         report.comp = ShaderOutcome::Fallback;
+                        log::warn!("composite shader fallback: {e}");
                         report.shader_fallbacks.push(ShaderFallback {
                             pass: PassKind::Comp,
                             reason: e.to_string(),
@@ -1163,6 +1246,7 @@ impl Engine {
                 Ok(()) => warp_ok = true,
                 Err(e) => {
                     report.warp = ShaderOutcome::Fallback;
+                    log::warn!("warp shader rejected by the device: {e}");
                     report.shader_fallbacks.push(ShaderFallback {
                         pass: PassKind::Warp,
                         reason: e.to_string(),
@@ -1179,6 +1263,7 @@ impl Engine {
                 Ok(()) => comp_ok = true,
                 Err(e) => {
                     report.comp = ShaderOutcome::Fallback;
+                    log::warn!("composite shader rejected by the device: {e}");
                     report.shader_fallbacks.push(ShaderFallback {
                         pass: PassKind::Comp,
                         reason: e.to_string(),
@@ -1236,6 +1321,7 @@ impl Engine {
         let seed = self.cfg.seed;
         let Some(provider) = self.provider.as_mut() else {
             for (name, _) in wanted {
+                log::debug!("texture {name} unresolved: no texture provider");
                 report.unresolved_textures.push(name);
             }
             return;
@@ -1243,12 +1329,13 @@ impl Engine {
         let pool = provider.random_pool();
         let mut slot_pick: HashMap<usize, Option<String>> = HashMap::new();
         let mut cache: HashMap<String, Option<Arc<Media>>> = HashMap::new();
-        let md3_gif = self.cfg.compat.rules().md3_gif_textures;
+        let rules = self.cfg.compat.rules();
+        let md3_gif = rules.md3_gif_textures;
         for (name, pm_name) in wanted {
-            let provider_name = match rand_slot(&name) {
+            let provider_name = match rand_slot(&name, &rules) {
                 Some(slot) => slot_pick
                     .entry(slot)
-                    .or_insert_with(|| pick_random(seed, &pm_name, &pool))
+                    .or_insert_with(|| pick_for_sampler(seed, &rules, &pm_name, &name, &pool))
                     .clone(),
                 None => Some(name.clone()),
             };
@@ -1286,6 +1373,7 @@ impl Engine {
             match set {
                 Some(Ok(())) => report.resolved_textures.push((name, pn)),
                 Some(Err(e)) => {
+                    log::warn!("texture {name}: {e}");
                     report.warnings.push(format!("texture {name}: {e}"));
                     report.unresolved_textures.push(name);
                 }
@@ -1312,23 +1400,19 @@ impl Engine {
         clock: FrameClock,
     ) {
         self.auto_cut_step(clock.time);
-        let dt = (clock.time - self.last_time).max(0.0);
-        self.last_time = clock.time;
+        let dt = self.last_time.map_or(0.0, |t| (clock.time - t).max(0.0));
+        self.last_time = Some(clock.time);
         self.last_frame_no = clock.frame;
         self.analyzer.update_dt(dt);
-        let mut audio = self.analyzer.frame().clone();
         let forced = self.forced.take();
         let forced_incoming = self.forced_incoming.take();
         let forced_blend = self.forced_blend.take();
-        if let Some(f) = &forced {
-            f.override_audio(&mut audio);
-        }
-        let mut md3 = self.md3.begin_frame(
-            &self.cfg.compat.rules(),
-            &audio,
-            self.cfg.fps as f32,
-            clock.time as f32,
-        );
+        // only a teacher-forced frame needs its own copy of the analysis
+        let forced_audio = forced.as_ref().map(|f| {
+            let mut a = self.analyzer.frame().clone();
+            f.override_audio(&mut a);
+            a
+        });
 
         // ProjectM::RenderFrame: timers, end of smoothing, end of the transition.
         self.clock.now = clock.time;
@@ -1365,6 +1449,78 @@ impl Engine {
         }
         let blending = self.incoming.is_some() && self.transition.is_some();
 
+        // projectM user sprites (`projectm_sprite_*`): run once. Without a soft cut they are drawn over the finished
+        // image of the preset (which burns them into its own feedback image); during one, after the blend (below).
+        // Images are synchronised before the run, so a sprite that finishes this frame still draws in it.
+        let retired = self.user_sprites.take_retired();
+        for r in self
+            .active
+            .iter_mut()
+            .chain(self.incoming.iter_mut())
+            .map(|s| &mut s.renderer)
+            .chain(self.spare.iter_mut())
+        {
+            for key in &retired {
+                r.remove_sprite_image(*key);
+            }
+            self.user_sprites.sync_images(r);
+        }
+        let user_draws = match self.active {
+            Some(_) => {
+                let a = self.analyzer.frame();
+                let blend_progress = self.transition.as_ref().map_or_else(
+                    || {
+                        self.md2
+                            .as_ref()
+                            .map_or(0.0, |m| m.progress.clamp(0.0, 1.0))
+                    },
+                    |t| t.progress(clock.time) as f32,
+                );
+                self.user_sprites.frame(
+                    &SpriteInputs {
+                        time: f64::from(clock.time as f32),
+                        frame: clock.frame,
+                        fps: self.cfg.fps as f32,
+                        progress: blend_progress,
+                        bass: a.bass,
+                        mid: a.mid,
+                        treb: a.treb,
+                        bass_att: a.bass_att,
+                        mid_att: a.mid_att,
+                        treb_att: a.treb_att,
+                    },
+                    (self.cfg.width, self.cfg.height),
+                )
+            }
+            None => Vec::new(),
+        };
+
+        let audio: &AudioFrame = forced_audio
+            .as_ref()
+            .unwrap_or_else(|| self.analyzer.frame());
+        let mut md3 = self.md3.begin_frame(
+            &self.cfg.compat.rules(),
+            audio,
+            self.cfg.fps as f32,
+            clock.time as f32,
+        );
+        // BeatDrop's host inputs (MilkDrop 2): the mouse / keys / clock for the expressions and `_c14.._c16`, and
+        // one step of the shader FFT with the active state's `FFTAttack` / `FFTDecay` (not blended during a soft cut)
+        let rules = self.cfg.compat.rules();
+        let md2f = (rules.md2_input_vars || rules.md2_shader_inputs).then(|| {
+            let fft = self.active.as_ref().map_or((0.5, 0.7), |a| {
+                let b = &a.loaded.preset.base;
+                (b.fft_attack, b.fft_decay)
+            });
+            self.md2_in.begin_frame(
+                audio,
+                self.cfg.fps as f32,
+                clock.time,
+                fft,
+                rules.md2_shader_inputs,
+            )
+        });
+
         // The incoming preset renders first (its image only), then the active one.
         if let Some(inc) = self.incoming.as_mut().filter(|_| blending) {
             // ProjectM's `incoming` slot never exists under MilkDrop 3: its soft cuts are MilkDrop 2 blends inside
@@ -1375,11 +1531,14 @@ impl Engine {
                 &self.cfg,
                 clock,
                 progress,
-                &audio,
+                audio,
                 forced_incoming.as_ref(),
                 None,
+                None,
             );
+            // during a soft cut the sprites go over the blend (below), not into each preset's own image
             let _ = inc.renderer.render_frame_to_output(encoder, &fi);
+            inc.last.recycle(fi);
         }
         let cfg = &self.cfg;
         match self.active.as_mut() {
@@ -1389,9 +1548,10 @@ impl Engine {
                     cfg,
                     clock,
                     progress,
-                    &audio,
+                    audio,
                     forced.as_ref(),
                     self.md2.as_mut(),
+                    md2f.as_ref(),
                 );
                 // MilkDrop 3 runs the `_mxd3q*` block at the end of `RunPerFrameEquations`, after the per-frame code
                 // of the state it treats as current (`m_pState` = `active`; a blend's old state is `md2`) and reads
@@ -1408,6 +1568,9 @@ impl Engine {
                         clock.time,
                     );
                 }
+                if !blending {
+                    fi.sprites.extend(user_draws.iter().cloned());
+                }
                 // `prepare_slot` builds `warp_uv` from the renderer's own mesh and `md2_blend` only with
                 // `Compat::md2_family`, the two inputs the renderer can reject
                 let _ = if blending {
@@ -1415,6 +1578,7 @@ impl Engine {
                 } else {
                     act.renderer.render_frame(encoder, &fi, target)
                 };
+                act.last.recycle(fi);
             }
             None => {
                 let fi = FrameInput {
@@ -1432,6 +1596,17 @@ impl Engine {
 
         if blending {
             self.draw_transition(encoder, target, clock.time, forced_blend);
+            // projectM draws user sprites after the transition, onto the output; `burn` also goes into both
+            // presets' feedback images
+            if !user_draws.is_empty() {
+                for slot in self.active.iter().chain(self.incoming.iter()) {
+                    slot.renderer.burn_sprites(encoder, &user_draws);
+                }
+                if let Some(act) = self.active.as_ref() {
+                    act.renderer
+                        .draw_sprites_to_output(encoder, target, &user_draws);
+                }
+            }
         }
     }
 
@@ -1595,6 +1770,7 @@ fn slot_frame_vars(slot: &Slot) -> Vec<(String, f64)> {
 }
 
 /// Evaluate a slot's preset for this frame and hand the teacher-forced images to its renderer.
+#[allow(clippy::too_many_arguments)]
 fn prepare_slot(
     slot: &mut Slot,
     cfg: &EngineConfig,
@@ -1603,6 +1779,7 @@ fn prepare_slot(
     audio: &AudioFrame,
     forced: Option<&ForcedFrame>,
     md2: Option<&mut BlendState>,
+    host: Option<&Md2Frame>,
 ) -> FrameInput {
     let g = slot.renderer.mesh_geometry();
     // sprite code sees `m_pState->m_fBlendProgress`: the blend's progress (`P` in a steady `.milk2`), 1 once none runs
@@ -1615,6 +1792,7 @@ fn prepare_slot(
                 clock,
                 progress,
                 audio,
+                md2_vars: host.map(|h| h.vars),
             };
             build_blend_frame(&mut slot.loaded, &mut slot.last, m, &cx, forced)
         }
@@ -1627,6 +1805,7 @@ fn prepare_slot(
             audio,
             forced,
             &mut slot.last,
+            host.map(|h| h.vars),
         ),
     };
     if cfg.compat.rules().md3_preset_sprites
@@ -1646,6 +1825,9 @@ fn prepare_slot(
         };
         fi.sprites.extend(sp.frame(&inp, (cfg.width, cfg.height)));
     }
+    if let Some(h) = host {
+        attach_md2_ext(&mut fi, h);
+    }
     slot.last.audio = Some(audio.clone());
     slot.last.time = clock.time as f32;
     slot.last.frame = clock.frame;
@@ -1663,6 +1845,19 @@ fn prepare_slot(
         }
     }
     fi
+}
+
+/// BeatDrop's shader inputs of the frame: `_c14` (mouse), `_c15` / `_c16` (time, date) for the new state and the old
+/// state of a running blend, and the spectrum / waveform texture (renderer-global, so the new state's entry is
+/// the one that counts).
+fn attach_md2_ext(fi: &mut FrameInput, host: &Md2Frame) {
+    fi.ext.mouse = host.mouse;
+    fi.ext.time_date = Some(host.time_date);
+    fi.ext.beatdrop = host.texture.clone();
+    if let Some(m) = fi.md2_blend.as_mut() {
+        m.old.ext.mouse = host.mouse;
+        m.old.ext.time_date = Some(host.time_date);
+    }
 }
 
 /// The MilkDrop 3 shader inputs of the frame of `slot`'s preset (`ShaderExt`: mouse, `q33..q64`, the `_mxd3q*` block's
@@ -1695,6 +1890,8 @@ struct FrameCtx<'a> {
     clock: FrameClock,
     progress: f32,
     audio: &'a AudioFrame,
+    /// BeatDrop's `mousex .. totalseconds` of this frame (`CompatRules::md2_input_vars`).
+    md2_vars: Option<Md2Vars>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1707,6 +1904,7 @@ fn build_frame(
     audio: &AudioFrame,
     forced: Option<&ForcedFrame>,
     last: &mut LastFrame,
+    md2_vars: Option<Md2Vars>,
 ) -> FrameInput {
     let cx = FrameCtx {
         cfg,
@@ -1714,19 +1912,35 @@ fn build_frame(
         clock,
         progress,
         audio,
+        md2_vars,
     };
     let base = l.preset.base.clone();
     let env = frame_env(&cx);
     eval_per_frame(l, &cx, &env, &base, forced, last);
     let anim = warp_anim(&cx, &base);
     let toff = warp_mesh::texel_offset_uv(cfg.texel_offset, cfg.width, cfg.height);
-    let vertex_vars = eval_vertices(l, g);
+    let mut vertex_vars = std::mem::take(&mut last.scratch.vertex_vars);
+    eval_vertices(l, g, &mut vertex_vars);
     // projectM's GPU evaluates the warp UV formula from the vertex variables: the CPU grid is not needed
-    let warp_uv =
-        (!cfg.compat.rules().warp_uv_on_gpu).then(|| warp_vertex_uvs(g, &vertex_vars, &anim, toff));
-    let mut fi = frame_head(l, &cx, &base, vertex_vars, warp_uv, anim, true, None);
+    let warp_uv = (!cfg.compat.rules().warp_uv_on_gpu).then(|| {
+        let mut uv = std::mem::take(&mut last.scratch.warp_uv);
+        warp_vertex_uvs(g, &vertex_vars, &anim, toff, &mut uv);
+        uv
+    });
+    let mut fi = frame_head(
+        l,
+        &cx,
+        &base,
+        WarpHead {
+            vertex_vars,
+            warp_uv,
+            anim,
+            gpu: true,
+            wrap_snap: None,
+        },
+    );
     push_shapes(l, &env, &mut fi.shapes);
-    push_waves(l, &cx, &env, &mut fi.waves);
+    push_waves(l, &cx, &env, &mut last.scratch.wave_values, &mut fi.waves);
     finish_frame(l, &cx, forced, last, &mut fi);
     fi
 }
@@ -1751,6 +1965,7 @@ fn frame_env(cx: &FrameCtx) -> Env {
         pixels: [w, h],
         aspect: [ax, ay],
         inv_aspect: [1.0 / ax, 1.0 / ay],
+        md2: cx.md2_vars,
     }
 }
 
@@ -1793,10 +2008,11 @@ fn warp_anim(cx: &FrameCtx, base: &BaseValues) -> WarpAnim {
     anim
 }
 
-/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values).
-fn eval_vertices(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
+/// The ten motion variables per mesh vertex (per-vertex code when the preset has any, else the per-frame values),
+/// written into `out` (its previous contents are replaced; the allocation is reused).
+fn eval_vertices(l: &mut Loaded, g: &MeshGeometry, out: &mut Vec<VertexVars>) {
     if l.pp.prog.is_some() {
-        per_pixel_vars(l, g)
+        per_pixel_vars(l, g, out);
     } else {
         let pv = |v| l.pf.ctx.get(v);
         let vars = &l.pf.v;
@@ -1812,22 +2028,37 @@ fn eval_vertices(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
             sx: pv(vars.sx) as f32,
             sy: pv(vars.sy) as f32,
         };
-        vec![vv; g.vertex_count()]
+        out.clear();
+        out.resize(g.vertex_count(), vv);
     }
 }
 
-/// The warp UV of every vertex of the mesh for its motion variables.
+/// The warp UV of every vertex of the mesh for its motion variables, written into `out`.
 fn warp_vertex_uvs(
     g: &MeshGeometry,
     vertex_vars: &[VertexVars],
     anim: &WarpAnim,
     toff: [f32; 2],
-) -> Vec<[f32; 2]> {
-    vertex_vars
-        .iter()
-        .enumerate()
-        .map(|(n, vv)| warp_mesh::warp_vertex_uv(g, n, vv, anim, toff))
-        .collect()
+    out: &mut Vec<[f32; 2]>,
+) {
+    out.clear();
+    out.extend(
+        vertex_vars
+            .iter()
+            .enumerate()
+            .map(|(n, vv)| warp_mesh::warp_vertex_uv(g, n, vv, anim, toff)),
+    );
+}
+
+/// The warp-mesh part of a frame's inputs.
+struct WarpHead {
+    vertex_vars: Vec<VertexVars>,
+    warp_uv: Option<Vec<[f32; 2]>>,
+    anim: WarpAnim,
+    /// Hand the per-vertex inputs of projectM's GPU warp vertex stage over as well.
+    gpu: bool,
+    /// MD2 blend: the sampler address is `wrap > m_fSnapPoint` instead of `wrap > 0.0001`.
+    wrap_snap: Option<f32>,
 }
 
 /// Everything of a frame except shapes, custom waves and the shader pass random state: timing, audio, `q`, warp
@@ -1835,19 +2066,15 @@ fn warp_vertex_uvs(
 /// variables (after the per-frame code; for a MilkDrop 2 blend frame the already blended ones).
 ///
 /// * `base`: the base values the frame's non-variable parameters (`fShader`, wave scale / smoothing ...) come from.
-/// * `gpu`: hand the per-vertex inputs of projectM's GPU warp vertex stage over as well.
-/// * `wrap_snap`: MD2 blend: the sampler address is `wrap > m_fSnapPoint` instead of `wrap > 0.0001`.
-#[allow(clippy::too_many_arguments)]
-fn frame_head(
-    l: &mut Loaded,
-    cx: &FrameCtx,
-    base: &BaseValues,
-    vertex_vars: Vec<VertexVars>,
-    warp_uv: Option<Vec<[f32; 2]>>,
-    anim: WarpAnim,
-    gpu: bool,
-    wrap_snap: Option<f32>,
-) -> FrameInput {
+/// * `warp`: the frame's warp-mesh inputs, see [`WarpHead`].
+fn frame_head(l: &mut Loaded, cx: &FrameCtx, base: &BaseValues, warp: WarpHead) -> FrameInput {
+    let WarpHead {
+        vertex_vars,
+        warp_uv,
+        anim,
+        gpu,
+        wrap_snap,
+    } = warp;
     let (cfg, audio, clock, progress) = (cx.cfg, cx.audio, cx.clock, cx.progress);
     let frame_vars = cfg.compat.rules().frame_vars_drive_post;
     let time = clock.time as f32;
@@ -2029,8 +2256,15 @@ fn push_shapes(l: &mut Loaded, env: &Env, out: &mut Vec<ShapeInstance>) {
     }
 }
 
-/// Custom waves (per-frame code, `samples`, smoothing, per-point code), appended to `out` in draw order.
-fn push_waves(l: &mut Loaded, cx: &FrameCtx, env: &Env, out: &mut Vec<RenderWave>) {
+/// Custom waves (per-frame code, `samples`, smoothing, per-point code), appended to `out` in draw order; `values` is
+/// scratch for the resampled audio.
+fn push_waves(
+    l: &mut Loaded,
+    cx: &FrameCtx,
+    env: &Env,
+    values: &mut Vec<[f32; 2]>,
+    out: &mut Vec<RenderWave>,
+) {
     let audio = cx.audio;
     // `m_fWaveScale.eval(-1)`: the unblended value
     let wave_scale = l.preset.base.wave_scale;
@@ -2066,7 +2300,7 @@ fn push_waves(l: &mut Loaded, cx: &FrameCtx, env: &Env, out: &mut Vec<RenderWave
                 &audio.wave[1][..NUM_WAVEFORM_SAMPLES],
             )
         };
-        let values = lactea_render::wavegen::custom_wave_values(&sampling, d1, d2);
+        lactea_render::wavegen::custom_wave_values_into(values, &sampling, d1, d2);
         let n = values.len();
         let mult = if n > 1 { 1.0 / (n - 1) as f32 } else { 0.0 };
         let (r, g, b, a) = (
@@ -2181,8 +2415,9 @@ fn per_pixel_inputs(g: &MeshGeometry, x: u32, row_pm: u32) -> [f32; 4] {
 
 /// Per-vertex code over the mesh in projectM's iteration order (its mesh row 0 is the top of the
 /// image; ours is the bottom); the ten motion variables per vertex, stored at MD2 mesh indices.
-fn per_pixel_vars(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
-    let mut out = vec![VertexVars::default(); g.vertex_count()];
+fn per_pixel_vars(l: &mut Loaded, g: &MeshGeometry, out: &mut Vec<VertexVars>) {
+    out.clear();
+    out.resize(g.vertex_count(), VertexVars::default());
     let pfv = &l.pf.v;
     let get = |v| l.pf.ctx.get(v);
     let frame_vals = [
@@ -2239,7 +2474,6 @@ fn per_pixel_vars(l: &mut Loaded, g: &MeshGeometry) -> Vec<VertexVars> {
         }
     }
     pp.prog = prog;
-    out
 }
 
 #[cfg(test)]
@@ -2273,6 +2507,51 @@ mod per_pixel_input_tests {
     }
 }
 
+#[cfg(test)]
+mod preset_clock_tests {
+    use super::*;
+
+    fn clock() -> PresetClock {
+        PresetClock {
+            now: 0.0,
+            preset_time_a: 0.0,
+            preset_time_b: 0.0,
+            smoothing: false,
+            soft_cut: 2.0,
+            preset_duration: 30.0,
+            duration_a: 30.0,
+            duration_b: 30.0,
+        }
+    }
+
+    /// `TimeKeeper::EndSmoothing`: the incoming preset's sampled duration becomes the one `progress` divides by.
+    #[test]
+    fn progress_runs_over_the_duration_of_the_shown_preset() {
+        let mut c = clock();
+        c.now = 10.0;
+        c.start_smoothing(2.0);
+        c.duration_b = 20.0;
+        assert_eq!(c.progress_a(), 1.0);
+        c.now = 12.0;
+        c.end_smoothing();
+        c.now = 15.0;
+        assert_eq!(c.progress_a(), 5.0 / 20.0);
+    }
+
+    #[test]
+    fn a_transition_without_duration_is_finished() {
+        let t = ActiveTransition {
+            kind: TransitionKind::Circle,
+            rand_static: [0; 4],
+            start: 1.0,
+            duration: 0.0,
+            last_draw: 1.0,
+        };
+        assert!(t.is_done(1.0));
+        assert_eq!(t.progress(1.0), 1.0);
+    }
+}
+
 // Runtime parameters (`projectm_set_*` equivalents); a child module so it sees the engine's state.
 #[path = "extras.rs"]
 mod extras;
@@ -2280,4 +2559,6 @@ mod extras;
 mod params;
 #[path = "shape_images.rs"]
 mod shape_images;
+#[path = "user_sprites.rs"]
+mod user_sprites;
 pub use extras::{DebugImage, TouchType};

@@ -9,7 +9,7 @@
 //! ```no_run
 //! use lactea::{Engine, EngineConfig, FrameClock, Transition};
 //! # fn demo(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::TextureView, milk: &[u8], pcm: &[f32]) {
-//! let mut engine = Engine::new(device, queue, EngineConfig::default());
+//! let mut engine = Engine::new(device, queue, EngineConfig::default()).unwrap();
 //! let report = engine.load_preset(milk, "my preset", Transition::Cut).unwrap();
 //! for frame in 0..60u32 {
 //!     engine.push_pcm_f32(pcm, 2);
@@ -34,6 +34,7 @@ mod callbacks;
 mod control;
 mod engine;
 mod idle;
+mod md2_inputs;
 mod md3_inputs;
 mod media;
 mod mxd3q;
@@ -57,6 +58,7 @@ pub use lactea_abi::dump::Stage;
 pub use lactea_audio::AudioFrame;
 pub use lactea_render::TransitionKind;
 pub use lactea_render::{Compat, Renderer};
+pub use md2_inputs::{CtrlKeys, DateTime};
 pub use md3_inputs::MouseState;
 pub use media::{AnimFrame, AnimatedImage, Media, MediaFiles, TEXTURE_EXTENSIONS, decode_gif};
 pub use playlist::{
@@ -65,6 +67,10 @@ pub use playlist::{
 };
 pub use teacher::ForcedFrame;
 pub use textures::{Image, TextureProvider};
+
+/// `git describe --always --dirty` of the source this crate was built from; `"unknown"` for a build outside a git
+/// checkout of it (a published crate). projectM's `projectm_get_vcs_version_string`.
+pub const VCS_VERSION: &str = env!("LACTEA_VCS_VERSION");
 
 use std::collections::HashMap;
 

@@ -6,32 +6,8 @@
 
 #![allow(clippy::manual_div_ceil)]
 use lactea_render::{TransitionBlender, TransitionKind, TransitionParams};
+use lactea_testutil::{gpu_or_skip, read_rgba8};
 use wgpu::util::DeviceExt;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
-/// No adapter: skip with a message, unless `LACTEA_REQUIRE_GPU` is set (CI), which makes it a failure.
-macro_rules! need_gpu {
-    () => {
-        match gpu() {
-            Some(g) => g,
-            None => {
-                assert!(
-                    std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-                    "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-                );
-                eprintln!("SKIP: no wgpu adapter");
-                return;
-            }
-        }
-    };
-}
 
 const W: u32 = 64;
 const H: u32 = 48;
@@ -96,43 +72,8 @@ fn blend(
     let blender = TransitionBlender::new(device, format);
     let mut enc = device.create_command_encoder(&Default::default());
     blender.draw(&mut enc, old, new, &view, (W, H), p);
-    let bpr = (W * 4 + 255) / 256 * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: u64::from(bpr * H),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(H),
-            },
-        },
-        wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-    );
     queue.submit(Some(enc.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = buf.slice(..).get_mapped_range().unwrap();
-    let mut out = Vec::new();
-    for y in 0..H {
-        out.extend_from_slice(&data[(y * bpr) as usize..(y * bpr + W * 4) as usize]);
-    }
-    out
+    read_rgba8(device, queue, &target, W, H)
 }
 
 fn px(img: &[u8], x: u32, y: u32) -> [u8; 4] {
@@ -146,7 +87,7 @@ fn params(kind: TransitionKind, secs: f64, dur: f64, rs: [i32; 4]) -> Transition
 
 #[test]
 fn simple_blend_is_the_cosine_mix_in_image_orientation() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     // old: red ramp downwards (row 0 = top); new: blue ramp to the right
     let old = image(&device, &queue, |_, y| {
         [(y * 255 / (H - 1)) as u8, 0, 0, 255]
@@ -182,7 +123,7 @@ fn simple_blend_is_the_cosine_mix_in_image_orientation() {
 
 #[test]
 fn every_shader_starts_on_the_old_image_and_ends_on_the_new_one() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let old = image(&device, &queue, |_, _| [200, 20, 20, 255]);
     let new = image(&device, &queue, |_, _| [20, 200, 20, 255]);
     for kind in TransitionKind::ALL {
@@ -227,7 +168,7 @@ fn every_shader_starts_on_the_old_image_and_ends_on_the_new_one() {
 /// new image and the bottom still the old one.
 #[test]
 fn warp_transition_runs_bottom_up_like_gl() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let old = image(&device, &queue, |_, _| [255, 0, 0, 255]);
     let new = image(&device, &queue, |_, _| [0, 255, 0, 255]);
     let p = params(TransitionKind::Warp, 0.5, 1.0, [250, 0, 0, 0]);
@@ -254,7 +195,7 @@ fn warp_transition_runs_bottom_up_like_gl() {
 /// Circle transition, direction `inOrOut < 1`: the *new* image grows from the centre.
 #[test]
 fn circle_transition_opens_from_the_centre() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let old = image(&device, &queue, |_, _| [255, 0, 0, 255]);
     let new = image(&device, &queue, |_, _| [0, 255, 0, 255]);
     // rand.x = 0 -> inOrOut = 0 (inner = old, outer = new... the circle edge moves outwards)
@@ -281,7 +222,7 @@ fn circle_transition_opens_from_the_centre() {
 
 #[test]
 fn srgb_targets_are_compensated() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let old = image(&device, &queue, |_, _| [100, 150, 200, 255]);
     let new = image(&device, &queue, |_, _| [100, 150, 200, 255]);
     let p = params(TransitionKind::SimpleBlend, 0.5, 1.0, [0; 4]);

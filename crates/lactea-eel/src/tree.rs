@@ -142,7 +142,8 @@ pub(crate) enum Node {
     },
     List {
         s: u32,
-        items: Vec<Node>,
+        init: Vec<Node>,
+        last: Box<Node>,
     },
     /// `ns`: the count is rounded (x87 `fistp`) instead of truncated.
     Loop {

@@ -3,7 +3,8 @@
 //! The translator reproduces exactly how MilkDrop 2 turns preset shader text into a compilable
 //! pixel shader ([`md2_wrapped_hlsl`]: `include.fx` prepend, per-pass `#define`s for
 //! `uv`/`uv_orig`/`rad`/`ang`/`hue_shader`, `shader_body` -> `void PS(...)`, `float3 ret = 0;`
-//! and the final `_return_value = float4(ret.xyz, _vDiffuse.w)`), then lexes, preprocesses,
+//!  and the final `_return_value = float4(ret.xyz, _vDiffuse.w)` (`float4(ret.xyz, 1.0)` with
+//!  [`Options::projectm_flavor`], like projectM)), then lexes, preprocesses,
 //! parses, type-checks and emits WGSL against the frozen `lactea-abi` interface.
 //!
 //! ## Semantics decisions
@@ -36,7 +37,12 @@ mod wrap;
 use lactea_abi::{PassKind, ShaderInterface, TexDim, TexSource};
 use std::fmt;
 
-pub use wrap::{default_comp_shader, default_warp_shader, md2_wrapped_hlsl, md3_wrapped_hlsl};
+pub use emit::fft::{BEATDROP_FFT_BINS, BEATDROP_WAVE_SAMPLES};
+pub use iface::rand_slot;
+pub use wrap::{
+    beatdrop_wrapped_hlsl, default_comp_shader, default_warp_shader, md2_wrapped_hlsl,
+    md3_wrapped_hlsl, wrapped_hlsl,
+};
 
 /// Why a shader could not be translated. The messages are for humans; [`TranslateError::category`] is stable
 /// enough to bucket failures.
@@ -114,12 +120,25 @@ pub struct Options {
     /// names. [`translate_wrapped`] needs the same flag for text from [`md3_wrapped_hlsl`]. Default `false`: the
     /// output is then identical to a translator without MD3 support.
     pub md3: bool,
+    /// BeatDrop / MilkDrop 2 shader inputs: [`translate`] adds the BeatDrop prelude (`_c14` mouse, `_c15` / `_c16`
+    /// time and date, `sampler_fft` / `sampler_wave`, `get_fft`, `get_fft_hz`, `get_fft_peak*`, `get_wave`; see
+    /// [`beatdrop_wrapped_hlsl`]), the root names `fft` and `wave` resolve to [`TexSource::Fft`] (one engine texture:
+    /// 1024 x 2 spectrum rows then 480 x 2 waveform rows, `textureLoad` bilinear fetches) and `_c14.._c16` map onto
+    /// `mx.mouse`, `mx.q_hi[0]`, `mx.q_hi[1]` (the extension block's MD3-only members are free outside MilkDrop 3).
+    /// Ignored when [`md3`](Self::md3) is set. Default `false`.
+    pub beatdrop: bool,
     /// Emulate Mesa's backward inter-shader code motion (`nir_opt_varyings`), which projectM's GL path goes through:
     /// a sum, difference or quotient of an interpolated input (`uv`, `rad`, `hue_shader`, ...) and a convergent value
     /// (constants, uniforms, `time`) is computed per vertex and interpolated, while wgpu interpolates the input and
     /// adds in the fragment stage, which differs by about one ulp. With this flag [`Translated::folds`] lists the
     /// per-vertex values and the fragment shader reads them as extra varyings. Default `false`.
     pub gl_varying_fold: bool,
+    /// Highest `randNN` sampler slot that is a random texture (projectM 15, MD2 99; default 99). Used to match
+    /// `texsize_randNN` to the sampler bound to the same slot.
+    pub rand_max_slot: u8,
+    /// `randNN` names must be exactly `randNN` or `randNN_...` (MD2, default) instead of any name that starts with
+    /// `randNN` (projectM).
+    pub rand_strict_name: bool,
 }
 
 impl Default for Options {
@@ -129,7 +148,10 @@ impl Default for Options {
             floor_mod: false,
             projectm_flavor: false,
             md3: false,
+            beatdrop: false,
             gl_varying_fold: false,
+            rand_max_slot: 99,
+            rand_strict_name: true,
         }
     }
 }
@@ -155,19 +177,57 @@ pub struct Translated {
     pub folds: Vec<String>,
 }
 
+/// Which shader prelude sits between `include.fx` and the per-pass defines. Internal: the public switches are
+/// [`Options::md3`] / [`Options::beatdrop`]; `bool` converts to `None` / `Md3` for the MD3-only helpers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Prelude {
+    #[default]
+    None,
+    Md3,
+    BeatDrop,
+}
+
+impl From<bool> for Prelude {
+    fn from(md3: bool) -> Self {
+        if md3 { Prelude::Md3 } else { Prelude::None }
+    }
+}
+
+impl Prelude {
+    pub(crate) fn md3(self) -> bool {
+        self == Prelude::Md3
+    }
+
+    pub(crate) fn beatdrop(self) -> bool {
+        self == Prelude::BeatDrop
+    }
+}
+
+impl Options {
+    pub(crate) fn prelude(&self) -> Prelude {
+        if self.md3 {
+            Prelude::Md3
+        } else if self.beatdrop {
+            Prelude::BeatDrop
+        } else {
+            Prelude::None
+        }
+    }
+}
+
 /// Translate one MD2 warp/composite shader (`src` = the preset's `warp_N=` / `comp_N=` lines
 /// joined with `\n`, one leading backtick per line already removed).
 pub fn translate(kind: PassKind, src: &str, opts: &Options) -> Result<Translated, TranslateError> {
-    let wrap = if opts.md3 {
-        md3_wrapped_hlsl
-    } else {
-        md2_wrapped_hlsl
-    };
-    let decls = wrap::implicit_declarations(src, opts.md3);
+    let decls = wrap::implicit_declarations(src, opts.prelude());
     let full = if decls.is_empty() {
-        wrap(kind, src)?
+        wrap::wrapped_with(kind, src, opts.prelude(), opts.projectm_flavor)?
     } else {
-        wrap(kind, &format!("{decls}{src}"))?
+        wrap::wrapped_with(
+            kind,
+            &format!("{decls}{src}"),
+            opts.prelude(),
+            opts.projectm_flavor,
+        )?
     };
     translate_wrapped(kind, &full, opts)
 }
@@ -185,7 +245,7 @@ pub fn translate_wrapped(
     p.pm_flavor = opts.projectm_flavor;
     p.parse_program()?;
     let prog = p.prog;
-    let mut tr = emit::Tr::new(&prog, opts.md3);
+    let mut tr = emit::Tr::new(&prog, opts.prelude());
     tr.floor_mod = opts.floor_mod;
     tr.pm_flavor = opts.projectm_flavor;
     if !tr.fns.contains_key("PS") {
@@ -211,7 +271,7 @@ pub fn translate_wrapped(
     let mut iface = ShaderInterface::default();
     let mut bindings = String::new();
     for (i, (name, _, dim, used3d)) in samplers.iter().enumerate() {
-        let tb = iface::resolve_sampler(name, *dim, *used3d, opts.md3);
+        let tb = iface::resolve_sampler(name, *dim, *used3d, opts.prelude());
         let ty = if tb.dim == TexDim::D3 {
             "texture_3d<f32>"
         } else {
@@ -229,7 +289,12 @@ pub fn translate_wrapped(
     }
     let mut slots = vec![TexSource::Main; e.texsizes.len()];
     for (name, slot) in &e.texsizes {
-        slots[*slot] = iface::texsize_source(name, &iface.textures, opts.md3);
+        slots[*slot] = iface::texsize_source(
+            name,
+            &iface.textures,
+            opts.prelude(),
+            (opts.rand_max_slot, opts.rand_strict_name),
+        );
     }
     iface.texsize_slots = slots;
 
@@ -254,7 +319,7 @@ pub fn translate_wrapped(
     }
     wgsl.push_str(&bindings);
     if iface.textures.iter().any(|t| t.source == TexSource::Fft) {
-        wgsl.push_str(&emit::fft::helper_wgsl());
+        wgsl.push_str(&emit::fft::helper_wgsl(opts.prelude()));
     }
     wgsl.push_str(&e.body);
     let mut texsize_params = vec![String::new(); e.texsizes.len()];

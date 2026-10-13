@@ -2,17 +2,10 @@
 //! errors. Skipped (with a note) when there is no GPU adapter or no preset corpus.
 
 use lactea::{Engine, EngineConfig, FrameClock, Image, TextureProvider, Transition};
+use lactea_testutil::{gpu, read_rgba8 as read_back};
 use std::path::{Path, PathBuf};
 
 const CORPUS: &str = "/usr/share/projectM/presets";
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
 
 fn find(name: &str) -> Option<PathBuf> {
     fn walk(dir: &Path, name: &str, depth: u32) -> Option<PathBuf> {
@@ -53,59 +46,6 @@ impl TextureProvider for Checker {
     }
 }
 
-fn read_back(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    tex: &wgpu::Texture,
-    w: u32,
-    h: u32,
-) -> Vec<u8> {
-    let bpr = (w * 4).div_ceil(256) * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: u64::from(bpr * h),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(h),
-            },
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(enc.finish()));
-    let slice = buf.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    rx.recv().unwrap().unwrap();
-    let data = slice.get_mapped_range().unwrap();
-    let mut out = Vec::new();
-    for y in 0..h {
-        let s = (y * bpr) as usize;
-        out.extend_from_slice(&data[s..s + (w * 4) as usize]);
-    }
-    out
-}
-
 #[test]
 fn corpus_presets_render_without_validation_errors() {
     let Some((device, queue)) = gpu() else {
@@ -139,7 +79,8 @@ fn corpus_presets_render_without_validation_errors() {
             height: h,
             ..EngineConfig::default()
         },
-    );
+    )
+    .unwrap();
     engine.set_texture_provider(Box::new(Checker));
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("target"),
@@ -222,7 +163,8 @@ fn garbage_and_empty_presets_are_errors() {
             height: 36,
             ..EngineConfig::default()
         },
-    );
+    )
+    .unwrap();
     assert!(engine.load_preset(b"", "empty", Transition::Cut).is_err());
     // code that cannot compile fails the load (projectM semantics), the previous preset stays
     let bad = b"MILKDROP_PRESET_VERSION=100\nper_frame_1=zoom = = 3;\n";
@@ -249,7 +191,8 @@ fn unresolved_textures_are_reported_without_a_provider() {
             height: 36,
             ..EngineConfig::default()
         },
-    );
+    )
+    .unwrap();
     let report = engine
         .load_preset(&std::fs::read(path).unwrap(), "diffuser", Transition::Cut)
         .unwrap();

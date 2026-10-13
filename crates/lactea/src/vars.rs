@@ -161,6 +161,42 @@ pub fn extend_md3(ctx: &mut Context, q: &mut Vec<Var>, t: &mut Vec<Var>) {
     }
 }
 
+/// BeatDrop's host variables (`CompatRules::md2_input_vars`): `mousex mousey mousedown mouseclick`,
+/// `ctrllt ctrlrt ctrldn ctrlup` and, in the per-frame context only, `year month day weekday hour minute second
+/// milliseconds totalseconds` (`state.cpp:349-365, 402-409`).
+pub struct HostVars {
+    pub mouse: [Var; 4],
+    pub ctrl: [Var; 4],
+    /// Empty in the per-vertex context.
+    pub date: Vec<Var>,
+}
+
+/// Register [`HostVars`] in `ctx`.
+pub fn register_host(ctx: &mut Context, with_date: bool) -> HostVars {
+    let mut reg = |names: [&str; 4]| names.map(|n| ctx.var(n));
+    let mouse = reg(["mousex", "mousey", "mousedown", "mouseclick"]);
+    let ctrl = reg(["ctrllt", "ctrlrt", "ctrldn", "ctrlup"]);
+    let date = if with_date {
+        [
+            "year",
+            "month",
+            "day",
+            "weekday",
+            "hour",
+            "minute",
+            "second",
+            "milliseconds",
+            "totalseconds",
+        ]
+        .iter()
+        .map(|n| ctx.var(n))
+        .collect()
+    } else {
+        Vec::new()
+    };
+    HostVars { mouse, ctrl, date }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

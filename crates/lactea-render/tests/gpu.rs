@@ -19,30 +19,7 @@ use lactea_render::{
     WavePoint,
 };
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
-/// No adapter: skip with a message, unless `LACTEA_REQUIRE_GPU` is set (CI), which makes it a failure.
-macro_rules! need_gpu {
-    () => {
-        match gpu() {
-            Some(g) => g,
-            None => {
-                assert!(
-                    std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-                    "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-                );
-                eprintln!("SKIP: no wgpu adapter");
-                return;
-            }
-        }
-    };
-}
+use lactea_testutil::{gpu_or_skip, max_abs_diff, quiet_input, read_rgba8};
 
 fn cfg(w: u32, h: u32) -> RenderConfig {
     RenderConfig {
@@ -77,53 +54,6 @@ fn target(
     (t, v)
 }
 
-fn read_target(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    t: &wgpu::Texture,
-    w: u32,
-    h: u32,
-) -> Vec<u8> {
-    let bpr = (w * 4 + 255) / 256 * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: (bpr * h) as u64,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: t,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(h),
-            },
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(enc.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = buf.slice(..).get_mapped_range().unwrap();
-    let mut out = Vec::new();
-    for y in 0..h {
-        out.extend_from_slice(&data[(y * bpr) as usize..(y * bpr + w * 4) as usize]);
-    }
-    out
-}
-
 fn render(
     r: &mut Renderer,
     device: &wgpu::Device,
@@ -134,19 +64,6 @@ fn render(
     let mut enc = device.create_command_encoder(&Default::default());
     r.render_frame(&mut enc, input, view).unwrap();
     queue.submit(Some(enc.finish()));
-}
-
-/// An input that draws nothing: identity warp, decay 1, no echo/gamma tint, no wave/mv/borders.
-fn quiet_input() -> FrameInput {
-    let mut f = FrameInput::default();
-    f.post.decay = 1.0;
-    f.post.gamma = 1.0;
-    f.post.wrap = false;
-    f.main_wave.rgba[3] = 0.0;
-    f.mv.rgba[3] = 0.0;
-    f.borders.ob_rgba[3] = 0.0;
-    f.borders.ib_rgba[3] = 0.0;
-    f
 }
 
 fn gradient(w: u32, h: u32) -> Vec<u8> {
@@ -163,18 +80,9 @@ fn gradient(w: u32, h: u32) -> Vec<u8> {
     v
 }
 
-fn max_diff(a: &[u8], b: &[u8]) -> u8 {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| x.abs_diff(*y))
-        .max()
-        .unwrap_or(0)
-}
-
 #[test]
 fn identity_warp_preserves_image_and_orientation() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (64, 48);
     // MilkDrop2 compat: no always-on hue tint in the no-shader composite (fShader = 0)
     let mut c = cfg(w, h);
@@ -200,7 +108,7 @@ fn identity_warp_preserves_image_and_orientation() {
 
     render(&mut r, &device, &queue, &quiet_input(), &view);
     let (_, _, main) = r.read_stage(Stage::Main).unwrap();
-    let d = max_diff(&main, &img);
+    let d = max_abs_diff(&main, &img);
     assert!(
         d <= 1,
         "identity warp (decay 1) must keep the image; max diff {d}"
@@ -219,7 +127,7 @@ fn identity_warp_preserves_image_and_orientation() {
                 continue; // marker edge / MD2 wrap-sampler blend at the 1-px overscan border
             }
             let i = ((y * w + x) * 4) as usize;
-            worst = worst.max(max_diff(&fin[i..i + 2], &img[i..i + 2])); // R,G ramps (B is a sawtooth)
+            worst = worst.max(max_abs_diff(&fin[i..i + 2], &img[i..i + 2])); // R,G ramps (B is a sawtooth)
         }
     }
     assert!(worst <= 12, "final diff {worst}");
@@ -228,13 +136,13 @@ fn identity_warp_preserves_image_and_orientation() {
         "marker still top-left in the composite: {:?}",
         &fin[0..4]
     );
-    let tb = read_target(&device, &queue, &t, w, h);
+    let tb = read_rgba8(&device, &queue, &t, w, h);
     assert_eq!(tb, fin, "target bytes == Final stage");
 }
 
 #[test]
 fn srgb_target_stores_same_bytes_as_unorm() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (32, 32);
     let mut c = cfg(w, h);
     c.output_format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -243,17 +151,17 @@ fn srgb_target_stores_same_bytes_as_unorm() {
     r.inject_main(&gradient(w, h)).unwrap();
     render(&mut r, &device, &queue, &quiet_input(), &view);
     let (_, _, fin) = r.read_stage(Stage::Final).unwrap();
-    let tb = read_target(&device, &queue, &t, w, h);
+    let tb = read_rgba8(&device, &queue, &t, w, h);
     assert!(
-        max_diff(&tb, &fin) <= 1,
+        max_abs_diff(&tb, &fin) <= 1,
         "sRGB compensation: max diff {}",
-        max_diff(&tb, &fin)
+        max_abs_diff(&tb, &fin)
     );
 }
 
 #[test]
 fn decay_modes_follow_compat() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (32, 32);
     let mut f = quiet_input();
     f.post.decay = 0.5;
@@ -285,7 +193,7 @@ fn decay_modes_follow_compat() {
 
 #[test]
 fn main_alpha_follows_projectm_rgba_semantics() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (32, 32);
     let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
     let px = |m: &[u8], x: usize, y: usize| {
@@ -335,7 +243,7 @@ fn main_alpha_follows_projectm_rgba_semantics() {
 /// and below it in MD2 (D3D9 top-left rule): `ob_size = 0.1` on 30 rows puts the edges at y = 1.5 and 28.5.
 #[test]
 fn border_edges_on_pixel_centres_follow_the_oracle_rule() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (40u32, 30u32);
     let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
     let mut f = quiet_input();
@@ -360,7 +268,7 @@ fn border_edges_on_pixel_centres_follow_the_oracle_rule() {
 /// FBO 0 after allocating its textures); presets without blur - or with only a diagnostic blur chain - draw them.
 #[test]
 fn first_frame_overlays_are_lost_only_with_native_blur() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (32u32, 32u32);
     let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
     let mut f = quiet_input();
@@ -490,7 +398,7 @@ fn busy_input(frame: u32) -> FrameInput {
 
 #[test]
 fn default_state_sequence_renders_without_validation_errors() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (64, 48);
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut r = Renderer::new(&device, &queue, cfg(w, h)).unwrap();
@@ -514,7 +422,7 @@ fn default_state_sequence_renders_without_validation_errors() {
 
 #[test]
 fn main_wave_draws_a_ring_in_every_mode() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (96, 64);
     let mut r = Renderer::new(&device, &queue, cfg(w, h)).unwrap();
     let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
@@ -543,7 +451,7 @@ fn main_wave_draws_a_ring_in_every_mode() {
 
 #[test]
 fn determinism_same_inputs_same_bytes() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (64, 48);
     let run = || {
         let mut r = Renderer::new(&device, &queue, cfg(w, h)).unwrap();
@@ -582,7 +490,7 @@ fn binding(name: &str, src: TexSource, dim: TexDim, addr: Address) -> TextureBin
 
 #[test]
 fn user_warp_shader_and_blur_levels() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (128, 96);
     let mut r = Renderer::new(&device, &queue, cfg(w, h)).unwrap();
     let (_t, view) = target(&device, w, h, wgpu::TextureFormat::Rgba8Unorm);
@@ -622,9 +530,9 @@ fn user_warp_shader_and_blur_levels() {
     let (_, _, main) = r.read_stage(Stage::Main).unwrap();
     // pu.texsize[0].x == 128 -> factor 1: identity (diffuse unused)
     assert!(
-        max_diff(&main, &img) <= 1,
+        max_abs_diff(&main, &img) <= 1,
         "shader identity warp diff {}",
-        max_diff(&main, &img)
+        max_abs_diff(&main, &img)
     );
 
     // comp shader using blur3 + noise volume, forcing the whole blur chain
@@ -698,7 +606,7 @@ fn user_warp_shader_and_blur_levels() {
 
 #[test]
 fn noise_injection_and_user_textures() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg(32, 32)).unwrap();
     let ok = vec![7u8; 256 * 256 * 4];
     r.inject_noise(NoiseTex::Lq, &ok).unwrap();
@@ -711,7 +619,7 @@ fn noise_injection_and_user_textures() {
 
 #[test]
 fn resize_resets_and_keeps_working() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let mut r = Renderer::new(&device, &queue, cfg(64, 48)).unwrap();
     let (_t, view) = target(&device, 32, 24, wgpu::TextureFormat::Rgba8Unorm);
     r.resize(32, 24).unwrap();
@@ -725,7 +633,7 @@ fn resize_resets_and_keeps_working() {
 #[test]
 fn invalid_arguments_are_errors() {
     use lactea_render::{MeshGeometry, RenderError};
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     assert!(matches!(
         Renderer::new(&device, &queue, cfg(0, 48)),
         Err(RenderError::Invalid(_))
@@ -778,7 +686,7 @@ fn invalid_arguments_are_errors() {
 /// ~1 texel per pixel picked up the mip-1 level for LOD ~ +0.01: warped 61 -> 86 dB once removed).
 #[test]
 fn projectm_samplers_read_level_zero_only() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (32, 32);
     // 16x16 1-px checkerboard: level 0 has full contrast, level 4 (1x1) is flat grey
     let mut chk = vec![255u8; 16 * 16 * 4];
@@ -833,7 +741,7 @@ fn projectm_samplers_read_level_zero_only() {
 /// cell triangulation, same texel offset.
 #[test]
 fn gpu_warp_vertex_stage_matches_cpu_uv() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (64, 48);
     let img = gradient(w, h);
     let run = |gpu_vs: bool, shader: bool| -> Vec<u8> {
@@ -897,14 +805,14 @@ fn gpu_warp_vertex_stage_matches_cpu_uv() {
     for shader in [false, true] {
         let cpu = run(false, shader);
         let gpu = run(true, shader);
-        let d = max_diff(&cpu, &gpu);
+        let d = max_abs_diff(&cpu, &gpu);
         assert!(
             d <= 3,
             "shader={shader}: GPU vertex stage vs CPU UVs differ by {d} (orientation / triangulation bug?)"
         );
         // the transform really moved the image
         assert!(
-            max_diff(&gpu, &img) > 40,
+            max_abs_diff(&gpu, &img) > 40,
             "shader={shader}: warp had no effect"
         );
     }
@@ -914,7 +822,7 @@ fn gpu_warp_vertex_stage_matches_cpu_uv() {
 /// sends) draws and feeds the motion vectors of the next frame exactly like one that also carries `warp_uv`.
 #[test]
 fn gpu_warp_frames_do_not_need_the_cpu_grid() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (64, 48);
     let img = gradient(w, h);
     let run = |with_cpu_grid: bool| -> Vec<u8> {
@@ -963,7 +871,7 @@ fn gpu_warp_frames_do_not_need_the_cpu_grid() {
 /// from the interpolated varyings (up to 8-bit rounding), and it must actually vary (not be the zero fill).
 #[test]
 fn gl_varying_fold_reaches_fragment_stage() {
-    let (device, queue) = need_gpu!();
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (64, 48);
     let folds = vec![
         "fn fold_0(vs_uv: vec4<f32>, vs_rad_ang: vec2<f32>, vs_diffuse: vec4<f32>) -> f32 {\n\

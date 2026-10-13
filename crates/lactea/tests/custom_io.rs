@@ -3,17 +3,10 @@
 
 use lactea::{Compat, Engine, EngineConfig, EngineError, FrameClock, Transition};
 use lactea_preset::ParseError;
+use lactea_testutil::{gpu, read_rgba8};
 
 const W: u32 = 64;
 const H: u32 = 48;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
 
 /// No motion, no decay, no main wave; slot 4 holds a disabled wave with `a = 0.7`.
 const PRESET: &str = "MILKDROP_PRESET_VERSION=100\nfDecay=1\nfWaveAlpha=0\n\
@@ -54,7 +47,8 @@ impl Rig {
                 compat: Compat::MilkDrop2,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {
@@ -96,46 +90,7 @@ impl Rig {
     }
 
     fn read(&self) -> Vec<u8> {
-        let bpr = (W * 4).div_ceil(256) * 256;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: u64::from(bpr * H),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr),
-                    rows_per_image: Some(H),
-                },
-            },
-            wgpu::Extent3d {
-                width: W,
-                height: H,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(enc.finish()));
-        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        let data = buf.slice(..).get_mapped_range().unwrap();
-        let mut out = Vec::new();
-        for y in 0..H {
-            out.extend_from_slice(&data[(y * bpr) as usize..(y * bpr + W * 4) as usize]);
-        }
-        out
+        read_rgba8(&self.device, &self.queue, &self.target, W, H)
     }
 }
 

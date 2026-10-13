@@ -87,14 +87,7 @@ mod tests {
             vec!["redtex".into()]
         }
     }
-
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-        let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-    }
+    use lactea_testutil::gpu;
 
     fn shape_preset(image_line: &str) -> String {
         format!(
@@ -164,7 +157,7 @@ mod tests {
         };
 
         let asked = Rc::new(RefCell::new(Vec::new()));
-        let mut e = Engine::new(&device, &queue, cfg.clone());
+        let mut e = Engine::new(&device, &queue, cfg.clone()).unwrap();
         e.set_texture_provider(Box::new(Red(asked.clone())));
         let report = e
             .load_preset(
@@ -190,7 +183,7 @@ mod tests {
         );
 
         // no image key: the shape samples the (still black) main image
-        let mut e = Engine::new(&device, &queue, cfg.clone());
+        let mut e = Engine::new(&device, &queue, cfg.clone()).unwrap();
         e.set_texture_provider(Box::new(Red(Default::default())));
         e.load_preset(shape_preset("").as_bytes(), "noimg", crate::Transition::Cut)
             .unwrap();
@@ -201,7 +194,7 @@ mod tests {
         );
 
         // an image nobody can supply: reported, placeholder drawn (never the red one)
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
         e.set_texture_provider(Box::new(Red(Default::default())));
         let report = e
             .load_preset(
@@ -233,7 +226,8 @@ mod tests {
                 height: size.1,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         e.set_texture_provider(Box::new(Red(asked.clone())));
         let preset = shape_preset("shapecode_0_image=redtex\n");
         let first = e
@@ -266,7 +260,7 @@ mod tests {
             ..Default::default()
         };
         let asked = Rc::new(RefCell::new(Vec::new()));
-        let mut e = Engine::new(&device, &queue, cfg);
+        let mut e = Engine::new(&device, &queue, cfg).unwrap();
         e.set_texture_provider(Box::new(Red(asked.clone())));
         let report = e
             .load_preset(

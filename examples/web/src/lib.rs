@@ -82,7 +82,8 @@ impl Demo {
                 output_format: format,
                 ..Default::default()
             },
-        );
+        )
+        .map_err(js_err)?;
         Ok(Demo { device, queue, surface, config, engine, frame: 0 })
     }
 
@@ -204,14 +205,14 @@ impl Demo {
     }
 
     /// Change the canvas (and render) size.
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
         if width == 0 || height == 0 {
-            return;
+            return Ok(());
         }
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.engine.resize(width, height);
+        self.engine.resize(width, height).map_err(js_err)
     }
 
     /// Frames rendered so far.

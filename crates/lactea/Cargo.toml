@@ -10,7 +10,7 @@ homepage.workspace = true
 readme = "README.md"
 keywords = ["milkdrop", "projectm", "visualizer", "wgpu", "music"]
 categories = ["graphics", "multimedia", "rendering"]
-include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
+include = ["src/**", "build.rs", "Cargo.toml", "README.md", "LICENSE-*"]
 
 [dependencies]
 lactea-abi = { workspace = true }
@@ -21,6 +21,7 @@ lactea-hlsl = { workspace = true }
 lactea-render = { workspace = true }
 wgpu = { workspace = true }
 thiserror = { workspace = true }
+log = { workspace = true }
 gif = { version = "0.14.2", default-features = false, features = ["std"] }
 
 [features]
@@ -30,6 +31,7 @@ diagnostics = ["lactea-render/diagnostics"]
 [dev-dependencies]
 pollster = { workspace = true }
 image = { workspace = true }
+lactea-testutil = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]

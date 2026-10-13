@@ -1,0 +1,16 @@
+[package]
+name = "lactea-host"
+description = "Host-side helpers shared by the lactea binaries and the C API: directory texture provider, image decoding, headless GPU setup, WAV reading."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+# The engine crates never touch the filesystem; this one does, for the hosts that need it.
+publish = false
+
+[dependencies]
+lactea = { workspace = true }
+lactea-jpeg = { workspace = true }
+image = { workspace = true, features = ["tga", "bmp"] }
+wgpu = { workspace = true }
+pollster = { workspace = true }

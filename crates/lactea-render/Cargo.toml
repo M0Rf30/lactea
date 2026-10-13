@@ -15,18 +15,32 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
 [features]
 # Hooks for comparing against a reference render: image injection, extra read-backs. Off by default.
 diagnostics = []
+# OpenGL ES / WebGL backend as a fallback where Vulkan/Metal/DX12 are missing.
+gles = ["wgpu/gles"]
 
 [dependencies]
 lactea-abi = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
-# Used only to block on `Device::pop_error_scope` when validating user shaders (native targets).
+
+# Backends: wgpu's defaults pull all of them in; select what each platform needs.
+[target.'cfg(any(windows, all(unix, not(target_vendor = "apple"))))'.dependencies]
+wgpu = { workspace = true, features = ["vulkan"] }
+[target.'cfg(windows)'.dependencies]
+wgpu = { workspace = true, features = ["dx12"] }
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu = { workspace = true, features = ["metal"] }
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wgpu = { workspace = true, features = ["webgpu"] }
+# Used only to block on `Device::pop_error_scope` when validating user shaders.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = { workspace = true }
 
 [dev-dependencies]
 image = { workspace = true }
 # the integration tests inject images and read stages back
 lactea-render = { path = ".", features = ["diagnostics"] }
+lactea-testutil = { workspace = true }
 
 [package.metadata.docs.rs]
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]

@@ -94,3 +94,32 @@ fn damaged_streams_do_not_panic() {
     assert!(decode_rgba(b"not a jpeg").is_err());
     assert!(!is_jpeg(b"\x89PNG"));
 }
+
+/// SOI, a frame header (`sof` = 0xC0 baseline / 0xC2 progressive) with `comps` components of 1x1 sampling, EOI.
+fn header_only(sof: u8, width: u16, height: u16, comps: u8) -> Vec<u8> {
+    let mut d = vec![0xff, 0xd8, 0xff, sof];
+    d.extend_from_slice(&(8 + 3 * u16::from(comps)).to_be_bytes());
+    d.push(8);
+    d.extend_from_slice(&height.to_be_bytes());
+    d.extend_from_slice(&width.to_be_bytes());
+    d.push(comps);
+    for id in 1..=comps {
+        d.extend_from_slice(&[id, 0x11, 0]);
+    }
+    d.extend_from_slice(&[0xff, 0xd9]);
+    d
+}
+
+/// A tiny header must not make the decoder allocate planes, coefficients and output of gigabytes.
+#[test]
+fn declared_size_beyond_the_memory_budget_is_rejected() {
+    // output alone is exactly 1 GiB (accepted by the old check); with three progressive planes it is ~3.5 GiB
+    let e = decode_rgba(&header_only(0xc2, 16384, 16384, 3)).unwrap_err();
+    assert_eq!(e.reason(), "image too large");
+}
+
+#[test]
+fn a_frame_without_any_scan_is_rejected() {
+    let e = decode_rgba(&header_only(0xc0, 8, 8, 1)).unwrap_err();
+    assert_eq!(e.reason(), "no SOS");
+}

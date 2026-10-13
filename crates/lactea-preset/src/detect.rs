@@ -134,6 +134,11 @@ fn scan_lines(bytes: &[u8], out: &mut Vec<Evidence>) {
     }
 }
 
+/// Most sides a custom shape draws in MilkDrop 2 and projectM (`CompatRules::max_shape_sides` is
+/// 100 for both, 500 for MilkDrop 3; see `docs/md3.md` "Other deltas").  Detection has no compat
+/// input, so a shape above this limit is evidence of MilkDrop 3.
+const PRE_MD3_MAX_SHAPE_SIDES: i32 = 100;
+
 fn scan_preset(p: &Preset, out: &mut Vec<Evidence>) {
     // a `SpriteName=` outside a block header still loads a sprite
     if p.sprite.is_some() && !out.contains(&Evidence::SpriteBlock) {
@@ -143,7 +148,7 @@ fn scan_preset(p: &Preset, out: &mut Vec<Evidence>) {
         out.push(Evidence::PresetVersion(300));
     }
     for (i, s) in p.shapes.iter().enumerate().take(MAX_CUSTOM_SHAPES) {
-        if s.enabled != 0 && s.sides > 100 {
+        if s.enabled != 0 && s.sides > PRE_MD3_MAX_SHAPE_SIDES {
             out.push(Evidence::ShapeSides {
                 shape: i,
                 sides: s.sides,

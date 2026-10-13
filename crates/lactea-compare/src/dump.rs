@@ -331,20 +331,10 @@ pub struct DumpReader {
 }
 
 fn list_frames(dir: &Path, ext: &str) -> Vec<u32> {
-    let mut v: Vec<u32> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                let (stem, x) = name.rsplit_once('.')?;
-                if x != ext {
-                    return None;
-                }
-                stem.parse::<u32>().ok()
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
+    let mut v: Vec<u32> = crate::util::file_stems(dir, |x| x == ext)
+        .iter()
+        .filter_map(|s| s.parse().ok())
+        .collect();
     v.sort_unstable();
     v.dedup();
     v
@@ -439,20 +429,9 @@ impl DumpReader {
 
     /// Names (without extension) of static textures, sorted, 2D `.png` and 3D `.bin`.
     pub fn texture_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = match std::fs::read_dir(self.dir.join(dump::TEXTURES_DIR)) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .filter_map(|e| {
-                    let n = e.file_name().to_string_lossy().into_owned();
-                    let (stem, ext) = n.rsplit_once('.')?;
-                    matches!(ext, "png" | "bin").then(|| stem.to_string())
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        v.sort();
-        v.dedup();
-        v
+        crate::util::file_stems(&self.dir.join(dump::TEXTURES_DIR), |e| {
+            matches!(e, "png" | "bin")
+        })
     }
 
     /// Decodes the 2D texture `textures/<name>.png`.

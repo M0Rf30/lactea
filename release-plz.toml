@@ -68,3 +68,8 @@ publish = false
 name = "lactea-eel-oracle"
 release = false
 publish = false
+
+[[package]]
+name = "lactea-testutil"
+release = false
+publish = false

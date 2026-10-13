@@ -42,24 +42,76 @@ fn fft_fetch(t: texture_2d<f32>, u: f32, linear: bool, wrapped: bool) -> vec4<f3
 "#;
 
 /// The helper functions to append to a module that binds a [`lactea_abi::TexSource::Fft`] texture.
-pub(crate) fn helper_wgsl() -> String {
-    HELPER.replace("@BINS@", &lactea_abi::FFT_BINS.to_string())
+pub(crate) fn helper_wgsl(prelude: crate::Prelude) -> String {
+    if prelude.beatdrop() {
+        BD_HELPER.to_string()
+    } else {
+        HELPER.replace("@BINS@", &lactea_abi::FFT_BINS.to_string())
+    }
 }
 
+/// Texels per row of the BeatDrop spectrum rows (`MY_FFT_SHADER_SAMPLES`).
+pub const BEATDROP_FFT_BINS: usize = 1024;
+/// Texels per row of the BeatDrop waveform rows (`NUM_WAVEFORM_SAMPLES`).
+pub const BEATDROP_WAVE_SAMPLES: usize = 480;
+
+/// WGSL of the BeatDrop lookups. The engine texture is [`BEATDROP_FFT_BINS`] wide and has four rows: 0 = smoothed
+/// spectrum, 1 = peak hold, 2 = left waveform, 3 = right waveform (the last two [`BEATDROP_WAVE_SAMPLES`] wide, the
+/// rest unused). `sampler_fft` addresses rows 0..2 and `sampler_wave` rows 2..4 as two-row textures of their own
+/// width, so `v = .25` / `.75` hit the row centres; filter and address mode apply per axis inside that window, as
+/// D3D9 does for a 1024 x 2 / 480 x 2 `R32F` texture (read with `textureLoad`: `R32Float` is not filterable).
+const BD_HELPER: &str = r#"
+fn bd_texel(t: texture_2d<f32>, x: i32, y: i32, w: i32, row0: i32, wrapped: bool) -> f32 {
+    var kx = clamp(x, 0, w - 1);
+    var ky = clamp(y, 0, 1);
+    if (wrapped) {
+        kx = ((x % w) + w) % w;
+        ky = ((y % 2) + 2) % 2;
+    }
+    return textureLoad(t, vec2<i32>(kx, row0 + ky), 0).r;
+}
+
+fn bd_fetch(t: texture_2d<f32>, uv: vec2<f32>, w: i32, row0: i32, linear: bool, wrapped: bool) -> vec4<f32> {
+    let n = vec2<f32>(f32(w), 2.0);
+    var r: f32;
+    if (linear) {
+        let p = uv * n - vec2<f32>(0.5, 0.5);
+        let f = floor(p);
+        let i = vec2<i32>(f);
+        let fr = p - f;
+        let a = mix(bd_texel(t, i.x, i.y, w, row0, wrapped), bd_texel(t, i.x + 1, i.y, w, row0, wrapped), fr.x);
+        let b = mix(bd_texel(t, i.x, i.y + 1, w, row0, wrapped), bd_texel(t, i.x + 1, i.y + 1, w, row0, wrapped), fr.x);
+        r = mix(a, b, fr.y);
+    } else {
+        let i = vec2<i32>(floor(uv * n));
+        r = bd_texel(t, i.x, i.y, w, row0, wrapped);
+    }
+    return vec4<f32>(r, 1.0, 1.0, 1.0);
+}
+"#;
+
 impl Tr<'_> {
-    /// Whether lookups of sampler `samp` (HLSL name) are the MD3 shader FFT.
+    /// Whether lookups of sampler `samp` (HLSL name) read the engine's spectrum / waveform texture: `fft` under MD3,
+    /// `fft` and `wave` under BeatDrop.
     pub fn is_fft_sampler(&self, samp: &str) -> bool {
-        self.md3 && crate::iface::sampler_root(samp).0 == "fft"
+        match crate::iface::sampler_root(samp).0.as_str() {
+            "fft" => self.prelude.md3() || self.prelude.beatdrop(),
+            "wave" => self.prelude.beatdrop(),
+            _ => false,
+        }
     }
 
     /// `tex2D*` of the FFT sampler `samp`. `args` are the checked arguments of the HLSL call; `kind` is the lookup
     /// flavour (`""`, `lod`, `bias`, `proj`, `grad`). Only the `x` coordinate matters; LOD, bias and gradients are
     /// evaluated (and type-checked) but do not change the result: the texture has a single level and one row.
     pub fn fft_lookup(&mut self, samp: &str, args: &[Expr], kind: &str) -> R<V> {
-        let tb = crate::iface::resolve_sampler(samp, TexDim::D2, false, true);
+        let tb = crate::iface::resolve_sampler(samp, TexDim::D2, false, self.prelude);
         let linear = tb.filter == Filter::Linear;
         let wrapped = tb.address == Address::Wrap;
         let cv = self.expr(&args[1])?;
+        if self.prelude.beatdrop() {
+            return self.bd_lookup(samp, args, kind, cv, linear, wrapped);
+        }
         let u = match kind {
             "" | "grad" => {
                 let c = self.conv(&cv, &Ty::vec(Sc::F, 2))?;
@@ -85,6 +137,51 @@ impl Tr<'_> {
         };
         Ok(V::new(
             format!("fft_fetch(tex_{samp}, {u}, {linear}, {wrapped})"),
+            Ty::vec(Sc::F, 4),
+        ))
+    }
+
+    /// BeatDrop's `tex2D*` of `sampler_fft` / `sampler_wave`: both coordinates matter (`v` selects the row, `.25` /
+    /// `.75` are the row centres); LOD, bias and gradients are evaluated but do not change the result.
+    fn bd_lookup(
+        &mut self,
+        samp: &str,
+        args: &[Expr],
+        kind: &str,
+        cv: V,
+        linear: bool,
+        wrapped: bool,
+    ) -> R<V> {
+        let uv = match kind {
+            "" | "grad" => {
+                let c = self.conv(&cv, &Ty::vec(Sc::F, 2))?;
+                if kind == "grad" {
+                    for a in &args[2..4] {
+                        let g = self.expr(a)?;
+                        self.conv(&g, &Ty::vec(Sc::F, 2))?;
+                    }
+                }
+                let c = self.bind(V::new(c, Ty::vec(Sc::F, 2)));
+                c.s
+            }
+            _ => {
+                let c4 = self.conv(&cv, &Ty::vec(Sc::F, 4))?;
+                let c = self.bind(V::new(c4, Ty::vec(Sc::F, 4)));
+                let c = paren(&c.s);
+                if kind == "proj" {
+                    format!("({c}.xy / {c}.w)")
+                } else {
+                    format!("{c}.xy")
+                }
+            }
+        };
+        let (w, row0) = if crate::iface::sampler_root(samp).0 == "wave" {
+            (BEATDROP_WAVE_SAMPLES, 2)
+        } else {
+            (BEATDROP_FFT_BINS, 0)
+        };
+        Ok(V::new(
+            format!("bd_fetch(tex_{samp}, {uv}, {w}, {row0}, {linear}, {wrapped})"),
             Ty::vec(Sc::F, 4),
         ))
     }

@@ -91,7 +91,7 @@ impl Default for PresetSprite {
 
 /// `sscanf("%X")`: leading blanks, optional `0x` / `0X`, hex digits, anything after is ignored. `None` when no
 /// digit is read.
-fn scan_hex(b: &[u8]) -> Option<u32> {
+fn scan_color_key(b: &[u8]) -> Option<u32> {
     let s = b.trim_ascii_start();
     let s = match s {
         [b'0', b'x' | b'X', rest @ ..] if rest.first().is_some_and(u8::is_ascii_hexdigit) => rest,
@@ -108,17 +108,15 @@ fn scan_hex(b: &[u8]) -> Option<u32> {
     Some(v as u32)
 }
 
-/// Value of the last line that contains `SpriteName=`: the text after the line's first `=` without trailing
+/// Value of the last line that contains `SpriteName=`: the text after that key without trailing
 /// whitespace. `None` when no line has the key.
 fn scan_name(data: &[u8]) -> Option<Vec<u8>> {
     const KEY: &[u8] = b"SpriteName=";
     let mut found = None;
     for line in data.split(|&b| b == b'\n') {
         for piece in line.chunks(NAME_SCAN_CHUNK) {
-            if piece.windows(KEY.len()).any(|w| w == KEY)
-                && let Some(eq) = piece.iter().position(|&b| b == b'=')
-            {
-                found = Some(piece[eq + 1..].trim_ascii_end().to_vec());
+            if let Some(at) = piece.windows(KEY.len()).position(|w| w == KEY) {
+                found = Some(piece[at + KEY.len()..].trim_ascii_end().to_vec());
             }
         }
     }
@@ -134,7 +132,7 @@ impl PresetSprite {
             return None;
         }
         let d = PresetSprite::default();
-        let color_key = scan_hex(&lk.text("SpriteColorKey")).unwrap_or(d.color_key);
+        let color_key = scan_color_key(&lk.text("SpriteColorKey")).unwrap_or(d.color_key);
         let layer = lk.int("SpriteLayer", d.layer);
         let blend = lk.int("SpriteBlend", d.blend);
         let alpha = lk.float("SpriteAlpha", d.alpha);
@@ -277,6 +275,15 @@ mod tests {
         let s = Preset::parse(&text).unwrap().sprite.unwrap();
         assert_eq!(s.name, "second.png");
         assert_eq!(s.layer, 1);
+    }
+
+    #[test]
+    fn name_is_read_after_its_own_key_not_the_first_equals() {
+        let s = Preset::parse(&preset("foo=bar SpriteName=a.png\n"))
+            .unwrap()
+            .sprite
+            .unwrap();
+        assert_eq!(s.name, "a.png");
     }
 
     #[test]

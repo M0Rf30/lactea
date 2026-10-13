@@ -194,22 +194,24 @@ impl Context {
         }
     }
 
-    /// Current value of `v`: a context-local variable or a shared register.  `v` must come
-    /// from this context (a `Var` of another context may index out of range and panic).
+    /// Current value of `v`: a context-local variable or a shared register.  A `Var` that
+    /// does not belong to this context reads 0.
     #[inline]
     pub fn get(&self, v: Var) -> f64 {
         if v.0 & REG_FLAG == 0 {
-            self.vars[v.0 as usize]
+            self.vars.get(v.0 as usize).copied().unwrap_or(0.0)
         } else {
             self.global.reg((v.0 & !REG_FLAG) as usize)
         }
     }
 
-    /// Sets `v` to `value`; same contract as [`get`](Self::get).
+    /// Sets `v` to `value`; same contract as [`get`](Self::get) (a foreign `Var` is ignored).
     #[inline]
     pub fn set(&mut self, v: Var, value: f64) {
         if v.0 & REG_FLAG == 0 {
-            self.vars[v.0 as usize] = value;
+            if let Some(slot) = self.vars.get_mut(v.0 as usize) {
+                *slot = value;
+            }
         } else {
             self.global.set_reg((v.0 & !REG_FLAG) as usize, value);
         }
@@ -282,16 +284,20 @@ impl Context {
 
     /// Runs a program compiled by this context and returns the value of its last expression.
     ///
-    /// # Panics
-    /// If `prog` was compiled by another context.
+    /// A program compiled by another context is not run and yields 0; use
+    /// [`try_run`](Self::try_run) to tell the two apart.
     pub fn run(&mut self, prog: &Program) -> f64 {
-        assert_eq!(
-            prog.ctx_id, self.id,
-            "Program belongs to a different Context"
-        );
+        self.try_run(prog).unwrap_or(0.0)
+    }
+
+    /// Like [`run`](Self::run), but `None` if `prog` was compiled by another context.
+    pub fn try_run(&mut self, prog: &Program) -> Option<f64> {
+        if prog.ctx_id != self.id {
+            return None;
+        }
         let Some(root) = &prog.root else {
-            return 0.0;
+            return Some(0.0);
         };
-        self.fval(root)
+        Some(self.fval(root))
     }
 }

@@ -2,6 +2,7 @@
 //! preset's stub warp shader. Skipped (with a note) when there is no GPU adapter.
 
 use lactea::{Compat, Engine, EngineConfig, FrameClock, ShaderOverride, Transition};
+use lactea_testutil::{gpu_or_skip, read_rgba8};
 
 const W: u32 = 64;
 const H: u32 = 48;
@@ -35,58 +36,14 @@ fn render_centre(
         );
         queue.submit(Some(enc.finish()));
     }
-    let bpr = (W * 4).div_ceil(256) * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: u64::from(bpr * H),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: target,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(H),
-            },
-        },
-        wgpu::Extent3d {
-            width: W,
-            height: H,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(enc.finish()));
-    buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    let data = buf.slice(..).get_mapped_range().unwrap();
-    let o = ((H / 2) * bpr + (W / 2) * 4) as usize;
+    let data = read_rgba8(device, queue, target, W, H);
+    let o = (((H / 2) * W + (W / 2)) * 4) as usize;
     [data[o], data[o + 1], data[o + 2], data[o + 3]]
 }
 
 #[test]
 fn override_replaces_encrypted_stub() {
-    let instance = wgpu::Instance::default();
-    let Ok(adapter) =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-    else {
-        eprintln!("skipped: no GPU adapter");
-        return;
-    };
-    let Ok((device, queue)) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-    else {
-        eprintln!("skipped: no GPU device");
-        return;
-    };
+    let (device, queue) = gpu_or_skip!();
     let mut engine = Engine::new(
         &device,
         &queue,
@@ -98,7 +55,8 @@ fn override_replaces_encrypted_stub() {
             start_clean: true,
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("target"),
         size: wgpu::Extent3d {

@@ -8,7 +8,7 @@ use crate::fft::{Fft, FftStyle};
 use crate::{SPECTRUM_BINS, WAVE_BUF};
 
 /// The FFT MD3 runs on every waveform: 576 samples in, 1024-point transform, 512 equalised bins
-/// out, Hann-style envelope, MD2 `fft.cpp` constants.
+/// out, raised-cosine envelope `0.5 + 0.5 * sin(i * 2π / 576 - π / 2)`, MD2 `fft.cpp` constants.
 pub(crate) fn md3_fft() -> Fft {
     Fft::new(WAVE_BUF, SPECTRUM_BINS, true, 1.0, FftStyle::Md2)
 }
@@ -35,11 +35,14 @@ pub(crate) fn quantise_i8(v: f32) -> f32 {
 /// transformed (radix 2); bin `i` of the result is `equalize[i] * |X[i]|` with
 /// `equalize[i] = -0.02 * ln((512 - i) / 512)`. There is no input damping and no alignment.
 ///
-/// This allocates the FFT tables on every call; [`Analyzer`](crate::Analyzer) in
+/// The FFT tables are built once per thread and reused; [`Analyzer`](crate::Analyzer) in
 /// [`AnalysisMode::Md3`](crate::AnalysisMode::Md3) keeps its own and produces identical values.
 pub fn md3_spectrum(wave: &[f32; WAVE_BUF]) -> [f32; SPECTRUM_BINS] {
+    thread_local! {
+        static FFT: std::cell::RefCell<Fft> = std::cell::RefCell::new(md3_fft());
+    }
     let mut out = [0.0f32; SPECTRUM_BINS];
-    md3_fft().time_to_frequency_domain(wave, &mut out);
+    FFT.with(|f| f.borrow_mut().time_to_frequency_domain(wave, &mut out));
     out
 }
 

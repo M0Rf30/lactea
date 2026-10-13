@@ -4,14 +4,7 @@
 //! screen pixels rather than a 16:9 ellipse; `side` is a vertical wipe). Skipped (with a note) without a GPU adapter.
 
 use lactea::{Compat, Engine, EngineConfig, FrameClock, Stage, Transition};
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
+use lactea_testutil::gpu;
 
 fn half(b: f32, r: f32) -> String {
     format!(
@@ -42,7 +35,8 @@ fn centre_row(w: u32, h: u32, header: &str) -> Option<Vec<f32>> {
             start_clean: true,
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
     e.load_preset(pair(header).as_bytes(), "pair.milk2", Transition::Cut)
         .unwrap();
     let view = device

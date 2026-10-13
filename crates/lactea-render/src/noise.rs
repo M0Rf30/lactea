@@ -13,6 +13,7 @@
 //! Sizes (plugin.cpp `Init`): `noise_lq` 256/zoom 1, `noise_lq_lite` 32/1, `noise_mq` 256/4,
 //! `noise_hq` 256/8, `noisevol_lq` 32/1, `noisevol_hq` 32/4.
 
+use crate::config::CompatRules;
 use crate::rng::Rng;
 use lactea_abi::NoiseTex;
 
@@ -114,6 +115,17 @@ fn dwords_to_rgba(d: &[u32]) -> Vec<u8> {
     out
 }
 
+/// One smoothed sample of a `zoom`-spaced lattice: the cubic through the four lattice points around `pos` along
+/// a line of `n` samples (wrapping), where `at(i)` is the buffer index of the line's `i`-th sample.
+fn cubic_on_line(d: &[u32], at: impl Fn(usize) -> usize, pos: usize, zoom: usize, n: usize) -> u32 {
+    let base = (pos / zoom) * zoom + n;
+    let y0 = d[at((base - zoom) % n)];
+    let y1 = d[at(base % n)];
+    let y2 = d[at((base + zoom) % n)];
+    let y3 = d[at((base + zoom * 2) % n)];
+    dw_cubic(y0, y1, y2, y3, (pos % zoom) as f32 / zoom as f32)
+}
+
 /// `AddNoiseTex`: `size`x`size` RGBA8, row 0 first.
 pub fn gen_noise_tex(rng: &mut Rng, size: u32, zoom: u32) -> Vec<u8> {
     let n = size as usize;
@@ -125,31 +137,14 @@ pub fn gen_noise_tex(rng: &mut Rng, size: u32, zoom: u32) -> Vec<u8> {
     if zoom > 1 {
         // across, only on the main lines
         for y in (0..n).step_by(zoom) {
-            for x in 0..n {
-                if x % zoom != 0 {
-                    let base_x = (x / zoom) * zoom + n;
-                    let base_y = y * n;
-                    let y0 = d[base_y + ((base_x - zoom) % n)];
-                    let y1 = d[base_y + (base_x % n)];
-                    let y2 = d[base_y + ((base_x + zoom) % n)];
-                    let y3 = d[base_y + ((base_x + zoom * 2) % n)];
-                    let t = (x % zoom) as f32 / zoom as f32;
-                    d[y * n + x] = dw_cubic(y0, y1, y2, y3, t);
-                }
+            for x in (0..n).filter(|x| x % zoom != 0) {
+                d[y * n + x] = cubic_on_line(&d, |i| y * n + i, x, zoom, n);
             }
         }
         // down, on every line
         for x in 0..n {
-            for y in 0..n {
-                if y % zoom != 0 {
-                    let base_y = (y / zoom) * zoom + n;
-                    let y0 = d[((base_y - zoom) % n) * n + x];
-                    let y1 = d[(base_y % n) * n + x];
-                    let y2 = d[((base_y + zoom) % n) * n + x];
-                    let y3 = d[((base_y + zoom * 2) % n) * n + x];
-                    let t = (y % zoom) as f32 / zoom as f32;
-                    d[y * n + x] = dw_cubic(y0, y1, y2, y3, t);
-                }
+            for y in (0..n).filter(|y| y % zoom != 0) {
+                d[y * n + x] = cubic_on_line(&d, |i| i * n + x, y, zoom, n);
             }
         }
     }
@@ -157,10 +152,14 @@ pub fn gen_noise_tex(rng: &mut Rng, size: u32, zoom: u32) -> Vec<u8> {
 }
 
 /// `AddNoiseVol`: `size`^3 RGBA8, slice (z) major, then row, then x.
-pub fn gen_noise_vol(rng: &mut Rng, size: u32, zoom: u32) -> Vec<u8> {
+///
+/// With `rules.noisevol_row_stride` the smoothing passes step through z with a stride of `size` instead of
+/// `size * size` (projectM's `MilkdropNoise.cpp`), so they mix and overwrite unrelated rows.
+pub fn gen_noise_vol(rng: &mut Rng, size: u32, zoom: u32, rules: &CompatRules) -> Vec<u8> {
     let n = size as usize;
     let zoom = zoom as usize;
     let slice = n * n;
+    let zs = if rules.noisevol_row_stride { n } else { slice };
     let range = if zoom > 1 { 216 } else { 256 };
     let mut d = vec![0u32; n * slice];
     for z in 0..n {
@@ -171,51 +170,27 @@ pub fn gen_noise_vol(rng: &mut Rng, size: u32, zoom: u32) -> Vec<u8> {
         // across X, only on main lines of main slices
         for z in (0..n).step_by(zoom) {
             for y in (0..n).step_by(zoom) {
-                for x in 0..n {
-                    if x % zoom != 0 {
-                        let base_x = (x / zoom) * zoom + n;
-                        let base_y = z * slice + y * n;
-                        let y0 = d[base_y + ((base_x - zoom) % n)];
-                        let y1 = d[base_y + (base_x % n)];
-                        let y2 = d[base_y + ((base_x + zoom) % n)];
-                        let y3 = d[base_y + ((base_x + zoom * 2) % n)];
-                        let t = (x % zoom) as f32 / zoom as f32;
-                        d[z * slice + y * n + x] = dw_cubic(y0, y1, y2, y3, t);
-                    }
+                let row = z * zs + y * n;
+                for x in (0..n).filter(|x| x % zoom != 0) {
+                    d[row + x] = cubic_on_line(&d, |i| row + i, x, zoom, n);
                 }
             }
         }
         // down Y, on main slices
         for z in (0..n).step_by(zoom) {
+            let base_z = z * zs;
             for x in 0..n {
-                for y in 0..n {
-                    if y % zoom != 0 {
-                        let base_y = (y / zoom) * zoom + n;
-                        let base_z = z * slice;
-                        let y0 = d[((base_y - zoom) % n) * n + base_z + x];
-                        let y1 = d[(base_y % n) * n + base_z + x];
-                        let y2 = d[((base_y + zoom) % n) * n + base_z + x];
-                        let y3 = d[((base_y + zoom * 2) % n) * n + base_z + x];
-                        let t = (y % zoom) as f32 / zoom as f32;
-                        d[y * n + base_z + x] = dw_cubic(y0, y1, y2, y3, t);
-                    }
+                for y in (0..n).filter(|y| y % zoom != 0) {
+                    d[y * n + base_z + x] = cubic_on_line(&d, |i| i * n + base_z + x, y, zoom, n);
                 }
             }
         }
         // through Z, everywhere
         for x in 0..n {
             for y in 0..n {
-                for z in 0..n {
-                    if z % zoom != 0 {
-                        let base_y = y * n;
-                        let base_z = (z / zoom) * zoom + n;
-                        let y0 = d[((base_z - zoom) % n) * slice + base_y + x];
-                        let y1 = d[(base_z % n) * slice + base_y + x];
-                        let y2 = d[((base_z + zoom) % n) * slice + base_y + x];
-                        let y3 = d[((base_z + zoom * 2) % n) * slice + base_y + x];
-                        let t = (z % zoom) as f32 / zoom as f32;
-                        d[z * slice + base_y + x] = dw_cubic(y0, y1, y2, y3, t);
-                    }
+                let base_y = y * n;
+                for z in (0..n).filter(|z| z % zoom != 0) {
+                    d[z * zs + base_y + x] = cubic_on_line(&d, |i| i * zs + base_y + x, z, zoom, n);
                 }
             }
         }
@@ -224,10 +199,10 @@ pub fn gen_noise_vol(rng: &mut Rng, size: u32, zoom: u32) -> Vec<u8> {
 }
 
 /// Generate one of the six built-in textures as RGBA8 (2D: row 0 first; 3D: z-major slices).
-pub fn generate(tex: NoiseTex, rng: &mut Rng) -> Vec<u8> {
+pub fn generate(tex: NoiseTex, rng: &mut Rng, rules: &CompatRules) -> Vec<u8> {
     let (size, zoom, vol) = noise_spec(tex);
     if vol {
-        gen_noise_vol(rng, size, zoom)
+        gen_noise_vol(rng, size, zoom, rules)
     } else {
         gen_noise_tex(rng, size, zoom)
     }
@@ -236,13 +211,15 @@ pub fn generate(tex: NoiseTex, rng: &mut Rng) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Compat;
 
     #[test]
     fn sizes_and_determinism() {
+        let rules = Compat::MilkDrop2.rules();
         for tex in ALL_NOISE {
             let (s, _, vol) = noise_spec(tex);
-            let a = generate(tex, &mut Rng::new(7));
-            let b = generate(tex, &mut Rng::new(7));
+            let a = generate(tex, &mut Rng::new(7), &rules);
+            let b = generate(tex, &mut Rng::new(7), &rules);
             let expect = if vol {
                 (s * s * s * 4) as usize
             } else {
@@ -250,7 +227,7 @@ mod tests {
             };
             assert_eq!(a.len(), expect, "{tex:?}");
             assert_eq!(a, b, "{tex:?} must be deterministic");
-            assert_ne!(a, generate(tex, &mut Rng::new(8)));
+            assert_ne!(a, generate(tex, &mut Rng::new(8), &rules));
         }
     }
 
@@ -296,5 +273,36 @@ mod tests {
         ] {
             assert_eq!(builtin_image_noise(n), None, "{n}");
         }
+    }
+
+    /// projectM's volume smoothing steps through z with a stride of `size` (`MilkdropNoise.cpp:186-266`), MD2 with
+    /// `size * size`; the two must produce different volumes.
+    #[test]
+    fn noisevol_row_stride_follows_projectm_formula() {
+        let (n, zoom) = (32usize, 4usize);
+        let pm = Compat::ProjectM.rules();
+        let md2 = Compat::MilkDrop2.rules();
+        assert!(pm.noisevol_row_stride && !md2.noisevol_row_stride);
+        let a = gen_noise_vol(&mut Rng::new(11), n as u32, zoom as u32, &pm);
+        let b = gen_noise_vol(&mut Rng::new(11), n as u32, zoom as u32, &md2);
+        assert_ne!(a, b);
+
+        // Cell (z=0, y=0, x=1): the X pass writes `z*size + y*size + x` from the main-line samples at x = 0, 4, 8, -4,
+        // and no later pass touches it (y = 0 and z = 0 are lattice rows), so it equals the cubic of the raw values.
+        let mut rng = Rng::new(11);
+        let mut raw = vec![0u32; n * n * n];
+        for z in 0..n {
+            fill_lines(&mut rng, &mut raw[z * n * n..(z + 1) * n * n], n, 216);
+        }
+        let at = |i: usize| raw[i];
+        let expect = dw_cubic(at(n - 4), at(0), at(4), at(8), 0.25);
+        let px = &a[4..8];
+        let want = [
+            (expect >> 16) as u8,
+            (expect >> 8) as u8,
+            expect as u8,
+            (expect >> 24) as u8,
+        ];
+        assert_eq!(px, want);
     }
 }

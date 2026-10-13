@@ -23,6 +23,7 @@
 //! extension but fails the marker scan ([`Milk2Error::NotDouble`]) is loaded as an ordinary `.milk`.
 //! [`write_milk2`] is the saver, byte for byte.
 
+use crate::cnum;
 use std::fmt;
 
 const P1_BEGIN: &[u8] = b"[PRESET1_BEGIN]";
@@ -292,22 +293,13 @@ fn scan_sprite_end(bytes: &[u8]) -> u32 {
     last
 }
 
-fn is_c_space(b: u8) -> bool {
-    matches!(b, b' ' | 0x09..=0x0d)
-}
-
-/// `strtof` prefix (decimal, `inf`, `nan`) with `std::stof`'s failure modes.
+/// `strtof` prefix (decimal, `inf`, `nan`) with `std::stof`'s failure modes.  Unlike
+/// [`cnum::stof`] (glibc, projectM) this follows MD3's Windows CRT: hex floats are not read
+/// (`0x10` is `0`) and a literal that underflows to a subnormal is still a number.
 fn stof(text: &[u8], key: &'static str) -> Result<f32, Milk2Error> {
-    let s = &text[text
-        .iter()
-        .position(|&b| !is_c_space(b))
-        .unwrap_or(text.len())..];
-    let mut i = 0;
-    if matches!(s.first(), Some(b'+' | b'-')) {
-        i += 1;
-    }
-    let rest = &s[i..];
-    let lower: Vec<u8> = rest.iter().take(8).map(u8::to_ascii_lowercase).collect();
+    let s = cnum::skip_space(text);
+    let i = usize::from(matches!(s.first(), Some(b'+' | b'-')));
+    let lower: Vec<u8> = s[i..].iter().take(8).map(u8::to_ascii_lowercase).collect();
     if lower.starts_with(b"infinity") || lower.starts_with(b"inf") || lower.starts_with(b"nan") {
         let end = i + if lower.starts_with(b"infinity") { 8 } else { 3 };
         return std::str::from_utf8(&s[..end])
@@ -315,30 +307,8 @@ fn stof(text: &[u8], key: &'static str) -> Result<f32, Milk2Error> {
             .and_then(|t| t.parse::<f32>().ok())
             .ok_or(Milk2Error::InvalidNumber { key });
     }
-    let digits = |from: usize| s[from..].iter().take_while(|b| b.is_ascii_digit()).count();
-    let int_len = digits(i);
-    i += int_len;
-    let mut frac_len = 0;
-    if s.get(i) == Some(&b'.') {
-        frac_len = digits(i + 1);
-        if int_len + frac_len > 0 {
-            i += 1 + frac_len;
-        }
-    }
-    if int_len + frac_len == 0 {
-        return Err(Milk2Error::InvalidNumber { key });
-    }
-    if matches!(s.get(i), Some(b'e' | b'E')) {
-        let mut j = i + 1;
-        if matches!(s.get(j), Some(b'+' | b'-')) {
-            j += 1;
-        }
-        let exp = digits(j);
-        if exp > 0 {
-            i = j + exp;
-        }
-    }
-    let v: f32 = std::str::from_utf8(&s[..i])
+    let end = cnum::decimal_end(s, i).ok_or(Milk2Error::InvalidNumber { key })?;
+    let v: f32 = std::str::from_utf8(&s[..end])
         .ok()
         .and_then(|t| t.parse().ok())
         .ok_or(Milk2Error::InvalidNumber { key })?;
@@ -348,30 +318,12 @@ fn stof(text: &[u8], key: &'static str) -> Result<f32, Milk2Error> {
     Ok(v)
 }
 
-/// `std::stoi(text, nullptr, 10)`: leading blanks, a sign, the longest run of digits.
+/// `std::stoi(text, nullptr, 10)`.
 fn stoi(text: &[u8], key: &'static str) -> Result<i32, Milk2Error> {
-    let s = &text[text
-        .iter()
-        .position(|&b| !is_c_space(b))
-        .unwrap_or(text.len())..];
-    let (neg, s) = match s.first() {
-        Some(b'-') => (true, &s[1..]),
-        Some(b'+') => (false, &s[1..]),
-        _ => (false, s),
-    };
-    let n = s.iter().take_while(|b| b.is_ascii_digit()).count();
-    if n == 0 {
-        return Err(Milk2Error::InvalidNumber { key });
-    }
-    let mut v: i64 = 0;
-    for &d in &s[..n] {
-        v = v * 10 + i64::from(d - b'0');
-        if v > i64::from(i32::MAX) + 1 {
-            return Err(Milk2Error::NumberOutOfRange { key });
-        }
-    }
-    let v = if neg { -v } else { v };
-    i32::try_from(v).map_err(|_| Milk2Error::NumberOutOfRange { key })
+    cnum::stoi_checked(text).map_err(|e| match e {
+        cnum::NumErr::Invalid => Milk2Error::InvalidNumber { key },
+        cnum::NumErr::OutOfRange => Milk2Error::NumberOutOfRange { key },
+    })
 }
 
 struct Keys {
@@ -407,7 +359,7 @@ fn read_header(bytes: &[u8], previous: &Milk2Header) -> Result<Keys, Milk2Error>
             let text: Vec<u8> = value()
                 .iter()
                 .copied()
-                .filter(|&b| !is_c_space(b))
+                .filter(|&b| !cnum::is_space(b))
                 .collect();
             k.header.pattern = String::from_utf8_lossy(&text).into_owned();
         } else if contains(c, b"blending_progress=") {
@@ -457,7 +409,9 @@ fn read_lines(
     }
     let mut out = Vec::new();
     for n in first.max(1)..=last {
-        out.extend_from_slice(lines[(n - 1) as usize]);
+        if let Some(line) = lines.get((n - 1) as usize) {
+            out.extend_from_slice(line);
+        }
         out.push(b'\n');
     }
     out

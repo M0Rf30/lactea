@@ -27,35 +27,10 @@ pub struct PresetEntry {
     pub name: String,
 }
 
-/// Recursively collect `*.milk` (any case) below `dir`, and with `milk2` also `*.milk2` (double presets, which only
-/// `--compat auto` / `milkdrop3` play), sorted by path. Directories are visited once (by canonical path), so symlink loops
-/// and aliases cannot blow the scan up.
+/// Recursively collect `*.milk` and `*.prjm` (any case) below `dir`, and with `milk2` also `*.milk2` (double presets, which only
+/// `--compat auto` / `milkdrop3` play), sorted by path (`lactea_host::scan_preset_files`).
 pub fn scan_dir(dir: &Path, milk2: bool) -> Vec<PresetEntry> {
-    fn walk(dir: &Path, milk2: bool, visited: &mut HashSet<PathBuf>, out: &mut Vec<PathBuf>) {
-        let canon = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-        if !visited.insert(canon) {
-            return;
-        }
-        let Ok(rd) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, milk2, visited, out);
-            } else if p
-                .extension()
-                .and_then(|x| x.to_str())
-                .is_some_and(|x| x.eq_ignore_ascii_case("milk"))
-                || (milk2 && is_milk2(&p))
-            {
-                out.push(p);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    walk(dir, milk2, &mut HashSet::new(), &mut files);
-    files.sort();
+    let files = lactea_host::scan_preset_files(dir, true, milk2);
     files
         .into_iter()
         .map(|path| {
@@ -148,6 +123,192 @@ pub fn browser_seed(seed: Option<u32>, deterministic: bool, clock: u128) -> u32 
     }
 }
 
+/// Navigation and display timing on the engine's own `Playlist` (history, shuffle) and `PresetControl`
+/// (display time, lock, MD3 `TimeBetweenPresetsRand` draw), so the scope-less app and the C API follow one rule.
+/// The playlist holds the entry indices as its items; its positions are indices into `entries`.
+#[cfg(feature = "engine")]
+pub struct PresetBrowser {
+    entries: Vec<PresetEntry>,
+    playlist: lactea::Playlist,
+    control: lactea::PresetControl,
+    /// Zero point of the control's clock.
+    epoch: Instant,
+    current: Option<usize>,
+    /// `--duration 0`: the control would still sample a display time, so never ask for the next preset.
+    never: bool,
+    stalled: bool,
+}
+
+#[cfg(feature = "engine")]
+impl PresetBrowser {
+    pub fn new(entries: Vec<PresetEntry>, shuffle: bool, duration: Duration, seed: u64) -> Self {
+        let mut playlist = lactea::Playlist::new(seed);
+        for i in 0..entries.len() {
+            playlist.add_preset(&i.to_string(), true);
+        }
+        playlist.set_shuffle(shuffle);
+        let mut control = lactea::PresetControl::new(seed);
+        control.set_preset_duration(duration.as_secs_f64());
+        // exact display time: no gaussian around it
+        control.set_easter_egg(0.0);
+        Self {
+            entries,
+            playlist,
+            control,
+            epoch: Instant::now(),
+            current: None,
+            never: duration.is_zero(),
+            stalled: false,
+        }
+    }
+
+    fn secs(&self, now: Instant) -> f64 {
+        now.saturating_duration_since(self.epoch).as_secs_f64()
+    }
+
+    /// Use MD3's display time for the presets started from now on: `blend + duration + (r % 1000) * rand *
+    /// 0.001` with `r` from the seeded stream, one draw per `commit` (MD3 3.37, docs/md3.md §Auto hard cuts).
+    /// `blend` is `BlendTimeAuto` (the soft cut length), `rand` is `TimeBetweenPresetsRand` (negative = 0).
+    /// A zero `duration` still never rotates.
+    pub fn set_md3_time(&mut self, blend: Duration, rand: f64) {
+        self.control.set_soft_cut_duration(blend.as_secs_f64());
+        self.control.set_md3_time_rand(Some(rand));
+    }
+
+    /// Back to `duration` alone for the presets started from now on (a non-MD3 preset under `--compat auto`).
+    pub fn clear_md3_time(&mut self) {
+        self.control.set_md3_time_rand(None);
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn entry(&self, idx: usize) -> &PresetEntry {
+        &self.entries[idx]
+    }
+
+    pub fn current(&self) -> Option<usize> {
+        self.current
+    }
+
+    pub fn current_entry(&self) -> Option<&PresetEntry> {
+        self.current.map(|i| &self.entries[i])
+    }
+
+    pub fn locked(&self) -> bool {
+        self.control.preset_locked()
+    }
+
+    pub fn toggle_lock(&mut self) -> bool {
+        let locked = !self.control.preset_locked();
+        self.control.set_preset_locked(locked);
+        // A lock toggle restarts the timer so unlocking never flips the preset immediately.
+        self.control.start_preset(self.secs(Instant::now()));
+        locked
+    }
+
+    /// The display time of the current preset is up. Once per preset: the control raises the request a
+    /// single time, `commit` of the next preset re-arms it.
+    pub fn auto_due(&mut self, now: Instant) -> bool {
+        if self.stalled || self.never || self.entries.len() <= 1 || self.control.preset_locked() {
+            return false;
+        }
+        let t = self.secs(now);
+        self.control.update(t, 0.0).is_some_and(|r| !r.hard_cut)
+    }
+
+    /// Run `step` on the playlist with shuffle forced to `shuffle`, then put the configured mode back.
+    fn navigate(
+        &mut self,
+        shuffle: bool,
+        step: fn(&mut lactea::Playlist) -> Option<u32>,
+    ) -> Option<usize> {
+        let configured = self.playlist.shuffle();
+        self.playlist.set_shuffle(shuffle);
+        let i = step(&mut self.playlist);
+        self.playlist.set_shuffle(configured);
+        i.map(|i| i as usize)
+    }
+
+    /// Index the navigation `nav` selects from the current position (does not commit).
+    pub fn pick(&mut self, nav: Nav) -> Option<usize> {
+        if self.entries.is_empty() {
+            return None;
+        }
+        let configured = self.playlist.shuffle();
+        if self.current.is_none() {
+            let idx = if configured && nav != Nav::Prev {
+                self.navigate(true, lactea::Playlist::next_index)
+            } else {
+                self.playlist.set_index(0).map(|i| i as usize)
+            };
+            // the position the playlist started on was never played: keep it out of the history
+            self.playlist.sort(
+                0,
+                0,
+                lactea::SortPredicate::FullPath,
+                lactea::SortOrder::Ascending,
+            );
+            return idx;
+        }
+        match nav {
+            Nav::Next => self.navigate(false, lactea::Playlist::next_index),
+            Nav::Auto => self.navigate(configured, lactea::Playlist::next_index),
+            Nav::Random => self.navigate(true, lactea::Playlist::next_index),
+            Nav::Prev => self.playlist.last_index().map(|i| i as usize),
+        }
+    }
+
+    /// Record that `idx` is now showing (after a successful load).
+    pub fn commit(&mut self, idx: usize, _nav: Nav, now: Instant) {
+        self.current = Some(idx);
+        self.stalled = false;
+        self.control.start_preset(self.secs(now));
+    }
+
+    /// The display time the control sampled for the preset committed last: what the engine's `progress` runs over.
+    pub fn loaded_duration(&self) -> f64 {
+        self.control.preset_duration_sampled()
+    }
+
+    /// Index to try after a failed load of `failed` during `nav` (so a broken preset is skipped
+    /// in the direction of travel). `None` once every preset has been tried.
+    pub fn after_failure(&mut self, _failed: usize, nav: Nav, tried: usize) -> Option<usize> {
+        if tried >= self.entries.len() {
+            return None;
+        }
+        let configured = self.playlist.shuffle();
+        match nav {
+            Nav::Prev => self.navigate(false, lactea::Playlist::previous_index),
+            Nav::Random => self.navigate(true, lactea::Playlist::next_index),
+            Nav::Auto => self.navigate(configured, lactea::Playlist::next_index),
+            Nav::Next => self.navigate(false, lactea::Playlist::next_index),
+        }
+    }
+
+    /// A whole round of loads failed: stop retrying (every retry re-reads and re-parses each entry,
+    /// every frame) until the user navigates (`resume`) or a load succeeds.
+    pub fn stall(&mut self) {
+        self.stalled = true;
+    }
+
+    pub fn stalled(&self) -> bool {
+        self.stalled
+    }
+
+    /// The user asked for another preset: loading may be attempted again.
+    pub fn resume(&mut self) {
+        self.stalled = false;
+    }
+
+    /// Nothing is showing and nothing has failed yet: the first preset is due.
+    pub fn first_load_due(&self) -> bool {
+        self.current.is_none() && !self.stalled
+    }
+}
+
+#[cfg(not(feature = "engine"))]
 pub struct PresetBrowser {
     entries: Vec<PresetEntry>,
     current: Option<usize>,
@@ -165,6 +326,7 @@ pub struct PresetBrowser {
     stalled: bool,
 }
 
+#[cfg(not(feature = "engine"))]
 impl PresetBrowser {
     pub fn new(entries: Vec<PresetEntry>, shuffle: bool, duration: Duration, seed: u64) -> Self {
         Self {
@@ -207,6 +369,11 @@ impl PresetBrowser {
         }
     }
 
+    /// Seconds the preset committed last is shown for.
+    pub fn loaded_duration(&self) -> f64 {
+        self.period().as_secs_f64()
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -245,7 +412,7 @@ impl PresetBrowser {
         )
     }
 
-    pub fn auto_due(&self, now: Instant) -> bool {
+    pub fn auto_due(&mut self, now: Instant) -> bool {
         self.auto_remaining(now).is_some_and(|d| d.is_zero())
     }
 
@@ -382,13 +549,11 @@ mod tests {
     }
 
     #[test]
-    fn random_never_repeats_current() {
+    fn random_stays_in_range_and_reaches_every_entry() {
         let mut b = browser(5);
         go(&mut b, Nav::Next);
-        for _ in 0..200 {
-            let cur = b.current().unwrap();
-            assert_ne!(go(&mut b, Nav::Random), cur);
-        }
+        let seen: HashSet<usize> = (0..200).map(|_| go(&mut b, Nav::Random)).collect();
+        assert_eq!(seen.len(), 5);
     }
 
     #[test]
@@ -411,11 +576,9 @@ mod tests {
         assert!(!b.auto_due(Instant::now() + Duration::from_secs(3600)));
     }
 
-    /// Time the browser waits after a commit at `t0` (`auto_remaining(t0)` is the whole period).
-    fn period_after_commit(b: &mut PresetBrowser, t0: Instant) -> Duration {
+    fn go_at(b: &mut PresetBrowser, t0: Instant) {
         let i = b.pick(Nav::Next).unwrap();
         b.commit(i, Nav::Next, t0);
-        b.auto_remaining(t0).unwrap()
     }
 
     fn md3_browser(seed: u64, duration: u64, blend: u64, rand: f64) -> PresetBrowser {
@@ -424,51 +587,48 @@ mod tests {
         b
     }
 
+    /// Whether the preset committed at `t0` is due `secs` later (consumes the request when it is).
+    fn due_at(b: &mut PresetBrowser, t0: Instant, secs: f64) -> bool {
+        b.auto_due(t0 + Duration::from_secs_f64(secs))
+    }
+
     #[test]
     fn md3_time_is_blend_plus_duration_plus_a_seeded_draw() {
         let t0 = Instant::now();
-        let mut b = md3_browser(7, 30, 3, 10.0);
-        let periods: Vec<_> = (0..200).map(|_| period_after_commit(&mut b, t0)).collect();
-        let (lo, hi) = (Duration::from_secs(33), Duration::from_secs(43));
-        assert!(periods.iter().all(|p| (lo..hi).contains(p)), "{periods:?}");
-        // the draw varies, and the first preset gets one: the first value of the seeded stream
-        assert!(periods.iter().any(|p| *p != periods[0]));
-        let first = f64::from(fastrand::Rng::with_seed(7).u32(..1000)) * 10.0 * 0.001;
-        assert_eq!(periods[0], lo + Duration::from_secs_f64(first));
-
-        // same seed, same sequence; another seed, another one
-        let again: Vec<_> = {
-            let mut b = md3_browser(7, 30, 3, 10.0);
-            (0..200).map(|_| period_after_commit(&mut b, t0)).collect()
+        // never due before blend + duration, always due once the whole random part has passed
+        let sequence = |seed: u64| -> Vec<bool> {
+            let mut b = md3_browser(seed, 30, 3, 10.0);
+            (0..200)
+                .map(|_| {
+                    go_at(&mut b, t0);
+                    assert!(!due_at(&mut b, t0, 32.999));
+                    let mid = due_at(&mut b, t0, 38.0);
+                    assert!(mid || due_at(&mut b, t0, 43.0));
+                    mid
+                })
+                .collect()
         };
-        assert_eq!(periods, again);
-        let mut other = md3_browser(8, 30, 3, 10.0);
-        let others: Vec<_> = (0..200)
-            .map(|_| period_after_commit(&mut other, t0))
-            .collect();
-        assert_ne!(periods, others);
+        let first = sequence(7);
+        // the draw varies, and the same seed reproduces it
+        assert!(first.contains(&true) && first.contains(&false));
+        assert_eq!(first, sequence(7));
+        assert_ne!(first, sequence(8));
     }
 
     #[test]
     fn md3_time_edge_cases() {
         let t0 = Instant::now();
-        // negative rand = 0: exactly blend + duration
-        let mut b = md3_browser(1, 30, 3, -5.0);
-        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
-        // rand 0 likewise
-        let mut b = md3_browser(1, 30, 3, 0.0);
-        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+        // negative rand and rand 0 are exactly blend + duration
+        for rand in [-5.0, 0.0] {
+            let mut b = md3_browser(1, 30, 3, rand);
+            go_at(&mut b, t0);
+            assert!(!due_at(&mut b, t0, 32.999));
+            assert!(due_at(&mut b, t0, 33.001));
+        }
         // zero duration never rotates, whatever blend and rand are
         let mut b = md3_browser(1, 0, 3, 10.0);
-        let i = b.pick(Nav::Next).unwrap();
-        b.commit(i, Nav::Next, t0);
-        assert_eq!(b.auto_remaining(t0), None);
-        assert!(!b.auto_due(t0 + Duration::from_secs(3600)));
-        // due once the (drawn) period elapsed
-        let mut b = md3_browser(1, 30, 3, 10.0);
-        let p = period_after_commit(&mut b, t0);
-        assert!(!b.auto_due(t0 + p - Duration::from_millis(1)));
-        assert!(b.auto_due(t0 + p));
+        go_at(&mut b, t0);
+        assert!(!due_at(&mut b, t0, 3600.0));
     }
 
     #[test]
@@ -476,7 +636,9 @@ mod tests {
         let t0 = Instant::now();
         let mut b = browser(3);
         for _ in 0..5 {
-            assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(30));
+            go_at(&mut b, t0);
+            assert!(!due_at(&mut b, t0, 29.999));
+            assert!(due_at(&mut b, t0, 30.001));
         }
     }
 
@@ -484,21 +646,26 @@ mod tests {
     fn clearing_md3_time_returns_to_the_plain_duration() {
         let t0 = Instant::now();
         let mut b = md3_browser(7, 30, 3, 10.0);
-        assert!(period_after_commit(&mut b, t0) >= Duration::from_secs(33));
+        go_at(&mut b, t0);
+        assert!(!due_at(&mut b, t0, 32.999));
         b.clear_md3_time();
         for _ in 0..5 {
-            assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(30));
+            go_at(&mut b, t0);
+            assert!(due_at(&mut b, t0, 30.001));
         }
         // and back on again (auto compat switching between presets)
         b.set_md3_time(Duration::from_secs(3), 0.0);
-        assert_eq!(period_after_commit(&mut b, t0), Duration::from_secs(33));
+        go_at(&mut b, t0);
+        assert!(!due_at(&mut b, t0, 32.999));
+        assert!(due_at(&mut b, t0, 33.001));
     }
 
     #[test]
     fn failure_skips_in_direction_and_terminates() {
         let mut b = browser(3);
+        go(&mut b, Nav::Next);
+        let mut idx = b.pick(Nav::Next).unwrap();
         let mut tried = 1;
-        let mut idx = 1;
         let mut seen = vec![idx];
         while let Some(next) = b.after_failure(idx, Nav::Next, tried) {
             idx = next;
@@ -507,7 +674,10 @@ mod tests {
         }
         assert_eq!(seen, vec![1, 2, 0]);
         let mut b = browser(3);
-        assert_eq!(b.after_failure(0, Nav::Prev, 1), Some(2));
+        go(&mut b, Nav::Next);
+        let failed = b.pick(Nav::Prev).unwrap();
+        assert_eq!(failed, 2);
+        assert_eq!(b.after_failure(failed, Nav::Prev, 1), Some(1));
     }
 
     #[test]
@@ -555,9 +725,10 @@ mod tests {
         std::fs::write(d.join("a/y.MILK"), b"").unwrap();
         std::fs::write(d.join("a/b/z.milk"), b"").unwrap();
         std::fs::write(d.join("a/readme.txt"), b"").unwrap();
+        std::fs::write(d.join("a/w.Prjm"), b"").unwrap();
         let e = scan_dir(&d, false);
         let names: Vec<_> = e.iter().map(|e| e.name.replace('\\', "/")).collect();
-        assert_eq!(names, vec!["a/b/z", "a/y", "x"]);
+        assert_eq!(names, vec!["a/b/z", "a/w", "a/y", "x"]);
         let _ = std::fs::remove_dir_all(d);
     }
 

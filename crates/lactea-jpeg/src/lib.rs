@@ -53,6 +53,21 @@ fn err<T>(msg: &'static str) -> Res<T> {
     Err(Error(msg))
 }
 
+/// Upper bound on the memory one decode may allocate: component planes, progressive coefficient
+/// planes, resampling lines and the RGBA output together. A header can declare far more than the
+/// file holds, so this is checked before any allocation.
+const MAX_DECODE_BYTES: u64 = 2 << 30;
+
+/// `n` zeroed elements, or an error instead of an abort when the allocator refuses.
+fn alloc_zeroed<T: Clone + Default>(n: usize) -> Res<Vec<T>> {
+    let mut v = Vec::new();
+    if v.try_reserve_exact(n).is_err() {
+        return err("out of memory");
+    }
+    v.resize(n, T::default());
+    Ok(v)
+}
+
 /// `true` if `data` starts with an SOI marker (the sniff `stbi_load` uses before trying the JPEG decoder). Cheap
 /// pre-check so callers can fall back to another decoder without paying for a failed `decode_rgba`.
 pub fn is_jpeg(data: &[u8]) -> bool {
@@ -1023,16 +1038,28 @@ impl<'a> Jpeg<'a> {
         let (mcu_w, mcu_h) = (h_max * 8, v_max * 8);
         self.img_mcu_x = (self.img_x + mcu_w - 1) / mcu_w;
         self.img_mcu_y = (self.img_y + mcu_h - 1) / mcu_h;
+        // The whole decode must fit the budget before anything is allocated: every component plane
+        // (plus 16-bit coefficients when progressive), the resampling lines and the RGBA output.
+        let mut total = self.img_x as u64 * self.img_y as u64 * 4;
+        for cm in &self.comp[..c as usize] {
+            let w2 = (self.img_mcu_x * cm.h * 8) as u64;
+            let h2 = (self.img_mcu_y * cm.v * 8) as u64;
+            total += w2 * h2 * if self.progressive { 3 } else { 1 };
+            total += w2 + 8 * self.img_h_max as u64 + 4;
+        }
+        if total > MAX_DECODE_BYTES {
+            return err("image too large");
+        }
         for i in 0..c as usize {
             let cm = &mut self.comp[i];
             cm.x = (self.img_x * cm.h + h_max - 1) / h_max;
             cm.y = (self.img_y * cm.v + v_max - 1) / v_max;
             cm.w2 = self.img_mcu_x * cm.h * 8;
             cm.h2 = self.img_mcu_y * cm.v * 8;
-            cm.data = vec![0u8; cm.w2 as usize * cm.h2 as usize];
+            cm.data = alloc_zeroed(cm.w2 as usize * cm.h2 as usize)?;
             if self.progressive {
                 cm.coeff_w = cm.w2 / 8;
-                cm.coeff = vec![0i16; cm.w2 as usize * cm.h2 as usize];
+                cm.coeff = alloc_zeroed(cm.w2 as usize * cm.h2 as usize)?;
             }
         }
         Ok(())
@@ -1082,8 +1109,10 @@ impl<'a> Jpeg<'a> {
         self.restart_interval = 0;
         self.decode_header()?;
         let mut m = self.get_marker();
+        let mut scans = 0u32;
         while m != 0xd9 {
             if m == 0xda {
+                scans += 1;
                 self.process_scan_header()?;
                 self.parse_entropy_coded_data()?;
                 if self.rd.marker == MARKER_NONE {
@@ -1107,6 +1136,9 @@ impl<'a> Jpeg<'a> {
                 self.process_marker(m)?;
                 m = self.get_marker();
             }
+        }
+        if scans == 0 {
+            return err("no SOS");
         }
         if self.progressive {
             self.finish();
@@ -1147,11 +1179,11 @@ impl<'a> Jpeg<'a> {
                 ypos: 0,
                 line0: 0,
                 line1: 0,
-                linebuf: vec![0u8; (w + 4).max(w_lores as usize * hs as usize + 4)],
+                linebuf: alloc_zeroed::<u8>((w + 4).max(w_lores as usize * hs as usize + 4))?,
             });
         }
 
-        let mut out = vec![0u8; w * h * n];
+        let mut out = alloc_zeroed::<u8>(w * h * n)?;
         let mut rows: [Vec<u8>; 4] = Default::default();
         for j in 0..h {
             for k in 0..img_n as usize {

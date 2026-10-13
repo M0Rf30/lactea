@@ -179,9 +179,12 @@ impl MotionVectorState {
     }
 
     /// Clip-space line segments (pairs of vertices) of one frame, in draw order (one `glDrawElements` of the whole
-    /// buffer per valid grid row). `prev_uv` = the previous frame's warp UV grid, `min_len_px` = 1.25.
+    /// buffer per valid grid row), written into `out` (cleared first). `prev_uv` = the previous frame's warp UV grid,
+    /// `min_len_px` = 1.25.
+    #[allow(clippy::too_many_arguments)]
     pub fn segments(
         &mut self,
+        out: &mut Vec<WfVertex>,
         mv: &MotionVectors,
         g: &MeshGeometry,
         prev_uv: &[[f32; 2]],
@@ -190,12 +193,12 @@ impl MotionVectorState {
         diag_flip: bool,
         min_len_px: f32,
         color: [f32; 4],
-    ) -> Vec<WfVertex> {
-        let mut out = Vec::new();
+    ) {
+        out.clear();
         let mut nx = mv.x as i32;
         let mut ny = mv.y as i32;
         if nx <= 0 || ny <= 0 {
-            return out;
+            return;
         }
         let mut dx = mv.x - nx as f32;
         let mut dy = mv.y - ny as f32;
@@ -269,7 +272,6 @@ impl MotionVectorState {
                 });
             }
         }
-        out
     }
 }
 
@@ -326,7 +328,8 @@ mod tests {
             l: 1.0,
             ..MotionVectors::default()
         };
-        let segs = st.segments(&mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
+        let mut segs = Vec::new();
+        st.segments(&mut segs, &mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
         assert!(!segs.is_empty());
         // 48 rows (46 valid + ...) each drawing (64 + 1) pairs: the first pair of the first row
         let (a, b) = (segs[0].pos, segs[1].pos);
@@ -352,12 +355,14 @@ mod tests {
             l: 0.0,
             ..MotionVectors::default()
         };
-        let first = st.segments(&mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
+        let mut first = Vec::new();
+        st.segments(&mut first, &mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
         let per_row = 65 * 2;
         assert_eq!(first.len() % per_row, 0);
         // 62 columns: 126 vertices in the buffer, but the index buffer still draws the first frame's 130
         mv.x = 62.0;
-        let second = st.segments(&mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
+        let mut second = Vec::new();
+        st.segments(&mut second, &mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
         assert_eq!(second.len() % per_row, 0);
         let row = &second[..per_row];
         // the last two pairs (vertices 126..130) are out of bounds: both ends of their lines start in the corner
@@ -378,7 +383,8 @@ mod tests {
             l: 0.0,
             ..MotionVectors::default()
         };
-        let segs = st.segments(&mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
+        let mut segs = Vec::new();
+        st.segments(&mut segs, &mv, &g, &uv, w, h, true, 1.25, [1.0; 4]);
         // posX = 1 (x = 63) is skipped: slots 63 and 64 stay at (0, 0) -> the last two pairs of every row
         let per_row = 65 * 2;
         assert_eq!(segs.len() % per_row, 0);

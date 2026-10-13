@@ -59,7 +59,7 @@ jobs:
         run: >
           cargo test
           -p lactea-abi -p lactea-eel -p lactea-preset -p lactea-audio
-          -p lactea-hlsl -p lactea-compare
+          -p lactea-hlsl -p lactea-compare -p lactea-host
 
   gpu-tests:
     name: test (software Vulkan, advisory)
@@ -146,10 +146,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
+      - name: system libraries (lactea-app)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - run: >
           cargo check --locked
           -p lactea-abi -p lactea-eel -p lactea-preset -p lactea-jpeg -p lactea-audio
           -p lactea-hlsl -p lactea-render -p lactea
+          -p lactea-capi -p lactea-cli -p lactea-compare -p lactea-host
+      - run: cargo check --locked -p lactea-app --no-default-features --features engine
 
   deny:
     name: cargo-deny (licenses, advisories, sources)

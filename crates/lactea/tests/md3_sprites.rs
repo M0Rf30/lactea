@@ -8,28 +8,12 @@ use lactea::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
+use lactea_testutil::gpu_or_skip;
 macro_rules! rig_or_skip {
-    () => {
-        match Rig::new() {
-            Some(r) => r,
-            None => {
-                assert!(
-                    std::env::var_os("LACTEA_REQUIRE_GPU").is_none(),
-                    "no wgpu adapter (LACTEA_REQUIRE_GPU is set)"
-                );
-                eprintln!("SKIP: no wgpu adapter");
-                return;
-            }
-        }
-    };
+    () => {{
+        let (device, queue) = gpu_or_skip!();
+        Rig::new(device, queue)
+    }};
 }
 
 const SIZE: (u32, u32) = (64, 36);
@@ -119,8 +103,7 @@ struct Rig {
 }
 
 impl Rig {
-    fn new() -> Option<Self> {
-        let (device, queue) = gpu()?;
+    fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -136,11 +119,11 @@ impl Rig {
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        Some(Self {
+        Self {
             device,
             queue,
             view,
-        })
+        }
     }
 
     fn engine(&self, compat: Compat, p: Provider) -> Engine {
@@ -156,7 +139,8 @@ impl Rig {
                 start_clean: true,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         e.set_texture_provider(Box::new(p));
         e
     }
@@ -166,7 +150,7 @@ impl Rig {
         config.height = SIZE.1;
         config.mesh = [16, 12];
         config.start_clean = true;
-        let mut e = Engine::new(&self.device, &self.queue, config);
+        let mut e = Engine::new(&self.device, &self.queue, config).unwrap();
         e.set_texture_provider(Box::new(p));
         e
     }

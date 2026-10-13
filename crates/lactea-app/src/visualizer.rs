@@ -62,6 +62,9 @@ pub trait Visualizer {
     fn current_compat(&self) -> Option<CompatArg> {
         None
     }
+    /// How long the preset that `load_preset` just loaded is shown (the host's sampled display time); `progress` runs
+    /// over it. Call it after every successful load. Ignored by visualizers without `progress`.
+    fn set_loaded_preset_duration(&mut self, _seconds: f64) {}
 }
 
 #[repr(C)]

@@ -30,7 +30,7 @@ use lactea_abi::{RunConfig, ShaderInterface};
 /// | no-shader composite hue-tint corners | `shade[0..1]` at the *top* corners (projectM draws the quad in its flipped frame) | `shade[0..1]` at the bottom corners |
 /// | blur pass 0 vertical `+1 texel` bias | `-1` (projectM samples the upside-down stored source with `uv.y` flipped, so the bias goes up) | `+1` (down) |
 /// | warp mesh cell diagonal | bottom-left to top-right in image space (projectM's mesh row 0 is the top) | top-left to bottom-right |
-/// | no-shader composite / filter quad diagonal | `TL,TR,BL,BR` strip: split along top-right to bottom-left (hue-tint colours interpolate differently) | triangles `(0,1,2),(2,1,3)` of `geom::echo_quad` (bottom-right to top-left) |
+/// | no-shader composite echo / gamma quad diagonal | `TL,TR,BL,BR` strip: split along top-right to bottom-left (hue-tint colours interpolate differently) | triangles `(0,1,2),(2,1,3)` of `geom::echo_quad` (bottom-right to top-left; MD2's strip `(0,1,2),(1,2,3)` over `v3[0..4]` = `(-W,+H),(+W,+H),(-W,-H),(+W,-H)`, whose `+y` is the *bottom* of the screen under `D3DXMatrixOrthoLH(2, -2)` in `support.cpp`) |
 /// | no-shader echo / gamma quad size | scaled by `VideoEcho`'s `aspectMultX/Y` (x stretched by `H/W` on portrait targets, UVs unchanged) | `1 + 1/size` |
 /// | no-shader gamma pass count | `(int)(gamma - 0.0001) + 1` | `(int)(gamma - 0.001) + 1` |
 /// | lines / points | GL rasterisation rules emulated exactly ([`StrokeRaster`]) | D3D9 thin quads |
@@ -109,13 +109,16 @@ pub struct CompatRules {
     pub shader_warp_diffuse_is_decay: bool,
     /// The translation row of the `rot_*` uniforms is dropped (`glm::mat3x4` of a `mat4`).
     pub rot_translation_dropped: bool,
-    /// The no-shader composite hue-tint colours `shade[0..1]` sit at the top corners instead of the bottom ones.
+    /// The no-shader composite hue-tint colours `shade[0..1]` sit at the top corners instead of the bottom ones. MD2's
+    /// `v3[0..1]` have `y = +1 + 1/H`, which `support.cpp`'s flipped ortho projection puts at the bottom of the image.
     pub shade_top_first: bool,
     /// Blur pass 0 samples an upside-down source, so its vertical `+1 texel` bias is `-1`.
     pub blur_src_flipped: bool,
     /// Warp mesh cells are split bottom-left to top-right in image space instead of top-left to bottom-right.
     pub warp_diag_flipped: bool,
-    /// The no-shader composite / filter quad is split top-right to bottom-left instead of bottom-right to top-left.
+    /// The no-shader composite echo / gamma quad is split top-right to bottom-left instead of bottom-right to
+    /// top-left. The flat white filter quads (`brighten` ..) have the same split in projectM but no colour gradient, so
+    /// it is not observable there.
     pub echo_diag_flipped: bool,
     /// projectM stretches the echo / gamma quad by `aspectMultX/Y` of `VideoEcho::Draw` (`geom::echo_aspect_mult`):
     /// identity for landscape targets, a horizontal `H/W` magnification of the centre for portrait ones. MD2 draws the
@@ -173,6 +176,17 @@ pub struct CompatRules {
     /// Number of custom wave / custom shape slots that run: projectM `CustomWaveformCount` /
     /// `CustomShapeCount` = 4 (the keys `wavecode_4..15` / `shapecode_4..15` are never read), MD2 / `MAX_CUSTOM_*` = 16.
     pub custom_slots: usize,
+    /// Highest `randNN` sampler slot that picks a random texture: projectM `MilkdropShader.cpp:130` (15),
+    /// MD2 `MAX_RAND_TEX - 1` (`plugin.cpp:3420`, 99). Higher slots are ordinary texture names.
+    pub max_rand_slot: u8,
+    /// The `randNN_prefix` pool filter reads the raw sampler name (projectM `TextureManager::GetRandomTexture` tests
+    /// byte 6 of the name *with* its `fw_`-style quality prefix, so a quality prefix disables the filter) and any
+    /// `randNN…` spelling counts; MD2 filters on the prefix-stripped name and needs exactly `randNN` or `randNN_…`
+    /// (`plugin.cpp:3578`). Both peel the quality prefix before detecting `randNN` (`MilkdropShader.cpp:80-86`).
+    pub rand_filter_raw_name: bool,
+    /// The `noisevol_*` cubic smoothing addresses slice `z` with `z * size` (projectM `MilkdropNoise.cpp:199,225,
+    /// 252-261`), not MD2's `z * size * size` (`plugin.cpp:3031-3072`).
+    pub noisevol_row_stride: bool,
     /// projectM's `PerPixelMesh::WarpedBlit` binds its own sampler (`GL_LINEAR`, `GL_REPEAT` / `GL_CLAMP_TO_EDGE` from the
     /// per-frame `wrap` variable, i.e. `bTexWrap`) on texture unit 0 *after* the warp shader loaded its samplers, which
     /// replaces the sampler of the first `main` descriptor (`std::set` order of the sampler names, `main` always
@@ -231,9 +245,12 @@ pub struct CompatRules {
     /// The MilkDrop 3 shader prelude is part of every translated shader (`get_fft`, `get_fft_hz`, `mouse*`,
     /// `q33..q64`, `sampler_fft`).
     pub md3_shader_prelude: bool,
-    /// The shader constant `time` (`_c2.x`) is the time since *this state's* preset started, modulo 10000; otherwise
-    /// the absolute frame time.
+    /// The shader constant `time` (`_c2.x`) is the time since *this state's* preset started; otherwise the absolute
+    /// frame time (see also [`shader_time_wrap`](Self::shader_time_wrap)).
     pub md3_shader_time: bool,
+    /// `_c2.x` is wrapped modulo 10000 (`t - (int)(t / 10000) * 10000`): projectM (`MilkdropShader.cpp:168`) and
+    /// MilkDrop 3. MilkDrop 2 passes the raw time (`milkdropfs.cpp:5289`).
+    pub shader_time_wrap: bool,
     /// The generated composite shader of presets without `comp_N` text uses the original MilkDrop 2 formulas:
     /// brighten `sqrt(ret)`, solarize `ret * (1 - ret) * 4` (BeatDrop: `1 - (1 - ret)^2`, `* 2`).
     pub md3_md2_comp_effects: bool,
@@ -262,7 +279,92 @@ pub struct CompatRules {
     /// image it is already drawn on), so additive and alpha modes are twice as strong with `SpriteBurn=1` as with 0.
     /// Measured against MD3 under Wine (docs/md3.md, sprites).
     pub md3_sprite_burn_twice: bool,
+    /// BeatDrop's shader inputs under MilkDrop 2: the shader prelude (`_c14` mouse, `_c15` / `_c16` time and date,
+    /// `sampler_fft` / `sampler_wave`, `get_fft*`, `get_wave`), the engine-fed spectrum / waveform texture and the
+    /// BeatDrop shader-FFT analyser (RMS-normalised 2048-window FFT with FPS-independent attack / decay and a peak
+    /// hold). Off under projectM (`sampler_fft` stays an unresolved user texture, so projectM-compat output is
+    /// untouched) and MilkDrop 3 (its own prelude, [`md3_shader_prelude`](Self::md3_shader_prelude)).
+    pub md2_shader_inputs: bool,
+    /// BeatDrop's expression variables for host input and the clock: `mousex mousey mousedown mouseclick`,
+    /// `ctrllt ctrlrt ctrldn ctrlup` and `year month day weekday hour minute second milliseconds totalseconds`, set
+    /// by the engine every frame in the per-frame and per-vertex contexts. MilkDrop 3 has none of them (its mouse is
+    /// shader-only and `mouse.x` does not compile), so it turns this off.
+    pub md2_input_vars: bool,
 }
+
+/// The MilkDrop 2 values of every rule: the base of the other modes, which list only what differs.
+const MILKDROP2_RULES: CompatRules = CompatRules {
+    vol_is_comma_bug: true,
+    mip_y_from_width: true,
+    c1_is_zero: false,
+    decay_8bit: true,
+    quantize_vertex_colors: true,
+    hue_tint_always: false,
+    thick_needs_512: true,
+    pm_waveforms: false,
+    shape_thick_full_pixel: true,
+    mv_skip_first_frame: false,
+    mv_min_len_px: 1.0,
+    mv_mirrored_lookup: true,
+    comp_reads_previous: true,
+    ang_seam_fix: true,
+    comp_uv_half_texel: false,
+    shader_warp_diffuse_is_decay: false,
+    rot_translation_dropped: false,
+    shade_top_first: false,
+    blur_src_flipped: false,
+    warp_diag_flipped: false,
+    echo_diag_flipped: false,
+    echo_quad_aspect: false,
+    gamma_pass_eps: 0.001,
+    gl_strokes: false,
+    wave_dots_smoothed: false,
+    point_size_honored: true,
+    wave_thick_ndc_inc: false,
+    wave_point_f64_aspect: false,
+    no_mipmaps: false,
+    warp_uv_on_gpu: false,
+    main_alpha: false,
+    shape_main_nearest: false,
+    blur_alloc_drops_overlays: false,
+    gl_fill_ties: false,
+    gl_varying_fold: false,
+    pm_border_mesh: false,
+    custom_slots: 16,
+    max_rand_slot: 99,
+    rand_filter_raw_name: false,
+    noisevol_row_stride: false,
+    warp_main_sampler_from_wrap: false,
+    md2_preset_blend: true,
+    md2_code_join: true,
+    frame_vars_drive_post: true,
+    shared_shader_rand: true,
+    warp_anim_projectm: false,
+    custom_shape_image: false,
+    noshader_comp_wrap: true,
+    shader_time_wrap: false,
+    md3_wave_modes: false,
+    max_shape_sides: 100,
+    md3_warp_skip_tiny: false,
+    md3_border_gate: false,
+    md3_auto_hard_cut: false,
+    md3_preset_time_rand: false,
+    md3_audio_analysis: false,
+    md3_shader_fft: false,
+    md3_extended_vars: false,
+    md3_shader_prelude: false,
+    md3_shader_time: false,
+    md3_md2_comp_effects: false,
+    md3_ns_eel2: false,
+    md3_drop_failed_code: false,
+    md3_double_preset: false,
+    md3_blend_patterns: false,
+    md3_preset_sprites: false,
+    md3_gif_textures: false,
+    md3_sprite_burn_twice: false,
+    md2_shader_inputs: true,
+    md2_input_vars: true,
+};
 
 impl Compat {
     /// The behaviours of this compatibility mode.
@@ -306,6 +408,9 @@ impl Compat {
                 gl_varying_fold: true,
                 pm_border_mesh: true,
                 custom_slots: 4,
+                max_rand_slot: 15,
+                rand_filter_raw_name: true,
+                noisevol_row_stride: true,
                 warp_main_sampler_from_wrap: true,
                 md2_preset_blend: false,
                 md2_code_join: false,
@@ -314,92 +419,14 @@ impl Compat {
                 warp_anim_projectm: true,
                 custom_shape_image: true,
                 noshader_comp_wrap: false,
-                md3_wave_modes: false,
-                max_shape_sides: 100,
-                md3_warp_skip_tiny: false,
-                md3_border_gate: false,
-                md3_auto_hard_cut: false,
-                md3_preset_time_rand: false,
-                md3_audio_analysis: false,
-                md3_shader_fft: false,
-                md3_extended_vars: false,
-                md3_shader_prelude: false,
-                md3_shader_time: false,
-                md3_md2_comp_effects: false,
-                md3_ns_eel2: false,
-                md3_drop_failed_code: false,
-                md3_double_preset: false,
-                md3_blend_patterns: false,
-                md3_preset_sprites: false,
-                md3_gif_textures: false,
-                md3_sprite_burn_twice: false,
+                shader_time_wrap: true,
+                // BeatDrop's shader inputs and expression variables do not exist in projectM
+                md2_shader_inputs: false,
+                md2_input_vars: false,
+                // Every MilkDrop 3 flag and `max_shape_sides` are the MilkDrop 2 values (off / 100).
+                ..MILKDROP2_RULES
             },
-            Compat::MilkDrop2 => CompatRules {
-                vol_is_comma_bug: true,
-                mip_y_from_width: true,
-                c1_is_zero: false,
-                decay_8bit: true,
-                quantize_vertex_colors: true,
-                hue_tint_always: false,
-                thick_needs_512: true,
-                pm_waveforms: false,
-                shape_thick_full_pixel: true,
-                mv_skip_first_frame: false,
-                mv_min_len_px: 1.0,
-                mv_mirrored_lookup: true,
-                comp_reads_previous: true,
-                ang_seam_fix: true,
-                comp_uv_half_texel: false,
-                shader_warp_diffuse_is_decay: false,
-                rot_translation_dropped: false,
-                shade_top_first: false,
-                blur_src_flipped: false,
-                warp_diag_flipped: false,
-                echo_diag_flipped: false,
-                echo_quad_aspect: false,
-                gamma_pass_eps: 0.001,
-                gl_strokes: false,
-                wave_dots_smoothed: false,
-                point_size_honored: true,
-                wave_thick_ndc_inc: false,
-                wave_point_f64_aspect: false,
-                no_mipmaps: false,
-                warp_uv_on_gpu: false,
-                main_alpha: false,
-                shape_main_nearest: false,
-                blur_alloc_drops_overlays: false,
-                gl_fill_ties: false,
-                gl_varying_fold: false,
-                pm_border_mesh: false,
-                custom_slots: 16,
-                warp_main_sampler_from_wrap: false,
-                md2_preset_blend: true,
-                md2_code_join: true,
-                frame_vars_drive_post: true,
-                shared_shader_rand: true,
-                warp_anim_projectm: false,
-                custom_shape_image: false,
-                noshader_comp_wrap: true,
-                md3_wave_modes: false,
-                max_shape_sides: 100,
-                md3_warp_skip_tiny: false,
-                md3_border_gate: false,
-                md3_auto_hard_cut: false,
-                md3_preset_time_rand: false,
-                md3_audio_analysis: false,
-                md3_shader_fft: false,
-                md3_extended_vars: false,
-                md3_shader_prelude: false,
-                md3_shader_time: false,
-                md3_md2_comp_effects: false,
-                md3_ns_eel2: false,
-                md3_drop_failed_code: false,
-                md3_double_preset: false,
-                md3_blend_patterns: false,
-                md3_preset_sprites: false,
-                md3_gif_textures: false,
-                md3_sprite_burn_twice: false,
-            },
+            Compat::MilkDrop2 => MILKDROP2_RULES,
             // The MilkDrop 3 deltas go here, one `CompatRules` field each.
             Compat::MilkDrop3 => CompatRules {
                 md3_wave_modes: true,
@@ -413,6 +440,7 @@ impl Compat {
                 md3_extended_vars: true,
                 md3_shader_prelude: true,
                 md3_shader_time: true,
+                shader_time_wrap: true,
                 md3_md2_comp_effects: true,
                 md3_ns_eel2: true,
                 md3_drop_failed_code: true,
@@ -421,7 +449,9 @@ impl Compat {
                 md3_preset_sprites: true,
                 md3_gif_textures: true,
                 md3_sprite_burn_twice: true,
-                ..Compat::MilkDrop2.rules()
+                md2_shader_inputs: false,
+                md2_input_vars: false,
+                ..MILKDROP2_RULES
             },
         }
     }

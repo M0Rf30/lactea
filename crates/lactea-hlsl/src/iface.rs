@@ -1,6 +1,7 @@
 //! `CShaderParams::CacheParams` sampler rules: prefix parsing (`fw_ fc_ pw_ pc_`), default
 //! filter/address modes per texture class, `randXX` handling, `texsize_<name>` resolution.
 
+use crate::Prelude;
 use lactea_abi::{Address, Filter, NoiseTex, TexDim, TexSource, TextureBinding};
 
 /// Root texture name of an HLSL sampler identifier plus the explicit mode, if any.
@@ -35,15 +36,18 @@ pub(crate) fn noise_source(root: &str) -> Option<NoiseTex> {
     })
 }
 
-/// Source of a texture root name. With `md3` (the MD3 prelude is active) `fft` is the engine-owned shader FFT texture;
-/// without it `fft` is just a user texture named `fft` (BeatDrop's `sampler_fft`, which the host may or may not supply).
-pub(crate) fn source_of_root(root: &str, md3: bool) -> TexSource {
+/// Source of a texture root name. With the MD3 prelude `fft` is the engine-owned shader FFT texture; with the BeatDrop
+/// prelude `fft` and `wave` both are (one engine texture holds the spectrum rows and the waveform rows); without a
+/// prelude `fft` is just a user texture named `fft` (which the host may or may not supply).
+pub(crate) fn source_of_root(root: &str, prelude: impl Into<Prelude>) -> TexSource {
+    let prelude = prelude.into();
     match root {
         "main" => TexSource::Main,
         "blur1" => TexSource::Blur(1),
         "blur2" => TexSource::Blur(2),
         "blur3" => TexSource::Blur(3),
-        "fft" if md3 => TexSource::Fft,
+        "fft" if prelude.md3() || prelude.beatdrop() => TexSource::Fft,
+        "wave" if prelude.beatdrop() => TexSource::Fft,
         r => match noise_source(r) {
             Some(n) => TexSource::Noise(n),
             None => TexSource::User(r.to_string()),
@@ -55,10 +59,10 @@ pub(crate) fn resolve_sampler(
     hlsl_name: &str,
     declared_dim: TexDim,
     used_3d: bool,
-    md3: bool,
+    prelude: impl Into<Prelude>,
 ) -> TextureBinding {
     let (root, mode) = sampler_root(hlsl_name);
-    let source = source_of_root(&root, md3);
+    let source = source_of_root(&root, prelude);
     // defaults: bilinear + wrap; blur/fft/wave default to bilinear + clamp unless a prefix says otherwise
     // (MD3 never uses anisotropy for fft/wave, so there is nothing else to special-case there)
     let clamp_default = matches!(source, TexSource::Blur(_)) || root == "fft" || root == "wave";
@@ -87,39 +91,53 @@ pub(crate) fn resolve_sampler(
     }
 }
 
-fn rand_index(n: &str) -> Option<u32> {
-    let b = n.as_bytes();
-    if n.starts_with("rand")
-        && b.len() >= 6
+/// The slot of a `randNN` / `randNN_prefix` texture name (`root`: the sampler name without `sampler_` and without its
+/// quality prefix, lowercase), or `None` when `root` is an ordinary texture name. Shared by the sampler and the
+/// `texsize_` resolution so both agree on which names are random slots.
+///
+/// * `max_slot`: the highest slot that is random (projectM 15, MD2 99); higher numbers are ordinary names.
+/// * `strict`: MD2 (`plugin.cpp:3575-3578`) accepts only `randNN` or `randNN_...`; projectM
+///   (`MilkdropShader.cpp:117-119`) accepts any name that starts with `randNN`.
+pub fn rand_slot(root: &str, max_slot: u8, strict: bool) -> Option<usize> {
+    let b = root.as_bytes();
+    if b.len() >= 6
+        && &b[..4] == b"rand"
         && b[4].is_ascii_digit()
         && b[5].is_ascii_digit()
-        && (b.len() == 6 || b[6] == b'_')
+        && (!strict || b.len() == 6 || b[6] == b'_')
     {
-        n[4..6].parse().ok()
-    } else {
-        None
+        let slot = usize::from(b[4] - b'0') * 10 + usize::from(b[5] - b'0');
+        if slot <= usize::from(max_slot) {
+            return Some(slot);
+        }
     }
+    None
 }
 
 /// Source for a `texsize_<name>` parameter. Mirrors CacheParams: random textures are matched by
 /// slot number, everything else by name. The size of a source that no sampler of this shader
 /// binds is still returned (MD2 would only warn). With `md3`, `texsize_fft` names the shader FFT texture (MD3 3.37
 /// leaves it unresolved, i.e. zero; reporting the real source lets the host answer 512 x 1).
-pub(crate) fn texsize_source(param: &str, bindings: &[TextureBinding], md3: bool) -> TexSource {
+pub(crate) fn texsize_source(
+    param: &str,
+    bindings: &[TextureBinding],
+    prelude: impl Into<Prelude>,
+    (max_slot, strict): (u8, bool),
+) -> TexSource {
     let name = param
         .strip_prefix("texsize_")
         .unwrap_or(param)
         .to_lowercase();
-    if let Some(ri) = rand_index(&name) {
+    if let Some(ri) = rand_slot(&name, max_slot, strict) {
         for b in bindings {
             if let TexSource::User(u) = &b.source
-                && rand_index(u) == Some(ri)
+                && rand_slot(u, max_slot, strict) == Some(ri)
             {
                 return b.source.clone();
             }
         }
     }
-    source_of_root(&name, md3)
+    source_of_root(&name, prelude)
 }
 
 #[cfg(test)]
@@ -185,6 +203,30 @@ mod tests {
     }
 
     #[test]
+    fn rand_names_follow_the_compat_rules() {
+        // MD2: slots up to 99, only `randNN` / `randNN_...`
+        assert_eq!(rand_slot("rand03", 99, true), Some(3));
+        assert_eq!(rand_slot("rand42_tiled", 99, true), Some(42));
+        assert_eq!(rand_slot("rand03x", 99, true), None);
+        assert_eq!(rand_slot("rand100", 99, true), None);
+        // projectM: slots up to 15, any suffix
+        assert_eq!(rand_slot("rand15", 15, false), Some(15));
+        assert_eq!(rand_slot("rand16", 15, false), None);
+        assert_eq!(rand_slot("rand03x", 15, false), Some(3));
+        // `texsize_randNN` finds the bound slot whichever suffix the sampler had
+        let bound = resolve_sampler("sampler_rand03_smalltiled", TexDim::D2, false, false);
+        assert_eq!(
+            texsize_source(
+                "texsize_rand03",
+                std::slice::from_ref(&bound),
+                false,
+                (99, true)
+            ),
+            bound.source
+        );
+    }
+
+    #[test]
     fn fft_sampler_is_a_user_texture_unless_md3() {
         // without the MD3 prelude: unchanged (BeatDrop-style user texture `fft`, bilinear + clamp)
         let f = resolve_sampler("sampler_fft", TexDim::D2, false, false);
@@ -197,7 +239,7 @@ mod tests {
             )
         );
         assert_eq!(
-            texsize_source("texsize_fft", &[], false),
+            texsize_source("texsize_fft", &[], false, (99, true)),
             TexSource::User("fft".into())
         );
         // MD3: the engine's FFT texture, default clamp + bilinear, prefixes pick filter / wrap
@@ -218,6 +260,9 @@ mod tests {
         // `wave` stays a user texture under MD3 (never filled there)
         let w = resolve_sampler("sampler_wave", TexDim::D2, false, true);
         assert_eq!(w.source, TexSource::User("wave".into()));
-        assert_eq!(texsize_source("texsize_fft", &[], true), TexSource::Fft);
+        assert_eq!(
+            texsize_source("texsize_fft", &[], true, (99, true)),
+            TexSource::Fft
+        );
     }
 }

@@ -182,15 +182,9 @@ pub fn push_line(
     }
 }
 
-/// A line strip as `LineList` vertex pairs (`GL_LINE_STRIP` semantics: every segment is rasterised on its own;
-/// vertex colours interpolate along each segment). `color_of(i)` is the colour of point `i`.
-pub fn strip_segments(pts: &[[f32; 2]], color_of: impl Fn(usize) -> [f32; 4]) -> Vec<WfVertex> {
-    let mut out = Vec::new();
-    strip_segments_into(&mut out, pts, color_of);
-    out
-}
-
-/// [`strip_segments`] into a reusable buffer (cleared first).
+/// A line strip as `LineList` vertex pairs into a reusable buffer, cleared first (`GL_LINE_STRIP` semantics: every
+/// segment is rasterised on its own; vertex colours interpolate along each segment). `color_of(i)` is the colour of
+/// point `i`.
 pub fn strip_segments_into(
     out: &mut Vec<WfVertex>,
     pts: &[[f32; 2]],
@@ -237,6 +231,13 @@ pub fn push_point(
 /// Triangle fan `v[0], v[1..]` -> triangle list. `colors` per vertex.
 pub fn fan_to_list(pts: &[[f32; 2]], colors: &[[f32; 4]]) -> Vec<WfVertex> {
     let mut out = Vec::with_capacity(3 * pts.len().saturating_sub(2));
+    push_fan_colors(&mut out, pts, colors);
+    out
+}
+
+/// [`fan_to_list`] appended to `out`.
+pub fn push_fan_colors(out: &mut Vec<WfVertex>, pts: &[[f32; 2]], colors: &[[f32; 4]]) {
+    out.reserve(3 * pts.len().saturating_sub(2));
     for i in 1..pts.len() - 1 {
         for k in [0, i, i + 1] {
             out.push(WfVertex {
@@ -245,7 +246,6 @@ pub fn fan_to_list(pts: &[[f32; 2]], colors: &[[f32; 4]]) -> Vec<WfVertex> {
             });
         }
     }
-    out
 }
 
 /// [`fan_to_list`] appended to `out` for a fan whose centre has colour `centre` and every other vertex `rim`.
@@ -730,18 +730,21 @@ fn bilerp_uv(g: &MeshGeometry, uv: &[[f32; 2]], gxf: f32, gyf: f32) -> Option<[f
     Some(r)
 }
 
-/// Motion-vector line list (pairs of clip-space points) of `DrawMotionVectors`.
+/// Motion-vector line list (pairs of clip-space vertices) of `DrawMotionVectors`, written into `out` (cleared first).
 /// `prev_uv` is the warp UV grid of the *previous* frame (what MD2's `m_verts` still holds at
 /// that point of `RenderFrame`).
+#[allow(clippy::too_many_arguments)]
 pub fn motion_vector_lines(
+    out: &mut Vec<WfVertex>,
     mv: &MotionVectors,
     g: &MeshGeometry,
     prev_uv: &[[f32; 2]],
     w: u32,
     h: u32,
     rules: &CompatRules,
-) -> Vec<[f32; 2]> {
-    let mut out = Vec::new();
+    color: [f32; 4],
+) {
+    out.clear();
     let mut nx = mv.x as i32;
     let mut ny = mv.y as i32;
     let mut dx = mv.x - nx as f32;
@@ -755,7 +758,7 @@ pub fn motion_vector_lines(
         dy = 0.0;
     }
     if nx <= 0 || ny <= 0 {
-        return out;
+        return;
     }
     let dx2 = mv.dx;
     let dy2 = mv.dy;
@@ -808,11 +811,16 @@ pub fn motion_vector_lines(
                 ddy = min_len;
             }
             let (ex, ey) = (fx + ddx, fy + ddy);
-            out.push([fx * 2.0 - 1.0, 1.0 - fy * 2.0]);
-            out.push([ex * 2.0 - 1.0, 1.0 - ey * 2.0]);
+            out.push(WfVertex {
+                pos: [fx * 2.0 - 1.0, 1.0 - fy * 2.0],
+                color,
+            });
+            out.push(WfVertex {
+                pos: [ex * 2.0 - 1.0, 1.0 - ey * 2.0],
+                color,
+            });
         }
     }
-    out
 }
 
 // -----------------------------------------------------------------------------------------
@@ -903,8 +911,8 @@ pub fn shape_geometry_into(
     g.sides = sides;
 }
 
-/// Darken-center triangle fan (clip space), colours: centre alpha 3/32, rim 0.
-pub fn darken_center_triangles(aspect_y: f32, rules: &CompatRules) -> Vec<WfVertex> {
+/// Darken-center triangle fan (clip space), colours: centre alpha 3/32, rim 0, written into `out` (cleared first).
+pub fn darken_center_triangles(out: &mut Vec<WfVertex>, aspect_y: f32, rules: &CompatRules) {
     let hs = 0.05f32;
     let pts = [
         [0.0, 0.0],
@@ -917,7 +925,8 @@ pub fn darken_center_triangles(aspect_y: f32, rules: &CompatRules) -> Vec<WfVert
     let c0 = conv_color(rules, [0.0, 0.0, 0.0, 3.0 / 32.0]);
     let c1 = conv_color(rules, [0.0, 0.0, 0.0, 0.0]);
     let colors = [c0, c1, c1, c1, c1, c1];
-    fan_to_list(&pts, &colors)
+    out.clear();
+    push_fan_colors(out, &pts, &colors);
 }
 
 /// Outer (`it == 0`) / inner (`it == 1`) border as projectM draws it (`Border::Draw`): 8 vertices and the same 8
@@ -925,7 +934,13 @@ pub fn darken_center_triangles(aspect_y: f32, rules: &CompatRules) -> Vec<WfVert
 /// same self-overlapping triangles (each blended separately) as projectM. projectM's vertices go through the
 /// y-flipping `orthogonalProjection`, so the mesh is mirrored vertically against `y = +1 = top` clip space; that only
 /// shows when the mesh is not symmetric, i.e. for those degenerate sizes.
-pub fn border_triangles(it: usize, ob_size: f32, ib_size: f32, rgba: [f32; 4]) -> Vec<WfVertex> {
+pub fn border_triangles(
+    out: &mut Vec<WfVertex>,
+    it: usize,
+    ob_size: f32,
+    ib_size: f32,
+    rgba: [f32; 4],
+) {
     let inner = if it == 0 {
         1.0 - ob_size
     } else {
@@ -945,22 +960,21 @@ pub fn border_triangles(it: usize, ob_size: f32, ib_size: f32, rgba: [f32; 4]) -
     const INDICES: [usize; 24] = [
         0, 1, 4, 1, 4, 5, 2, 3, 6, 3, 7, 6, 2, 0, 6, 0, 4, 6, 3, 7, 5, 1, 3, 5,
     ];
-    INDICES
-        .iter()
-        .map(|&i| WfVertex {
-            pos: [v[i][0], -v[i][1]],
-            color: rgba,
-        })
-        .collect()
+    out.clear();
+    out.extend(INDICES.iter().map(|&i| WfVertex {
+        pos: [v[i][0], -v[i][1]],
+        color: rgba,
+    }));
 }
 
 /// Outer / inner border as MD2 draws it: four quads, the first one rotated by 90 degrees three times.
 pub fn border_triangles_md2(
+    out: &mut Vec<WfVertex>,
     it: usize,
     ob_size: f32,
     ib_size: f32,
     rgba: [f32; 4],
-) -> Vec<WfVertex> {
+) {
     let inner = if it == 0 {
         1.0 - ob_size
     } else {
@@ -973,9 +987,9 @@ pub fn border_triangles_md2(
         [outer, -outer],
         [inner, -inner],
     ];
-    let mut out = Vec::new();
+    out.clear();
     for _ in 0..4 {
-        out.extend(fan_to_list(&v, &[rgba; 4]));
+        push_fan_colors(out, &v, &[rgba; 4]);
         let t = 1.570796327f32;
         for p in v.iter_mut() {
             let (x, y) = (p[0], p[1]);
@@ -983,7 +997,6 @@ pub fn border_triangles_md2(
             p[1] = x * t.sin() + y * t.cos();
         }
     }
-    out
 }
 
 /// Sub-pixel precision of the GPU's vertex snapping (8 bits), see `stroke.rs`.
@@ -1314,10 +1327,11 @@ mod tests {
         };
         for compat in [Compat::MilkDrop2, Compat::MilkDrop3, Compat::ProjectM] {
             let rules = compat.rules();
-            let l = motion_vector_lines(&mv, &g, &uv, 640, 360, &rules);
+            let mut l = Vec::new();
+            motion_vector_lines(&mut l, &mv, &g, &uv, 640, 360, &rules, [1.0; 4]);
             assert_eq!(l.len() % 2, 0);
             assert!(l.len() >= 2 * 12 * 9 - 2 * 20, "{compat:?}: {}", l.len());
-            let (a, b) = (l[0], l[1]);
+            let (a, b) = (l[0].pos, l[1].pos);
             let len = (((b[0] - a[0]) / 2.0).powi(2) + ((b[1] - a[1]) / 2.0).powi(2)).sqrt();
             assert!(len > 0.0 && len < 0.01, "min-length vector {len}");
         }
@@ -1347,10 +1361,12 @@ mod tests {
             rgba: [1.0; 4],
         };
         for compat in [Compat::MilkDrop2, Compat::MilkDrop3, Compat::ProjectM] {
-            let l = motion_vector_lines(&mv, &g, &uv, 640, 360, &compat.rules());
+            let mut l = Vec::new();
+            motion_vector_lines(&mut l, &mv, &g, &uv, 640, 360, &compat.rules(), [1.0; 4]);
             for p in l.chunks(2) {
-                let d0 = (p[0][0].powi(2) + p[0][1].powi(2)).sqrt();
-                let d1 = (p[1][0].powi(2) + p[1][1].powi(2)).sqrt();
+                let (p0, p1) = (p[0].pos, p[1].pos);
+                let d0 = (p0[0].powi(2) + p0[1].powi(2)).sqrt();
+                let d1 = (p1[0].powi(2) + p1[1].powi(2)).sqrt();
                 assert!(d1 < d0, "{compat:?}: end not closer to centre {p:?}");
             }
         }
@@ -1536,9 +1552,11 @@ mod tests {
 
     #[test]
     fn border_and_darken_center() {
-        let t = border_triangles(0, 0.1, 0.1, [1.0; 4]);
+        let mut t = Vec::new();
+        border_triangles(&mut t, 0, 0.1, 0.1, [1.0; 4]);
         assert_eq!(t.len(), 4 * 6);
-        let d = darken_center_triangles(0.5625, &Compat::ProjectM.rules());
+        let mut d = Vec::new();
+        darken_center_triangles(&mut d, 0.5625, &Compat::ProjectM.rules());
         assert_eq!(d.len(), 4 * 3);
         assert!((d[0].color[3] - 3.0 / 32.0).abs() < 1e-6);
     }
@@ -1547,7 +1565,8 @@ mod tests {
     /// `0 1 4 | 1 4 5 | 2 3 6 | 3 7 6 | 2 0 6 | 0 4 6 | 3 7 5 | 1 3 5`, mirrored vertically (y-flipping projection).
     #[test]
     fn border_mesh_is_projectms() {
-        let t = border_triangles(1, 0.1, 0.05, [0.5; 4]);
+        let mut t = Vec::new();
+        border_triangles(&mut t, 1, 0.1, 0.05, [0.5; 4]);
         let (o, i) = (1.0f32 - 0.1, 1.0f32 - 0.1 - 0.05);
         let p: Vec<[f32; 2]> = t.iter().map(|v| v.pos).collect();
         assert_eq!(p.len(), 24);
@@ -1555,18 +1574,21 @@ mod tests {
         assert_eq!(&p[21..24], &[[o, o], [-o, o], [i, i]]); // 1 3 5
         assert!(t.iter().all(|v| v.color == [0.5; 4]));
         // degenerate: ob + ib > 1 -> negative inner radius, the triangles overlap instead of forming a frame
-        let d = border_triangles(0, 1.2, 0.0, [1.0; 4]);
+        let mut d = Vec::new();
+        border_triangles(&mut d, 0, 1.2, 0.0, [1.0; 4]);
         let i = 1.0f32 - 1.2; // negative inner radius
         assert_eq!(d[2].pos, [i, -i]); // vertex 4 = (i, i), mirrored in y
         // MD2: four rotated quads (the old geometry), same coverage for sane sizes
-        assert_eq!(border_triangles_md2(0, 0.1, 0.0, [1.0; 4]).len(), 24);
+        border_triangles_md2(&mut d, 0, 0.1, 0.0, [1.0; 4]);
+        assert_eq!(d.len(), 24);
     }
 
     /// Edges on pixel centres (`size * H / 2` half integer) move down one sub-pixel step, nothing else moves.
     #[test]
     fn gl_fill_ties_nudge_only_horizontal_centre_edges() {
         let (w, h) = (40.0f32, 30.0f32);
-        let mut t = border_triangles(0, 0.1, 0.0, [1.0; 4]); // inner edges at rows 1.5 and 28.5
+        let mut t = Vec::new();
+        border_triangles(&mut t, 0, 0.1, 0.0, [1.0; 4]); // inner edges at rows 1.5 and 28.5
         let before = t.clone();
         gl_fill_ties(&mut t, w, h);
         for (a, b) in before.iter().zip(&t) {
@@ -1583,7 +1605,8 @@ mod tests {
         }
         // 0.05 on 30 rows: edges at 0.75 / 29.25; 0.075 on 40 columns: a tie in x, which is not touched
         for (size, ww) in [(0.05f32, 40.0f32), (0.075, 40.0)] {
-            let mut u = border_triangles(0, size, 0.0, [1.0; 4]);
+            let mut u = Vec::new();
+            border_triangles(&mut u, 0, size, 0.0, [1.0; 4]);
             let b = u.clone();
             gl_fill_ties(&mut u, ww, h);
             assert_eq!(u, b, "size {size}");

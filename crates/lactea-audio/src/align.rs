@@ -21,9 +21,8 @@ pub struct Aligner {
 
 impl Aligner {
     pub fn new() -> Self {
-        // floor(log2(BUF - VALID)) = floor(log2(96)) = 6, capped at 10
+        // floor(log2(BUF - VALID)) = floor(log2(96)) = 6
         let octaves = ((BUF - VALID) as f64).log2().floor() as usize;
-        let octaves = octaves.min(10);
         let mut samples = vec![0; octaves];
         let mut spacing = vec![0; octaves];
         samples[0] = BUF;
@@ -117,9 +116,6 @@ impl Aligner {
 
     /// Align in place. After the call only the first [`VALID`] samples are meaningful.
     pub(crate) fn align(&mut self, wave: &mut [f32; BUF]) {
-        if self.octaves < 4 {
-            return;
-        }
         // `mips` overwrites every entry `offset` reads, so the scratch needs no clearing
         let mut new = std::mem::take(&mut self.new_mips);
         self.mips(&mut new, wave);

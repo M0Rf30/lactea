@@ -5,30 +5,53 @@
 //! Built-in WGSL: fixed-function replacements, blur passes, final blit, and the vertex shader
 //! shared with user warp / composite shaders.
 
+/// A GLSL-style full-screen triangle for modules that draw one without vertex buffers: WGSL `fullscreen_tri(vi)`
+/// gives the clip-space corner of vertex `vi` (0..3). Expands to a string literal so it can be `concat!`ed.
+macro_rules! fullscreen_tri_fn {
+    () => {
+        r#"
+fn fullscreen_tri(vi: u32) -> vec2<f32> {
+    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    return p[vi];
+}
+"#
+    };
+}
+pub(crate) use fullscreen_tri_fn;
+
 /// Vertex shader for every `MeshVertex` pass (warp, composite, textured fills). Output layout
 /// matches `lactea_abi::WGSL_COMMON`'s `VsOut` (locations 0..2 + position).
-pub const MESH_VS: &str = r#"
-struct VOut {
+pub fn mesh_vs() -> String {
+    mesh_vs_src(String::new(), String::new())
+}
+
+/// The mesh vertex stage: `members` / `stmts` add the fold varyings (see [`fold_members`], [`fold_stmts`]).
+fn mesh_vs_src(members: String, stmts: String) -> String {
+    format!(
+        r#"
+struct VOut {{
     @builtin(position) position: vec4<f32>,
     @location(0) diffuse: vec4<f32>,
     @location(1) uv: vec4<f32>,
     @location(2) rad_ang: vec2<f32>,
-};
+{members}}};
 @vertex
 fn vs_main(@location(0) pos: vec2<f32>, @location(1) diffuse: vec4<f32>,
-           @location(2) uv: vec4<f32>, @location(3) rad_ang: vec2<f32>) -> VOut {
+           @location(2) uv: vec4<f32>, @location(3) rad_ang: vec2<f32>) -> VOut {{
     var o: VOut;
     o.position = vec4<f32>(pos, 0.0, 1.0);
     o.diffuse = diffuse;
     o.uv = uv;
     o.rad_ang = rad_ang;
-    return o;
+{stmts}    return o;
+}}
+"#
+    )
 }
-"#;
 
 /// projectM's warp vertex shader (`PresetWarpVertexShaderGlsl330.vert`), statement for statement, so the GPU's own
 /// `pow` / `sin` / `cos` and its multiply-add fusion produce the same UVs as projectM's GL driver.
-/// `group` is the bind group of [`WarpVsUniforms`]. Output layout = [`MESH_VS`] (`VsOut`).
+/// `group` is the bind group of [`WarpVsUniforms`]. Output layout = [`mesh_vs`] (`VsOut`).
 pub fn warp_vs(group: u32) -> String {
     warp_vs_src(group, false, 0)
 }
@@ -82,31 +105,13 @@ fn fold_stmts(n: usize) -> String {
     s
 }
 
-/// [`MESH_VS`] plus the fold varyings: module text = `WGSL_COMMON`, the fold functions and a vertex stage with the
+/// [`mesh_vs`] plus the fold varyings: module text = `WGSL_COMMON`, the fold functions and a vertex stage with the
 /// same attributes, entry name and varyings 0..2 whose output also carries `fold{j}` (locations `3 + j`).
 pub fn mesh_vs_folds(folds: &[String]) -> String {
     format!(
-        r#"{prelude}
-struct VOut {{
-    @builtin(position) position: vec4<f32>,
-    @location(0) diffuse: vec4<f32>,
-    @location(1) uv: vec4<f32>,
-    @location(2) rad_ang: vec2<f32>,
-{members}}};
-@vertex
-fn vs_main(@location(0) pos: vec2<f32>, @location(1) diffuse: vec4<f32>,
-           @location(2) uv: vec4<f32>, @location(3) rad_ang: vec2<f32>) -> VOut {{
-    var o: VOut;
-    o.position = vec4<f32>(pos, 0.0, 1.0);
-    o.diffuse = diffuse;
-    o.uv = uv;
-    o.rad_ang = rad_ang;
-{stmts}    return o;
-}}
-"#,
-        prelude = fold_prelude(folds),
-        members = fold_members(folds.len()),
-        stmts = fold_stmts(folds.len()),
+        "{}{}",
+        fold_prelude(folds),
+        mesh_vs_src(fold_members(folds.len()), fold_stmts(folds.len()))
     )
 }
 
@@ -272,7 +277,9 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 /// Blur passes (milkdropfs.cpp `BlurPasses`, blur1_ps.fx / blur2_ps.fx). One uniform block:
 /// `c0` = source texsize + inverse, `c1` = w1..w4, `c2` = d1..d4, `c3` = (scale, bias, w_div, 0),
 /// `c5` = (w1, w2, d1, d2), `c6` = (w_div, edge_darken_c1, c2, c3).
-pub const BLUR_SRC: &str = r#"
+pub const BLUR_SRC: &str = concat!(
+    fullscreen_tri_fn!(),
+    r#"
 struct BlurParams {
     c0: vec4<f32>,
     c1: vec4<f32>,
@@ -292,9 +299,8 @@ struct VOut {
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VOut {
     // full-screen triangle; uv.y = 0 at the top of the target
-    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
+    let xy = fullscreen_tri(vi);
     var o: VOut;
-    let xy = p[vi];
     o.position = vec4<f32>(xy, 0.0, 1.0);
     o.uv = vec2<f32>(xy.x * 0.5 + 0.5, 0.5 - xy.y * 0.5);
     return o;
@@ -337,12 +343,15 @@ fn fs_blur_v(in: VOut) -> @location(0) vec4<f32> {
     blur = blur * t;
     return vec4<f32>(blur, 1.0);
 }
-"#;
+"#
+);
 
 /// Final blit of the internal Rgba8Unorm image to the host target. Nearest `textureLoad`, so
 /// equal sizes copy bit-exactly; for `*Srgb` targets the value is sRGB-decoded first so the
 /// hardware's linear->sRGB encode stores the original bytes.
-pub const BLIT_SRC: &str = r#"
+pub const BLIT_SRC: &str = concat!(
+    fullscreen_tri_fn!(),
+    r#"
 struct BlitParams {
     // x,y = src size, z,w = dst size
     sizes: vec4<f32>,
@@ -354,8 +363,7 @@ struct BlitParams {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
-    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-    return vec4<f32>(p[vi], 0.0, 1.0);
+    return vec4<f32>(fullscreen_tri(vi), 0.0, 1.0);
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -374,4 +382,5 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     return vec4<f32>(rgb, 1.0);
 }
-"#;
+"#
+);

@@ -14,7 +14,11 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE-*"]
 
 [dependencies]
 bytemuck.workspace = true
-serde.workspace = true
+serde = { workspace = true, optional = true }
+
+[features]
+# Serialize/Deserialize for the dump types (`dump::*`, `RunConfig`, shader interface types).
+serde = ["dep:serde"]
 
 [dev-dependencies]
 naga = { workspace = true, features = ["wgsl-in"] }

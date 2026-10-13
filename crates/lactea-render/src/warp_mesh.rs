@@ -17,6 +17,9 @@
 
 use crate::RenderError;
 
+/// Largest warp mesh (cells per axis) accepted.
+pub const MAX_MESH_CELLS: u32 = 300;
+
 /// Static mesh data: vertex positions and MD2's `rad`/`ang` per-vertex attributes.
 ///
 /// The grid has an even number of cells (>= 2) per axis; [`MeshGeometry::new`] enforces that, which is why the
@@ -56,6 +59,11 @@ impl MeshGeometry {
     /// Fails with [`RenderError::Invalid`] unless both cell counts are even and at least 2 (MD2 builds the grid
     /// from four quadrants).
     pub fn new(gx: u32, gy: u32, tex_w: u32, tex_h: u32) -> Result<Self, RenderError> {
+        if gx > MAX_MESH_CELLS || gy > MAX_MESH_CELLS {
+            return Err(RenderError::Invalid(format!(
+                "mesh dimensions must be at most {MAX_MESH_CELLS}, got {gx}x{gy}"
+            )));
+        }
         if gx < 2 || gy < 2 || !gx.is_multiple_of(2) || !gy.is_multiple_of(2) {
             return Err(RenderError::Invalid(format!(
                 "mesh dimensions must be even and >= 2, got {gx}x{gy}"

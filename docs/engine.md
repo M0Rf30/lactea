@@ -7,18 +7,19 @@ It behaves like **projectM** (the measurement oracle) where projectM and MD2 dif
 behaviour, not transliterated: projectM `MilkdropPreset/*` (`PerFrameContext`, `PerPixelMesh`,
 `CustomWaveform`, `CustomShape`, `MilkdropShader`, `FinalComposite`, ...).
 
-Out of scope: sprites, text, `fft`/`wave` BeatDrop shader textures. Preset changes (hard cut and
+Out of scope: text overlays (projectM has none). User sprites (`projectm_sprite_*`) and BeatDrop's shader FFT / `get_wave` textures
+(MilkDrop 2 and MilkDrop 3) are implemented, see "projectM API parity additions". Preset changes (hard cut and
 soft cut / transitions) are in scope, see "Transitions" below.
 
 ## Embedding API
 
 ```rust
-let mut engine = Engine::new(&device, &queue, EngineConfig { width, height, ..Default::default() });
+let mut engine = Engine::new(&device, &queue, EngineConfig { width, height, ..Default::default() })?;   // sanitises the config; Err on a size beyond the device limit
 engine.set_texture_provider(Box::new(MyTextures));          // before load_preset
 let report = engine.load_preset(milk_bytes, "name", Transition::Cut)?;   // PresetReport; Transition::Soft { seconds } blends
 engine.push_pcm_f32(&interleaved, 2);                       // any rate/channels; EngineConfig.sample_rate
 engine.render(&mut encoder, &target_view, FrameClock { time, frame });   // one frame; you submit
-engine.resize(w, h);  engine.frame_vars();  engine.renderer() / renderer_mut();
+engine.resize(w, h)?;  engine.frame_vars();  engine.renderer() / renderer_mut();   // resize / set_mesh_size are fallible too
 engine.transition_progress();  engine.transition_info();  engine.incoming_renderer();   // soft cut in progress (projectM)
 engine.set_md2_blend_pattern(Some(1));  engine.md2_blend_pattern();                      // MilkDrop 2 blend (`Compat::MilkDrop2`)
 engine.current_compat();                                                  // mode in use (follows each load with `auto_compat`)
@@ -47,7 +48,7 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
   drops the media. A provider whose files change while it is installed is not re-read.
 * `PresetReport`: `compat` (the mode the preset was loaded under), `warp`/`comp` `ShaderOutcome {NotUsed, User, Default,
   Fallback}`, `warnings`, `shader_fallbacks`, `unresolved_textures`, `resolved_textures`.
-* `EngineError {Parse, Compile{what,error}, Render}`. On error the previous preset stays active.
+* `EngineError {Parse, Compile{what,error}, Render, NoPreset, Unsupported, Milk2}`. On error the previous preset stays active.
 * Time: `FrameClock.time` is the `time` variable (projectM: global running time, not time since
   preset start); audio smoothing advances by `time - previous time` (0 on the first frame).
 
@@ -74,9 +75,12 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
      (not MD2's gamma/echo shader; `Compat::MilkDrop2` uses `default_comp_shader`); failure → the same default.
    * v1 → fixed-function paths (`VideoEcho`/`Filters` = MD2 `ShowToUser_NoShaders`).
 6. Textures: every `TexSource::User(name)` of the installed shaders goes through the provider.
-   `randNN[_prefix]`: pick = `StreamRng("randtex_<sampler name as projectM sees it>").next64() % pool.len()`
-   over the (prefix-filtered) sorted pool; one pick per slot shared by warp and comp; a `fw_`-style quality
-   prefix defeats the prefix filter exactly like in projectM. Unresolved names are reported (the renderer
+   `randNN[_prefix]` (`lactea_hlsl::rand_slot`, slot range `CompatRules::max_rand_slot`: projectM 0..=15, MD2 0..=99;
+   the same parser decides `texsize_randNN`): pick = `StreamRng("randtex_<sampler name as projectM sees it>").next64() % pool.len()`
+   over the (prefix-filtered) sorted pool; one pick per slot shared by warp and comp. projectM peels the quality
+   prefix before detecting `randNN` (`MilkdropShader.cpp:80-86`, so `fw_rand03` is slot 3), but its pool prefix filter
+   reads the raw name, so a `fw_`-style prefix defeats the filter (`rand_filter_raw_name`; MD2 filters on the peeled
+   name and accepts only `randNN` / `randNN_…`). Unresolved names are reported (the renderer
    binds a 1×1 black placeholder).
 7. Random state (`rng.rs`): the oracle's documented stream family (`splitmix64(seed+γ) ^ fnv1a64(name)`):
    `shader_warp` / `shader_comp` (independent in projectM: `rand_preset`, 24 rotation parameters, then
@@ -86,7 +90,7 @@ engine.force_next_frame(Some(ForcedFrame { vars, prev_main }));          // teac
 
 ## Per-frame pipeline (`Engine::render`)
 
-1. `dt = time - last_time`; `Analyzer::update_dt(dt)` (frame 0: dt = 0). Verified 1e-15 against oracle vars.
+1. `dt = time - last_time`; `Analyzer::update_dt(dt)` (the first rendered frame has `dt = 0`; `set_fps(0)` is ignored, so the `1/fps` of the blend patterns never divides by zero). Verified 1e-15 against oracle vars.
 2. `PerFrameUpdate`: load state (all builtins reset from the preset's base values every frame, `q` from the
    init snapshot, user variables persist), `LoadStateReadOnlyVariables` for the per-vertex context (**before**
    the per-frame code), run per-frame code, copy `q` to the per-vertex context and to `frameQVariables`,
@@ -136,7 +140,8 @@ uses MD2's per-vertex blend instead (below).
   once (the incoming preset becomes active) and starts the new one; `Transition::Soft { seconds <= 0 }` is a cut one frame later.
 * **`progress`** (the preset variable and `warp.progress` / `comp.progress`): `PresetProgressA()` is **1.0 for both presets
   while smoothing** and `(now - preset_time_a)/preset_duration` otherwise (`preset_time_a` = the clock time at the last cut, or
-  the start of the last soft cut once it ended). `time` and `frame` stay global running values for both presets.
+  the start of the last soft cut once it ended); `preset_duration` is the nominal one, or the host's sampled display time
+  after `Engine::set_loaded_preset_duration` (below). `time` and `frame` stay global running values for both presets.
 * **`start_clean`** (`EngineConfig.start_clean`, default `false` = projectM's default): the new preset's first frame warps from the
   old active preset's composite image instead of black (`DrawInitialImage`: our images are stored top-down like the dumps, so it is
   a straight copy; verified against the oracle's `new_warpsrc[N]`: 99 dB for the pairs below). The first preset always starts black.
@@ -172,7 +177,7 @@ renderer as `m_OldShaders` (`Renderer::take_shader_state` / `set_old_shader_stat
 | `m_fBlendStartTime/Duration/Progress`, end of blend | `BlendState::update`, `blend_progress` (all `float`, start = time of the last rendered frame like the projectM path) |
 | `RunPerFrameEquations(code)`: both states, snap point, variable blend | `build_blend_frame`, `shader_code`, `snap_point`, `blend_vars` |
 | `ComputeGridAlphaValues`: both per-vertex passes, `mix2`, vertex alpha | `eval_vertices` x2, `vertex_mix`, `blend_mesh` |
-| `RandomizeBlendPattern`, `GenPlasma`, `CosineInterp` | `randomize_blend_pattern` (19 patterns), `gen_plasma`, `lactea_render::cosine_interp` |
+| `RandomizeBlendPattern`, `GenPlasma`, `CosineInterp` | `randomize_blend_pattern` (19 patterns), `gen_plasma` (`engine/blend_patterns.rs`, shared with the MD3 patterns with `extent` and `band_entry`), `lactea_render::cosine_interp` |
 | `WarpedBlit_Shaders/NoShaders`, `ShowToUser_Shaders/NoShaders` pass tables | `blend::{warp_passes, comp_passes}` (internal to `lactea-render`), `Renderer::run_md2_warp` / `run_md2_comp` |
 | tile culling `bCullTiles/bFlipCulling`, `bAlphaBlend/bFlipAlpha` | `blend::tile_needed`, `geom::build_warp_vertices_blend`, `comp_indices`, alpha pipelines (`ShaderPass::alpha_pipelines`) |
 | comp vertex alpha from `m_verts[].Diffuse` | `blend::comp_vertex_xy01`, `blend::comp_vertex_alpha` |
@@ -234,8 +239,8 @@ kind of the blend in progress. `fdrender --compat md2 --preset2 P --switch-frame
 **Not ported / differences** (unresolved, listed in `docs/divergences.md`): `CosineInterp` is defined in vis_milk2's `utility.h`, which
 is not part of `third_party/md2`: `0.5 - 0.5 cos(pi x)` is reconstructed (it is also projectM's cosine progress). `m_fBlendTimeAuto` /
 random switch timing, `m_fNextPresetTime`'s random part, the one-frame loading ticks (`m_nLoadingPreset`: lactea builds the
-preset synchronously) and the `m_bWarpShaderLock/CompShaderLock` import are not modelled. `fft`/`wave` shader textures, sprites and
-BeatDrop wave modes above 8 stay out of scope: a main-wave blend whose *old* mode is one of those draws the new wave alone, a new mode
+preset synchronously) and the `m_bWarpShaderLock/CompShaderLock` import are not modelled. Text overlays and BeatDrop wave modes above 8
+stay out of scope: a main-wave blend whose *old* mode is one of those draws the new wave alone, a new mode
 above 8 draws nothing. Shaders that fail to translate count as "no shader" for the pass tables and the snap point (MD2 would use its
 fallback shader). Teacher forcing applies to the new state only. The no-blend `wrap` sampler keeps the engine's `wrap > 0.0001`
 (MD2: `> m_fSnapPoint` = 0.5), a blend frame uses `> m_fSnapPoint`. `nVideoEchoOrientation` of the flip case is not reduced `% 4`
@@ -260,8 +265,8 @@ fdrender --preset P --audio WAV --out DIR [--size 640x360] [--mesh 48x36] [--fps
 Same flags and output layout as `oracle/refrender` (`lactea_abi::dump`, producer
 `lactea@<version>+<git sha>`), `fdrender.json` instead of `oracle.json`. PCM feeding is
 `pcm_range(n, sr, fps)`, frame time exactly `n/fps`. `--texture-dir` default `oracle/build/texpack`
-(the pack the oracle used); JPEGs are decoded with the `image` crate (stb_image in projectM: ±1-2 code
-values). `--inject-noise REF` loads the oracle's `textures/noise*` (projectM's noise generation order is
+(the pack the oracle used); JPEGs are decoded by `lactea-jpeg`, a port of stb_image's decoder (what projectM uses, so
+the pixels are identical; there is no fallback decoder). `--inject-noise REF` loads the oracle's `textures/noise*` (projectM's noise generation order is
 compiler-defined); `--teacher REF` implies it. `--compat` takes projectm|md2|md3 (aliases milkdrop2, milkdrop3). Exit codes: 0 ok, 1 usage/IO (clap usage errors, a missing `--texture-dir`, `--switch-frame` not below `--frames`,
 transition flags without `--preset2`; `--help`/`--version` exit 0), 2 preset load failure,
 3 shader fallback (frames still rendered), 4 wgpu validation errors.
@@ -291,7 +296,7 @@ development tools. Results and open issues: `docs/fidelity.md`.
 
 ## Tests
 
-`CARGO_TARGET_DIR=target-engine cargo test -p lactea -p lactea-cli` — unit tests (random streams,
+`CARGO_TARGET_DIR=target-engine cargo test -p lactea -p lactea-cli` (GPU helpers shared through `crates/lactea-testutil`: `gpu()`, `gpu_or_skip!`, `read_rgba8`, `quiet_input`; `LACTEA_REQUIRE_GPU=1` turns a missing adapter into a failure) — unit tests (random streams,
 texture-pick rules, variable tables), `tests/smoke.rs` (corpus presets render 30 frames each through the
 engine at 160×90 with a wgpu validation error scope; compile failure / empty preset / unresolved textures),
 CLI end-to-end (`tests/cli.rs`: identical runs are byte-identical; a teacher run fed with a free run's own
@@ -319,10 +324,16 @@ Feature-by-feature audit against projectM's headers: `docs/parity.md`. What it a
   the hard-cut duration`. Settings and defaults are projectM's (preset 30 s, soft cut 3 s, hard cut off /
   20 s / 2.0, easter egg 1.0, beat sensitivity 1.0 clamped to 0..2, aspect correction on). Beat
   sensitivity and aspect correction are stored only (projectM reads them nowhere). The easter egg samples the
-  display time from a seeded gaussian. `progress` (the preset variable) still uses `EngineConfig::preset_duration`
-  (`Engine::set_preset_duration`), not the sampled one.
+  display time from a seeded gaussian (`preset_duration_sampled()`). `progress` (the preset variable) divides by
+  `EngineConfig::preset_duration` (`Engine::set_preset_duration`) until the host calls
+  `Engine::set_loaded_preset_duration(control.preset_duration_sampled())` right after `start_preset` /
+  `start_smoothing`; then it runs over the sampled display time like projectM (the sample is A/B-tracked, as in
+  `TimeKeeper`: the incoming preset's value becomes the shown one when the blend ends). The C API (`preset_started`)
+  and the app do this at their single load funnel; `lactea-cli` and the web example have no `PresetControl`.
 * **`Playlist`** (`playlist.rs`): `projectm_playlist_*` as pure data (filters, shuffle, history, retry,
-  sort, events); loading is a closure passed to `play_next` & co. Seeded shuffle.
+  sort, events); loading is a closure passed to `play_next` & co. Seeded shuffle. Directory scanning is not in this
+  crate: `lactea_host::PlaylistFs::{add_path, insert_path}` (`.milk .prjm .milk2`, sorted); the C API is
+  `lactea_playlist_*` (`crates/lactea-capi/src/playlist.rs`).
 * **Runtime parameters** (`params.rs`, a child module of `engine`): `set_mesh_size` (projectM's clamp: odd →
   even, 8..=300; `Renderer::set_mesh_size` rebuilds the grid and forgets the previous frame's warp UVs),
   `set_texel_offset`, `set_fps`, `set_preset_duration`, `last_frame_time`, `window_size`, `push_pcm_i16/u8`.
@@ -330,3 +341,24 @@ Feature-by-feature audit against projectM's headers: `docs/parity.md`. What it a
 * **Shape images** (`shape_images.rs`): `shapecode_N_image` (projectM flavour only). `load_preset` asks the
   `TextureProvider` for the name with its `fw_/fc_/pw_/pc_` prefix stripped; unresolved names are listed in
   `PresetReport::unresolved_textures` and drawn as a 1x1 black placeholder.
+* **User sprites** (`user_sprites.rs`; `projectm_sprite_*`, every compat mode): `Engine::sprite_create(kind, &[u8]) ->
+  u32` (0 on failure: unknown kind, limit 0, unreadable data, code that does not compile), `sprite_destroy`,
+  `sprite_destroy_all`, `sprite_count`, `sprite_ids`, `set_max_sprites` / `max_sprites` (default 16, the oldest sprite is
+  evicted at the limit), `sprite_var` / `set_sprite_var`. The data is a sprite INI section (`img`, `init_N`, `code_N`,
+  parsed by `lactea_preset::parse_user_sprite`); each sprite has an eel context sharing the engine's `rand()`.
+  Sprites run while a preset is loaded and are drawn over the composite; during a soft cut they are drawn **after** the
+  blend onto the output (`Renderer::draw_sprites_to_output`), not into either preset's image, so a warp / zoom
+  transition does not distort them. `burn` sprites are also drawn into the feedback image of every running preset
+  (`Renderer::burn_sprites`). Images come from the `TextureProvider` (a missing one is a 1×1 transparent texel).
+* **Burn and reload** (`extras.rs`): `Engine::burn_texture(rgba8, w, h, [left, top, width, height])` draws one opaque
+  quad into the image the next warp reads (both presets during a soft cut; no-op before the first preset);
+  `Engine::reload_textures()` clears the decode cache and re-resolves the running presets' textures and shape images
+  without recompiling shaders (`projectm_reset_textures`); it returns the names that stay unresolved.
+* **Logging**: the engine crates log through the `log` facade (shader fallbacks and rejected shaders warn, failed
+  preset loads error, unresolved textures debug / warn); `lactea::VCS_VERSION` is `git describe --always --dirty` at
+  build time (`"unknown"` outside a checkout). The C API bridges the facade to `lactea_set_log_callback`.
+* **BeatDrop host inputs** (`md2_inputs.rs`, `engine/md2_host.rs`, `Compat::MilkDrop2`): `Engine::set_mouse`,
+  `set_ctrl_keys(CtrlKeys)`, `set_date_time(DateTime)` / `clear_date_time()` and `monitor()` feed and read the
+  `mousex .. totalseconds` expression variables and the shader constants `_c14` / `_c15` / `_c16`; the shader FFT
+  texture comes from `lactea_audio::BeatDropShaderFft` (rules `md2_input_vars`, `md2_shader_inputs`;
+  `docs/divergences.md`).

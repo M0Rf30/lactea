@@ -185,6 +185,10 @@ struct ShaderKey {
     floor_mod: bool,
     projectm_flavor: bool,
     md3: bool,
+    beatdrop: bool,
+    gl_varying_fold: bool,
+    rand_max_slot: u8,
+    rand_strict_name: bool,
 }
 
 type Translation = Result<Translated, TranslateError>;
@@ -214,6 +218,10 @@ impl ShaderCache {
             floor_mod: opts.floor_mod,
             projectm_flavor: opts.projectm_flavor,
             md3: opts.md3,
+            beatdrop: opts.beatdrop,
+            gl_varying_fold: opts.gl_varying_fold,
+            rand_max_slot: opts.rand_max_slot,
+            rand_strict_name: opts.rand_strict_name,
         };
         if let Some(hit) = self.entries.get(&key) {
             return hit;

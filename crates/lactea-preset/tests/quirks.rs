@@ -337,3 +337,16 @@ fn projectm_shape_image_key() {
     );
     assert_eq!(Preset::parse(m.to_milk().as_bytes()).unwrap(), m);
 }
+
+#[test]
+fn projectm_flavour_rejects_unreadable_files() {
+    use lactea_preset::Flavor;
+    let pm = |b: &[u8]| Preset::parse_with(b, Flavor::ProjectM);
+    assert_eq!(pm(b"zoom=1.0\nbad\0\n"), Err(ParseError::BinaryData));
+    assert_eq!(pm(b"no_separator_lines\n\n"), Err(ParseError::NoKeys));
+    let mut big = b"zoom=1.0\n".to_vec();
+    big.resize(0x100001, b'\n');
+    assert_eq!(pm(&big), Err(ParseError::TooLarge));
+    // MD2 truncates at NUL instead of failing
+    assert!(Preset::parse(b"zoom=1.0\nbad\0\n").is_ok());
+}

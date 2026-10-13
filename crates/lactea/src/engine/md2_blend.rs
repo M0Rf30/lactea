@@ -23,16 +23,17 @@
     clippy::manual_clamp
 )]
 
+use super::blend_patterns::{PlasmaGrid, Span, band_entry, extent, gen_plasma};
 use super::md3_blend::{BlendLaunch, ProgressMode};
 use super::{
-    FrameCtx, LastFrame, Loaded, Slot, eval_per_frame, eval_vertices, finish_frame, frame_env,
-    frame_head, push_shapes, push_waves, warp_anim, warp_vertex_uvs,
+    FrameCtx, LastFrame, Loaded, Slot, WarpHead, eval_per_frame, eval_vertices, finish_frame,
+    frame_env, frame_head, push_shapes, push_waves, warp_anim, warp_vertex_uvs,
 };
 use crate::rng::StreamRng;
 use crate::runtime::PerFrame;
 use crate::{EngineConfig, EngineError, ForcedFrame, PresetReport};
 use lactea_preset::BaseValues;
-use lactea_render::warp_mesh;
+use lactea_render::warp_mesh::{self, VertexVars};
 use lactea_render::{BlurParams, FrameInput, Md2OldPass, PassRandom, cosine_interp};
 
 // ---------------------------------------------------------------------------------------------
@@ -337,6 +338,11 @@ pub(super) struct PatternClocks {
     drain: f32,
 }
 
+/// The `c` of a `(a, c)` vertex entry.
+fn c_of(v: &mut [f32; 2]) -> &mut f32 {
+    &mut v[1]
+}
+
 const TAU: f32 = 6.2831853;
 
 /// `RandomizeBlendPattern()`: fills `vertinfo[n] = (a, c)` of the `(gx+1) x (gy+1)` mesh (row 0 first) with one of
@@ -355,6 +361,8 @@ pub(super) fn randomize_blend_pattern(
     let (gx, gy) = (grid[0] as usize, grid[1] as usize);
     let (gxf, gyf) = (gx as f32, gy as f32);
     let (ax, ay) = aspect;
+    // a non-positive rate must not turn the animated clocks into inf / NaN
+    let frame_dt = if fps > 0.0 { 1.0 / fps } else { 0.0 };
     // `m_nTransitionBlendPattern > -1 ? m_nTransitionBlendPattern : dist(gen)`
     let mixtype = match forced {
         Some(k) => k,
@@ -363,10 +371,6 @@ pub(super) fn randomize_blend_pattern(
     // `fx`, `fy` of the patterns that centre the mesh (and apply the aspect)
     let cxy = |x: usize, y: usize| ((x as f32 / gxf - 0.5) * ax, (y as f32 / gyf - 0.5) * ay);
     let uxy = |x: usize, y: usize| (x as f32 / gxf, y as f32 / gyf);
-    let set = |vi: &mut [[f32; 2]], n: usize, inv_band: f32, band_mul: f32, c: f32| {
-        vi[n][0] = inv_band * band_mul;
-        vi[n][1] = c;
-    };
     // a = inv_band * (1 + band), c = -inv_band + inv_band * t
     macro_rules! each {
         ($band:expr, |$x:ident, $y:ident| $t:expr) => {{
@@ -375,13 +379,7 @@ pub(super) fn randomize_blend_pattern(
             for $y in 0..=gy {
                 for $x in 0..=gx {
                     let t: f32 = $t;
-                    set(
-                        vertinfo,
-                        $y * (gx + 1) + $x,
-                        inv_band,
-                        1.0 + band,
-                        -inv_band + inv_band * t,
-                    );
+                    vertinfo[$y * (gx + 1) + $x] = band_entry(inv_band, 1.0 + band, t);
                 }
             }
         }};
@@ -414,22 +412,24 @@ pub(super) fn randomize_blend_pattern(
             vertinfo[gx][1] = frand(rng);
             vertinfo[gy * (gx + 1)][1] = frand(rng);
             vertinfo[gy * (gx + 1) + gx][1] = frand(rng);
-            gen_plasma(vertinfo, gx, aspect, rng, 0, gx, 0, gy, 0.25);
-            let mut minc = vertinfo[0][1];
-            let mut maxc = vertinfo[0][1];
-            for v in vertinfo.iter() {
-                if minc > v[1] {
-                    minc = v[1];
-                }
-                if maxc < v[1] {
-                    maxc = v[1];
-                }
-            }
+            gen_plasma(
+                vertinfo,
+                c_of,
+                PlasmaGrid { gx, aspect },
+                &mut |_| frand(rng),
+                Span {
+                    x0: 0,
+                    x1: gx,
+                    y0: 0,
+                    y1: gy,
+                },
+                0.25,
+            );
+            let (minc, maxc) = extent(vertinfo[0][1], vertinfo.iter().map(|v| v[1]));
             let mult = 1.0 / (maxc - minc);
             for v in vertinfo.iter_mut() {
                 let t = (v[1] - minc) * mult;
-                v[0] = inv_band * (1.0 + band);
-                v[1] = -inv_band + inv_band * t;
+                *v = band_entry(inv_band, 1.0 + band, t);
             }
         }
         3 => {
@@ -565,7 +565,7 @@ pub(super) fn randomize_blend_pattern(
             let anim_speed = 0.5 + frand(rng) * 2.0;
             let diagonal_anim = irand(rng) % 2 == 0;
             let reverse = irand(rng) % 2 == 0;
-            clocks.checker += 1.0 / fps;
+            clocks.checker += frame_dt;
             let time = clocks.checker;
             each!(band, |x, y| {
                 let (fx, fy) = uxy(x, y);
@@ -754,7 +754,7 @@ pub(super) fn randomize_blend_pattern(
             let diagonal_pattern = irand(rng) % 2 == 0;
             let color_cycling = irand(rng) % 2 == 0;
             let speed_factor = 0.5 + frand(rng) * 2.0;
-            clocks.disco += 1.0 / fps;
+            clocks.disco += frame_dt;
             let time = clocks.disco * speed_factor;
             let beat = ((time * 3.0).sin() * 0.5 + 0.5).powf(beat_sync);
             each!(band, |x, y| {
@@ -783,7 +783,7 @@ pub(super) fn randomize_blend_pattern(
             let seed1 = frand(rng) * 10.0;
             let seed2 = frand(rng) * 20.0;
             let seed3 = frand(rng) * 30.0;
-            clocks.fire += 1.0 / fps;
+            clocks.fire += frame_dt;
             let time = clocks.fire;
             each!(band, |x, y| {
                 let (fx, fy) = uxy(x, y);
@@ -810,7 +810,7 @@ pub(super) fn randomize_blend_pattern(
             let clockwise = irand(rng) % 2 == 0;
             let center_pull = 0.7 + frand(rng) * 0.6;
             let invert = irand(rng) % 2 == 0;
-            clocks.drain += 1.0 / fps;
+            clocks.drain += frame_dt;
             let time = clocks.drain * drain_speed;
             each!(band, |x, y| {
                 let (fx, fy) = cxy(x, y);
@@ -895,56 +895,6 @@ pub(super) fn randomize_blend_pattern(
     mixtype
 }
 
-/// `CPlugin::GenPlasma`: midpoint displacement over the `c` values of the mesh.
-#[allow(clippy::too_many_arguments)]
-fn gen_plasma(
-    vi: &mut [[f32; 2]],
-    gx: usize,
-    aspect: (f32, f32),
-    rng: &mut StreamRng,
-    x0: usize,
-    x1: usize,
-    y0: usize,
-    y1: usize,
-    dt: f32,
-) {
-    let (ax, ay) = aspect;
-    let w = gx + 1;
-    let midx = (x0 + x1) / 2;
-    let midy = (y0 + y1) / 2;
-    let mut t00 = vi[y0 * w + x0][1];
-    let mut t01 = vi[y0 * w + x1][1];
-    let mut t10 = vi[y1 * w + x0][1];
-    let mut t11 = vi[y1 * w + x1][1];
-
-    if y1 - y0 >= 2 {
-        if x0 == 0 {
-            vi[midy * w + x0][1] = 0.5 * (t00 + t10) + (frand(rng) * 2.0 - 1.0) * dt * ay;
-        }
-        vi[midy * w + x1][1] = 0.5 * (t01 + t11) + (frand(rng) * 2.0 - 1.0) * dt * ay;
-    }
-    if x1 - x0 >= 2 {
-        if y0 == 0 {
-            vi[y0 * w + midx][1] = 0.5 * (t00 + t01) + (frand(rng) * 2.0 - 1.0) * dt * ax;
-        }
-        vi[y1 * w + midx][1] = 0.5 * (t10 + t11) + (frand(rng) * 2.0 - 1.0) * dt * ax;
-    }
-
-    if y1 - y0 >= 2 && x1 - x0 >= 2 {
-        // do midpoint & recurse:
-        t00 = vi[midy * w + x0][1];
-        t01 = vi[midy * w + x1][1];
-        t10 = vi[y0 * w + midx][1];
-        t11 = vi[y1 * w + midx][1];
-        vi[midy * w + midx][1] = 0.25 * (t10 + t11 + t00 + t01) + (frand(rng) * 2.0 - 1.0) * dt;
-
-        gen_plasma(vi, gx, aspect, rng, x0, midx, y0, midy, dt * 0.5);
-        gen_plasma(vi, gx, aspect, rng, midx, x1, y0, midy, dt * 0.5);
-        gen_plasma(vi, gx, aspect, rng, x0, midx, midy, y1, dt * 0.5);
-        gen_plasma(vi, gx, aspect, rng, midx, x1, midy, y1, dt * 0.5);
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // the running blend
 // ---------------------------------------------------------------------------------------------
@@ -970,6 +920,17 @@ pub(super) struct BlendState {
     pub mode: ProgressMode,
     pub target: f32,
     pub no_borders: bool,
+    /// Per-frame working buffers, kept so a frame allocates none of them.
+    pub scratch: BlendScratch,
+}
+
+/// The new / old state's vertex variables and warp UVs of one frame.
+#[derive(Default)]
+pub(super) struct BlendScratch {
+    vv_new: Vec<VertexVars>,
+    vv_old: Vec<VertexVars>,
+    uv_new: Vec<[f32; 2]>,
+    uv_old: Vec<[f32; 2]>,
 }
 
 /// `m_fBlendProgress = (GetTime() - m_fBlendStartTime) / m_fBlendDuration`, in `float` like MD2.
@@ -1042,21 +1003,29 @@ pub(super) fn build_blend_frame(
     // (the old state's UVs use the *new* state's warp animation terms, like MD2)
     let toff = warp_mesh::texel_offset_uv(cfg.texel_offset, cfg.width, cfg.height);
     let anim = warp_anim(cx, &base_new);
-    let vv_new = eval_vertices(new, g);
-    let vv_old = eval_vertices(&mut m.old, g);
-    let uv_new = warp_vertex_uvs(g, &vv_new, &anim, toff);
-    let uv_old = warp_vertex_uvs(g, &vv_old, &anim, toff);
-    let (uv, vert_alpha) = blend_mesh(&uv_new, &uv_old, &m.pattern, m.progress);
+    let BlendScratch {
+        vv_new,
+        vv_old,
+        uv_new,
+        uv_old,
+    } = &mut m.scratch;
+    eval_vertices(new, g, vv_new);
+    eval_vertices(&mut m.old, g, vv_old);
+    warp_vertex_uvs(g, vv_new, &anim, toff, uv_new);
+    warp_vertex_uvs(g, vv_old, &anim, toff, uv_old);
+    let (uv, vert_alpha) = blend_mesh(&m.scratch.uv_new, &m.scratch.uv_old, &m.pattern, m.progress);
 
     let mut fi = frame_head(
         new,
         cx,
         &base_new,
-        Vec::new(),
-        Some(uv),
-        anim,
-        false,
-        Some(snap),
+        WarpHead {
+            vertex_vars: Vec::new(),
+            warp_uv: Some(uv),
+            anim,
+            gpu: false,
+            wrap_snap: Some(snap),
+        },
     );
     // MilkDrop 3: no ob / ib borders while a blend is running (`DisableBox`), and never while a `.milk2` is
     // loaded (`fromMilk2`)
@@ -1084,9 +1053,21 @@ pub(super) fn build_blend_frame(
     shape_alpha.resize(fi.shapes.len(), am_new);
     push_shapes(&mut m.old, &env, &mut fi.shapes);
     shape_alpha.resize(fi.shapes.len(), am_old);
-    push_waves(new, cx, &env, &mut fi.waves);
+    push_waves(
+        new,
+        cx,
+        &env,
+        &mut new_last.scratch.wave_values,
+        &mut fi.waves,
+    );
     wave_alpha.resize(fi.waves.len(), am_new);
-    push_waves(&mut m.old, cx, &env, &mut fi.waves);
+    push_waves(
+        &mut m.old,
+        cx,
+        &env,
+        &mut new_last.scratch.wave_values,
+        &mut fi.waves,
+    );
     wave_alpha.resize(fi.waves.len(), am_old);
 
     finish_frame(new, cx, forced, new_last, &mut fi);
@@ -1231,6 +1212,7 @@ impl super::Engine {
             progress: 0.0,
             statics,
             pattern: self.md2_vertinfo.clone(),
+            scratch: BlendScratch::default(),
             pattern_kind,
             preset_start: self.clock.now,
             next_preset: None,
@@ -1610,19 +1592,6 @@ mod tests {
             assert!(old_frac > 0.9, "kind {kind}: {old_frac}");
             assert!(new_frac > 0.9, "kind {kind}: {new_frac}");
         }
-    }
-
-    #[test]
-    fn gen_plasma_visits_every_vertex() {
-        let mut vi = vec![[1.0, f32::NAN]; n_verts()];
-        let mut rng = StreamRng::new(4, "md2_blend_pattern");
-        let (gx, gy) = (48usize, 36usize);
-        vi[0][1] = 0.1;
-        vi[gx][1] = 0.2;
-        vi[gy * (gx + 1)][1] = 0.3;
-        vi[gy * (gx + 1) + gx][1] = 0.4;
-        gen_plasma(&mut vi, gx, aspect(), &mut rng, 0, gx, 0, gy, 0.25);
-        assert!(vi.iter().all(|v| v[1].is_finite()), "every c written");
     }
 
     // ---- BlendState -----------------------------------------------------------------------------------

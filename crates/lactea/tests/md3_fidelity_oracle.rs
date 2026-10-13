@@ -7,18 +7,11 @@ use lactea::{
     Compat, Engine, EngineConfig, FrameClock, Image, Media, Stage, TextureProvider, Transition,
     decode_gif,
 };
+use lactea_testutil::gpu;
 use std::path::{Path, PathBuf};
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/md3")
-}
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
 }
 
 /// Sprites of `fixtures/md3/sprites`, asked as `sprites\name`.
@@ -85,7 +78,8 @@ impl Rig {
                 compat: Compat::MilkDrop3,
                 ..config
             },
-        );
+        )
+        .unwrap();
         e.set_texture_provider(Box::new(Sprites));
         e.load_preset(text, name, Transition::Cut)
             .unwrap_or_else(|err| panic!("{name}: {err}"));

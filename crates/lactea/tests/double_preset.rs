@@ -5,18 +5,13 @@
 use lactea::{
     Compat, DoubleMode, Engine, EngineConfig, EngineError, FrameClock, Md3Pattern, Transition,
 };
+use lactea_testutil::{gpu, max_abs_diff, read_rgba8};
 
 const W: u32 = 64;
 const H: u32 = 48;
 
 static GPU: std::sync::LazyLock<Option<(wgpu::Device, wgpu::Queue)>> =
-    std::sync::LazyLock::new(|| {
-        let instance = wgpu::Instance::default();
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .ok()?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-    });
+    std::sync::LazyLock::new(gpu);
 
 /// A v2.01 preset whose warp shader paints one flat colour (nothing else is drawn, no borders).
 fn flat(r: f32, g: f32, b: f32) -> String {
@@ -82,7 +77,7 @@ impl Rig {
 
     fn with(config: EngineConfig) -> Option<Rig> {
         let (device, queue) = GPU.clone()?;
-        let engine = Engine::new(&device, &queue, config);
+        let engine = Engine::new(&device, &queue, config).unwrap();
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {
@@ -153,46 +148,7 @@ impl Rig {
     }
 
     fn read(&self) -> Vec<u8> {
-        let bpr = (W * 4).div_ceil(256) * 256;
-        let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: u64::from(bpr * H),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self.device.create_command_encoder(&Default::default());
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buf,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr),
-                    rows_per_image: Some(H),
-                },
-            },
-            wgpu::Extent3d {
-                width: W,
-                height: H,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(enc.finish()));
-        buf.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        let data = buf.slice(..).get_mapped_range().unwrap();
-        let mut out = Vec::new();
-        for y in 0..H {
-            out.extend_from_slice(&data[(y * bpr) as usize..(y * bpr + W * 4) as usize]);
-        }
-        out
+        read_rgba8(&self.device, &self.queue, &self.target, W, H)
     }
 }
 
@@ -228,14 +184,6 @@ fn pure_in(img: &[u8], c: [u8; 3], x0: u32, x1: u32) -> (usize, usize) {
 fn mostly(img: &[u8], c: [u8; 3], x0: u32, x1: u32) -> bool {
     let (n, total) = pure_in(img, c, x0, x1);
     n * 100 >= total * 95
-}
-
-fn max_abs_diff(a: &[u8], b: &[u8]) -> i32 {
-    a.iter()
-        .zip(b)
-        .map(|(x, y)| (i32::from(*x) - i32::from(*y)).abs())
-        .max()
-        .unwrap_or(0)
 }
 
 /// The frozen mask of `blending_pattern=side`, `blending_progress=0.5`, angle 0, band 0.2: PRESET1 (the old state)
@@ -283,11 +231,11 @@ fn mesh_size_change_keeps_the_double_preset_blend() {
     let text = milk2(&red(), &blue(), &side_header("0.5"));
     rig.load(&text, "pair.milk2", Transition::Cut).unwrap();
     let first = rig.run_to(0);
-    assert_eq!(rig.engine.set_mesh_size(40, 30), [40, 30]);
+    assert_eq!(rig.engine.set_mesh_size(40, 30).unwrap(), [40, 30]);
     let after = rig.run_to(1);
     assert!(mostly(&after, RED, 0, 19) && mostly(&after, BLUE, 46, 64));
-    assert_eq!(rig.engine.set_mesh_size(10, 8), [10, 8]);
-    rig.engine.resize(W, H);
+    assert_eq!(rig.engine.set_mesh_size(10, 8).unwrap(), [10, 8]);
+    rig.engine.resize(W, H).unwrap();
     // the coarser mesh moves the blend edge a little, the halves stay where they were
     let again = rig.run_to(2);
     assert!(mostly(&again, RED, 0, 19) && mostly(&again, BLUE, 46, 64));
@@ -710,7 +658,7 @@ fn resize_keeps_the_double_preset_frozen() {
     let text = milk2(&red(), &blue(), &side_header("0.5"));
     rig.load(&text, "pair.milk2", Transition::Cut).unwrap();
     rig.run_to(3);
-    rig.engine.resize(W, H);
+    rig.engine.resize(W, H).unwrap();
     let img = rig.run_to(6);
     assert!(mostly(&img, RED, 0, 19) && mostly(&img, BLUE, 46, 64));
 }

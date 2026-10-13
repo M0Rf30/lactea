@@ -2,7 +2,7 @@
 //! warp/comp shader generators (`GenWarpPShaderText` / `GenCompPShaderText`) and
 //! `StripComments`.
 
-use crate::TranslateError;
+use crate::{Prelude, TranslateError};
 use lactea_abi::PassKind;
 
 /// `data/include.fx` of MilkDrop 2 (BSD-3, Nullsoft), copied verbatim.
@@ -15,7 +15,9 @@ const COMP_DEFINES: &str = "#define rad _rad_ang.x\n#define ang _rad_ang.y\n#def
 const WARP_PARAMS: &str = "float4 _vDiffuse : COLOR, float4 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0";
 const COMP_PARAMS: &str = "float4 _vDiffuse : COLOR, float2 _uv : TEXCOORD0, float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0";
 const FIRST_LINE: &str = "    float3 ret = 0;";
-const LAST_LINE: &str = "    _return_value = float4(ret.xyz, _vDiffuse.w);";
+/// MD2 writes the interpolated vertex alpha; projectM (`MilkdropShader.cpp:468`) a constant 1.
+const LAST_LINE_MD2: &str = "    _return_value = float4(ret.xyz, _vDiffuse.w);";
+const LAST_LINE_PROJECTM: &str = "    _return_value = float4(ret.xyz, 1.0);";
 
 /// Port of `StripComments` (plugin.cpp), including its quirks (`/*/` is a complete comment;
 /// `//` ends at CR or LF and the line break is kept; block comments swallow newlines).
@@ -105,13 +107,17 @@ fn declared_names(text: &str) -> std::collections::HashSet<&str> {
 /// `tex2D(sampler_pw_noise_lq, ..)` works without `sampler sampler_pw_noise_lq;`. MD2 rejects such a shader (undeclared
 /// identifier); following projectM, the text returned here is prepended to the user shader. With `md3` the names the
 /// MD3 prelude declares (`sampler_fft`) count as declared.
-pub(crate) fn implicit_declarations(user: &str, md3: bool) -> String {
+pub(crate) fn implicit_declarations(user: &str, prelude: impl Into<Prelude>) -> String {
+    let prelude = prelude.into();
     let user = user.replace('\u{1}', "\n").replace("\r\n", "\n");
     let stripped = strip_comments(&user);
     let include = strip_comments(INCLUDE_FX);
     let mut declared = declared_names(&include);
-    if md3 {
+    if prelude.md3() {
         declared.extend(declared_names(&MD3_PRELUDE));
+    }
+    if prelude.beatdrop() {
+        declared.extend(declared_names(BEATDROP_PRELUDE_DECLS));
     }
     declared.extend(declared_names(&stripped));
     let mut seen = std::collections::HashSet::new();
@@ -179,37 +185,137 @@ static MD3_PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     s
 });
 
+/// Declarations of the BeatDrop prelude that are not macros: the constants `_c14.._c16` and the two samplers.
+const BEATDROP_PRELUDE_DECLS: &str =
+    "float4 _c14, _c15, _c16;\nsampler2D sampler_fft;\nsampler2D sampler_wave;\n";
+
+/// The BeatDrop macros: `(name, definition)`; a macro the user shader declares or defines itself is left out (a user
+/// `float get_fft(float x)` must not be rewritten by a function-like macro of the same name).
+///
+/// BeatDrop's own `include.fx` additions are not on disk; these are written from the documented behaviour
+/// (`docs/divergences.md`, "Audio and shader inputs"): `get_fft` samples row 0 of the 1024 x 2 spectrum texture
+/// (`v = .25`) and takes `sqrt`, `get_fft_peak` the peak-hold row 1 (`v = .75`); `get_fft_hz` divides by 22050 (a
+/// 44.1 kHz capture, bins up to Nyquist); `get_wave` reads the left row of the 480 x 2 waveform texture.
+const BEATDROP_MACROS: [(&str, &str); 6] = [
+    ("HAS_FFT_PEAK", "#define HAS_FFT_PEAK 1\n"),
+    (
+        "get_fft",
+        "#define get_fft(x) sqrt(tex2D(sampler_fft, float2((x), 0.25)).r)\n",
+    ),
+    (
+        "get_fft_hz",
+        "#define get_fft_hz(hz) get_fft((hz) / 22050.0)\n",
+    ),
+    (
+        "get_fft_peak",
+        "#define get_fft_peak(x) sqrt(tex2D(sampler_fft, float2((x), 0.75)).r)\n",
+    ),
+    (
+        "get_fft_peak_hz",
+        "#define get_fft_peak_hz(hz) get_fft_peak((hz) / 22050.0)\n",
+    ),
+    (
+        "get_wave",
+        "#define get_wave(x) tex2D(sampler_wave, float2((x), 0.25)).r\n",
+    ),
+];
+
+/// Whether comment-free `text` declares or defines `name`: a type keyword or `define` directly (whitespace only)
+/// before it (`float name`, `void name`, `#define name`), unlike a constructor call `float3(name, ..)`.
+fn user_declares(text: &str, name: &str) -> bool {
+    let ids = identifiers(text);
+    let at = |s: &str| s.as_ptr() as usize - text.as_ptr() as usize;
+    ids.iter().enumerate().any(|(k, id)| {
+        *id == name
+            && k > 0
+            && matches!(
+                ids[k - 1],
+                "define"
+                    | "void"
+                    | "float"
+                    | "float2"
+                    | "float3"
+                    | "float4"
+                    | "int"
+                    | "half"
+                    | "sampler"
+                    | "sampler2D"
+            )
+            && text[at(ids[k - 1]) + ids[k - 1].len()..at(id)]
+                .chars()
+                .all(char::is_whitespace)
+    })
+}
+
+/// The BeatDrop prelude for a shader whose comment-free text is `user`.
+fn beatdrop_prelude(user: &str) -> String {
+    let mut s = String::from(BEATDROP_PRELUDE_DECLS);
+    for (name, def) in BEATDROP_MACROS {
+        if !user_declares(user, name) {
+            s.push_str(def);
+        }
+    }
+    s
+}
+
 /// The complete HLSL text MD2 hands to `D3DXCompileShader` (entry point `PS`):
 /// comment-stripped include.fx + per-kind `#define`s + the user shader with the `shader_body`
 /// surgery applied.
 ///
 /// Errors with [`TranslateError::Wrap`] when `shader_body`, its opening `{` or the closing `}` is missing.
 pub fn md2_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateError> {
-    wrapped_hlsl(kind, user, false)
+    wrapped_with(kind, user, Prelude::None, false)
+}
+
+/// [`md2_wrapped_hlsl`] for BeatDrop's shader inputs: `_c14` (mouse), `_c15` (`hour, minute, second, totalSeconds`),
+/// `_c16` (`year, month, day, weekday`), `sampler_fft`, `sampler_wave` and the `get_fft*` / `get_wave` macros sit
+/// between the comment-stripped include.fx and the per-pass `#define`s. Translate the result with
+/// [`translate_wrapped`](crate::translate_wrapped) and `Options { beatdrop: true, .. }`.
+pub fn beatdrop_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateError> {
+    wrapped_with(kind, user, Prelude::BeatDrop, false)
 }
 
 /// [`md2_wrapped_hlsl`] for MilkDrop 3: the MD3 prelude (`_c14`/`mouse*`, `_qi.._qp`/`q33..q64`, `sampler_fft`,
 /// `get_fft`, `get_fft_hz`) sits between the comment-stripped include.fx and the per-pass `#define`s, as in MD3 3.37.
 /// Translate the result with [`translate_wrapped`](crate::translate_wrapped) and `Options { md3: true, .. }`.
 pub fn md3_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateError> {
-    wrapped_hlsl(kind, user, true)
+    wrapped_with(kind, user, Prelude::Md3, false)
 }
 
-fn wrapped_hlsl(kind: PassKind, user: &str, md3: bool) -> Result<String, TranslateError> {
+/// The wrapper of either flavour: `md3` adds the MD3 prelude, `projectm` makes the shader return alpha `1.0` like
+/// projectM instead of MD2's `_vDiffuse.w`. This is what [`translate`](crate::translate) uses for its `Options`.
+pub fn wrapped_hlsl(
+    kind: PassKind,
+    user: &str,
+    md3: bool,
+    projectm: bool,
+) -> Result<String, TranslateError> {
+    wrapped_with(kind, user, md3.into(), projectm)
+}
+
+/// [`wrapped_hlsl`] with the prelude as an enum.
+pub(crate) fn wrapped_with(
+    kind: PassKind,
+    user: &str,
+    prelude: Prelude,
+    projectm: bool,
+) -> Result<String, TranslateError> {
     // lines are joined with LINEFEED_CONTROL_CHAR (1) in MD2 and converted to CRLF
     let user = user.replace('\u{1}', "\n").replace("\r\n", "\n");
     let mut text = strip_comments(INCLUDE_FX);
     if !text.ends_with('\n') {
         text.push('\n');
     }
-    if md3 {
-        text.push_str(&MD3_PRELUDE);
+    let stripped = strip_comments(&user);
+    match prelude {
+        Prelude::Md3 => text.push_str(&MD3_PRELUDE),
+        Prelude::BeatDrop => text.push_str(&beatdrop_prelude(&stripped)),
+        Prelude::None => {}
     }
     text.push_str(match kind {
         PassKind::Warp => WARP_DEFINES,
         PassKind::Comp => COMP_DEFINES,
     });
-    let stripped = strip_comments(&user);
     let params = match kind {
         PassKind::Warp => WARP_PARAMS,
         PassKind::Comp => COMP_PARAMS,
@@ -240,7 +346,12 @@ fn wrapped_hlsl(kind: PassKind, user: &str, md3: bool) -> Result<String, Transla
         .rfind('}')
         .ok_or_else(|| TranslateError::Wrap("no closing `}` in shader".into()))?;
     out.push_str(&rest[..last]);
-    out.push_str(&format!(" {LAST_LINE}\n}}\n"));
+    let last_line = if projectm {
+        LAST_LINE_PROJECTM
+    } else {
+        LAST_LINE_MD2
+    };
+    out.push_str(&format!(" {last_line}\n}}\n"));
     text.push_str(&out);
     Ok(text)
 }
@@ -344,5 +455,16 @@ mod tests {
         // quirk: `/*/` is a complete comment in MD2's state machine
         assert_eq!(strip_comments("a /*/ b"), "a  b");
         assert_eq!(strip_comments("x"), "x");
+    }
+
+    /// projectM's shaders always return alpha 1; MD2's return the vertex alpha.
+    #[test]
+    fn final_alpha_follows_the_flavour() {
+        use super::{PassKind, wrapped_hlsl};
+        let src = "shader_body\n{\n ret = 1;\n}\n";
+        let pm = wrapped_hlsl(PassKind::Comp, src, false, true).unwrap();
+        assert!(pm.contains("float4(ret.xyz, 1.0)") && !pm.contains("_vDiffuse.w"));
+        let md2 = wrapped_hlsl(PassKind::Comp, src, false, false).unwrap();
+        assert!(md2.contains("float4(ret.xyz, _vDiffuse.w)"));
     }
 }

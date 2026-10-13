@@ -14,8 +14,8 @@ mod intrinsics;
 mod stmt;
 mod undef;
 
-use crate::TranslateError;
 use crate::ast::*;
+use crate::{Prelude, TranslateError};
 use lactea_abi::TexDim;
 use std::collections::{HashMap, HashSet};
 
@@ -108,9 +108,9 @@ pub(crate) struct Tr<'a> {
     /// projectM hlslparser behaviours (see `Options::projectm_flavor`): float literals rounded to 6 significant
     /// digits, asin/acos outside `[-1, 1]`.
     pub pm_flavor: bool,
-    /// The MD3 prelude is active (see `Options::md3`): `_c14` / `_qi.._qp` map onto `mx` and `fft` samplers are lowered
-    /// to `fft_fetch` calls.
-    pub md3: bool,
+    /// The shader prelude in effect (see `Options::md3` / `Options::beatdrop`): `_c14` / `_qi.._qp` map onto `mx` and
+    /// `fft` / `wave` samplers are lowered to `fft_fetch` / `bd_fetch` calls.
+    pub prelude: Prelude,
     /// The `*` being translated is a compound `*=` or `mul()`: hlslparser emits those as plain products (no `mult()`).
     pub plain_mul: bool,
     /// Variables Mesa compiles as NaN instead of undefined (see `undef.rs`); only filled for `Options::projectm_flavor`.
@@ -208,16 +208,26 @@ pub(crate) fn mp(s: &str) -> String {
     }
 }
 
-/// Names `include.fx` (and, with `md3`, the MD3 prelude) declares that live in `MilkUniforms` / `MilkExtUniforms`.
-pub(crate) fn builtin_uniform(name: &str, md3: bool) -> Option<String> {
+/// Names `include.fx` (and the active prelude) declares that live in `MilkUniforms` / `MilkExtUniforms`. BeatDrop's
+/// `_c14.._c16` use the extension block's mouse and the first two `q_hi` registers (`q33..` do not exist there).
+pub(crate) fn builtin_uniform(name: &str, prelude: impl Into<Prelude>) -> Option<String> {
+    let prelude = prelude.into();
+    let md3 = prelude.md3();
     if let Some(n) = name.strip_prefix("_c")
         && let Ok(i) = n.parse::<usize>()
         && i < 14
     {
         return Some(format!("mu.c[{i}]"));
     }
-    if md3 && name == "_c14" {
+    if (md3 || prelude.beatdrop()) && name == "_c14" {
         return Some("mx.mouse".into());
+    }
+    if prelude.beatdrop() {
+        match name {
+            "_c15" => return Some("mx.q_hi[0]".into()),
+            "_c16" => return Some("mx.q_hi[1]".into()),
+            _ => {}
+        }
     }
     if let Some(n) = name.strip_prefix("_q")
         && n.len() == 1
@@ -282,7 +292,8 @@ pub(crate) fn builtin_uniform(name: &str, md3: bool) -> Option<String> {
 }
 
 impl<'a> Tr<'a> {
-    pub fn new(prog: &'a Program, md3: bool) -> Tr<'a> {
+    pub fn new(prog: &'a Program, prelude: impl Into<Prelude>) -> Tr<'a> {
+        let prelude = prelude.into();
         let assigned = assigned_idents(prog);
         let mut globals: HashMap<String, GInfo> = HashMap::new();
         for (order, d) in prog.globals.iter().enumerate() {
@@ -294,7 +305,7 @@ impl<'a> Tr<'a> {
                 GKind::Sampler
             } else if matches!(d.ty, Ty::Texture) {
                 GKind::Private // unused texture object declarations
-            } else if let Some(m) = builtin_uniform(&d.name, md3) {
+            } else if let Some(m) = builtin_uniform(&d.name, prelude) {
                 if assigned.contains(&d.name) {
                     // HLSL lets shaders write to uniforms (they are per-invocation copies)
                     shadow = Some(m);
@@ -343,7 +354,7 @@ impl<'a> Tr<'a> {
             floor_mod: false,
             pm_flavor: false,
             plain_mul: false,
-            md3,
+            prelude,
             undef_nan: HashSet::new(),
             fold_roots: HashMap::new(),
             folds: Vec::new(),

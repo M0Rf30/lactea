@@ -9,68 +9,8 @@
 //! in MD3 shows no border at all (black) there. Skipped (with a note) when there is no GPU adapter.
 
 use lactea::{Compat, Engine, EngineConfig, FrameClock, Transition};
+use lactea_testutil::{gpu_or_skip, read_rgba8};
 use std::path::Path;
-
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let instance = wgpu::Instance::default();
-    let adapter =
-        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-            .ok()?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
-}
-
-fn read_back(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    tex: &wgpu::Texture,
-    w: u32,
-    h: u32,
-) -> Vec<u8> {
-    let bpr = (w * 4).div_ceil(256) * 256;
-    let buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: None,
-        size: u64::from(bpr * h),
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    });
-    let mut enc = device.create_command_encoder(&Default::default());
-    enc.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: tex,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buf,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(bpr),
-                rows_per_image: Some(h),
-            },
-        },
-        wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit(Some(enc.finish()));
-    let slice = buf.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-    rx.recv().unwrap().unwrap();
-    let data = slice.get_mapped_range().unwrap();
-    let mut out = Vec::new();
-    for y in 0..h {
-        let s = (y * bpr) as usize;
-        out.extend_from_slice(&data[s..s + (w * 4) as usize]);
-    }
-    out
-}
 
 /// (fixture, outer band RGB, inner band RGB) as shot by MD3 3.37.
 const MD3_SHOTS: [(&str, [u8; 3], [u8; 3]); 14] = [
@@ -99,10 +39,7 @@ const MD3_SHOTS: [(&str, [u8; 3], [u8; 3]); 14] = [
 
 #[test]
 fn milkdrop3_expressions_match_the_md3_screenshots() {
-    let Some((device, queue)) = gpu() else {
-        eprintln!("skipping: no wgpu adapter");
-        return;
-    };
+    let (device, queue) = gpu_or_skip!();
     let (w, h) = (400u32, 300u32);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("target"),
@@ -132,7 +69,8 @@ fn milkdrop3_expressions_match_the_md3_screenshots() {
                 compat: Compat::MilkDrop3,
                 ..EngineConfig::default()
             },
-        );
+        )
+        .unwrap();
         engine
             .load_preset(&bytes, name, Transition::Cut)
             .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -148,7 +86,7 @@ fn milkdrop3_expressions_match_the_md3_screenshots() {
             );
             queue.submit(Some(enc.finish()));
         }
-        let px = read_back(&device, &queue, &target, w, h);
+        let px = read_rgba8(&device, &queue, &target, w, h);
         let at = |x: u32| {
             let i = ((h / 2 * w + x) * 4) as usize;
             [px[i], px[i + 1], px[i + 2]]

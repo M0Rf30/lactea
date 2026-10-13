@@ -68,6 +68,32 @@ pub(crate) fn b2f(b: bool) -> f64 {
     if b { 1.0 } else { 0.0 }
 }
 
+/// `/` and `/=`: a divisor within `CLOSE` of zero yields 0.
+#[inline(always)]
+pub(crate) fn div(x: f64, y: f64) -> f64 {
+    if y.abs() < CLOSE { 0.0 } else { x / y }
+}
+
+/// Truthiness for `&&`, `||` operands and `while` conditions: ns-eel2 `truthy`, projectm-eval
+/// `|x| > CLOSE`.
+#[inline(always)]
+pub(crate) fn cond_true(ns: bool, x: f64) -> bool {
+    if ns { ns::truthy(x) } else { x.abs() > CLOSE }
+}
+
+/// `||` evaluates its right operand when the left one is "false"; projectm-eval uses `|x| < CLOSE`
+/// there, which is not the complement of [`cond_true`] at exactly `CLOSE`.
+#[inline(always)]
+pub(crate) fn or_lhs_false(ns: bool, x: f64) -> bool {
+    if ns { !ns::truthy(x) } else { x.abs() < CLOSE }
+}
+
+/// Condition of `if()` / `?:`: ns-eel2 `truthy`, projectm-eval `x != 0`.
+#[inline(always)]
+pub(crate) fn if_cond(ns: bool, x: f64) -> bool {
+    if ns { ns::truthy(x) } else { x != 0.0 }
+}
+
 #[inline]
 fn pow_checked(x: f64, y: f64) -> f64 {
     if x.abs() < CLOSE && y < 0.0 {
@@ -83,13 +109,7 @@ pub(crate) fn bin(op: BinOp, x: f64, y: f64) -> f64 {
         BinOp::Add => x + y,
         BinOp::Sub => x - y,
         BinOp::Mul => x * y,
-        BinOp::Div => {
-            if y.abs() < CLOSE {
-                0.0
-            } else {
-                x / y
-            }
-        }
+        BinOp::Div => div(x, y),
         BinOp::Mod => {
             let d = cvt_i64(y);
             if d == 0 {
@@ -145,13 +165,7 @@ pub(crate) fn assign_op(op: AssignOp, cur: f64, r: f64) -> f64 {
         AssignOp::Add => cur + r,
         AssignOp::Sub => cur - r,
         AssignOp::Mul => cur * r,
-        AssignOp::Div => {
-            if r.abs() < CLOSE {
-                0.0
-            } else {
-                cur / r
-            }
-        }
+        AssignOp::Div => div(cur, r),
         AssignOp::Mod => {
             let d = cvt_i64(r);
             if d == 0 {
@@ -312,34 +326,22 @@ impl Context {
                 bin(*op, x, y)
             }
             Node::And(args, ns) => {
-                if *ns {
-                    if ns::truthy(self.val(&args[0])) {
-                        b2f(ns::truthy(self.val(&args[1])))
-                    } else {
-                        0.0
-                    }
-                } else if self.val(&args[0]).abs() > CLOSE {
-                    b2f(self.val(&args[1]).abs() > CLOSE)
+                if cond_true(*ns, self.val(&args[0])) {
+                    b2f(cond_true(*ns, self.val(&args[1])))
                 } else {
                     0.0
                 }
             }
             Node::Or(args, ns) => {
-                if *ns {
-                    if ns::truthy(self.val(&args[0])) {
-                        1.0
-                    } else {
-                        b2f(ns::truthy(self.val(&args[1])))
-                    }
-                } else if self.val(&args[0]).abs() < CLOSE {
-                    b2f(self.val(&args[1]).abs() > CLOSE)
+                if or_lhs_false(*ns, self.val(&args[0])) {
+                    b2f(cond_true(*ns, self.val(&args[1])))
                 } else {
                     1.0
                 }
             }
             Node::If { args, ns, .. } => {
                 let c = self.val(&args[0]);
-                if if *ns { ns::truthy(c) } else { c != 0.0 } {
+                if if_cond(*ns, c) {
                     self.val(&args[1])
                 } else {
                     self.val(&args[2])
@@ -349,8 +351,7 @@ impl Context {
                 self.discard(&args[0], *s);
                 self.val(&args[1])
             }
-            Node::List { s, items } => {
-                let (last, init) = items.split_last().expect("non-empty list");
+            Node::List { s, init, last } => {
                 for it in init {
                     self.discard(it, *s);
                 }
@@ -371,7 +372,7 @@ impl Context {
             Node::Var(l) => *l,
             Node::If { args, ns, .. } => {
                 let c = self.val(&args[0]);
-                if if *ns { ns::truthy(c) } else { c != 0.0 } {
+                if if_cond(*ns, c) {
                     self.place(&args[1], out)
                 } else {
                     self.place(&args[2], out)
@@ -389,8 +390,7 @@ impl Context {
                 let _ = vp;
                 self.place(&args[2], out)
             }
-            Node::List { s, items } => {
-                let (last, init) = items.split_last().expect("non-empty list");
+            Node::List { s, init, last } => {
                 for it in init {
                     self.discard(it, *s);
                 }
@@ -421,7 +421,7 @@ impl Context {
                 loop {
                     vp = self.place(arg, vp);
                     let v = self.read(vp);
-                    if if *ns { ns::truthy(v) } else { v.abs() > CLOSE } {
+                    if cond_true(*ns, v) {
                         left -= 1;
                         if left != 0 {
                             continue;
@@ -450,13 +450,7 @@ impl Context {
             } => {
                 let x = self.val(arg);
                 if let Some(i) = resolve_mem(x, *global, *ns) {
-                    if *global {
-                        let _ = self.global.block((i as usize) >> 16);
-                        Loc::GMem(i)
-                    } else {
-                        self.mem.ensure((i as usize) >> 16);
-                        Loc::Mem(i)
-                    }
+                    if *global { Loc::GMem(i) } else { Loc::Mem(i) }
                 } else {
                     self.write(out, 0.0);
                     out

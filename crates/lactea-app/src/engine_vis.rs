@@ -1,14 +1,9 @@
-//! Adapter from the MilkDrop engine (crate `lactea`) to the shell's [`Visualizer`] trait,
-//! and from [`FsTextureProvider`] to the engine's `TextureProvider`.
+//! Adapter from the MilkDrop engine (crate `lactea`) to the shell's [`Visualizer`] trait.
 
-use lactea::{
-    Compat, Engine, EngineConfig, FrameClock, Image, Media, MediaFiles, PresetReport,
-    ShaderOutcome, TEXTURE_EXTENSIONS, TextureProvider, Transition, decode_gif,
-};
-use std::path::{Path, PathBuf};
+use lactea::{Compat, Engine, EngineConfig, FrameClock, PresetReport, ShaderOutcome, Transition};
+use lactea_host::DirTextures;
 
 use crate::cli::CompatArg;
-use crate::textures::FsTextureProvider;
 use crate::visualizer::{Change, Visualizer};
 
 /// Run-level engine settings that come from the command line.
@@ -24,72 +19,6 @@ pub struct EngineOptions {
     pub shader_overrides: std::collections::HashMap<u64, lactea::ShaderOverride>,
 }
 
-/// The directories' textures for the engine: plain lookups through [`FsTextureProvider`], MilkDrop 3's sprites and
-/// GIFs through a [`MediaFiles`] index of the same directories.
-struct FsProvider {
-    fs: FsTextureProvider,
-    media: MediaFiles<PathBuf>,
-}
-
-impl FsProvider {
-    fn new(fs: FsTextureProvider) -> Self {
-        let mut media = MediaFiles::new();
-        for (rel, file) in crate::textures::media_listing(fs.dirs(), &TEXTURE_EXTENSIONS) {
-            media.add(&rel, file);
-        }
-        Self { fs, media }
-    }
-}
-
-/// A GIF (by content) as frames, anything else as a still image.
-fn decode_media(path: &Path) -> Option<Media> {
-    let bytes = std::fs::read(path).ok()?;
-    if bytes.starts_with(b"GIF8") {
-        return match decode_gif(&bytes) {
-            Ok(a) => Some(Media::Animated(a)),
-            Err(e) => {
-                log::warn!("gif {}: {e}", path.display());
-                None
-            }
-        };
-    }
-    match crate::textures::decode_file(path) {
-        Ok(t) => Some(Media::Still(Image {
-            width: t.width,
-            height: t.height,
-            rgba8: t.rgba8,
-        })),
-        Err(e) => {
-            log::warn!("image {}: {e}", path.display());
-            None
-        }
-    }
-}
-
-impl TextureProvider for FsProvider {
-    fn load(&mut self, name: &str) -> Option<Image> {
-        self.fs.load(name).map(|t| Image {
-            width: t.width,
-            height: t.height,
-            rgba8: t.rgba8,
-        })
-    }
-
-    fn random_pool(&self) -> Vec<String> {
-        self.fs.random_pool()
-    }
-
-    fn load_md3_texture(&mut self, name: &str) -> Option<Media> {
-        let path = self.media.find_texture(name)?.clone();
-        decode_media(&path)
-    }
-
-    fn load_sprite(&mut self, path: &str) -> Option<Media> {
-        let file = self.media.find_sprite(path)?.clone();
-        decode_media(&file)
-    }
-}
-
 pub struct EngineVisualizer {
     engine: Engine,
 }
@@ -101,7 +30,7 @@ impl EngineVisualizer {
         format: wgpu::TextureFormat,
         size: (u32, u32),
         sample_rate: u32,
-        textures: FsTextureProvider,
+        textures: DirTextures,
         opts: &EngineOptions,
     ) -> Result<Self, String> {
         if !opts.mesh.0.is_multiple_of(2)
@@ -139,8 +68,8 @@ impl EngineVisualizer {
             shader_overrides: opts.shader_overrides.clone(),
             ..Default::default()
         };
-        let mut engine = Engine::new(device, queue, cfg);
-        engine.set_texture_provider(Box::new(FsProvider::new(textures)));
+        let mut engine = Engine::new(device, queue, cfg).map_err(|e| e.to_string())?;
+        engine.set_texture_provider(Box::new(textures));
         engine.set_preset_switch_failed_callback(Some(|f: &lactea::SwitchFailure| {
             log::debug!(
                 "engine: preset switch failed for '{}': {}",
@@ -248,7 +177,9 @@ impl Visualizer for EngineVisualizer {
     }
 
     fn resize(&mut self, w: u32, h: u32) {
-        self.engine.resize(w, h);
+        if let Err(e) = self.engine.resize(w, h) {
+            log::warn!("engine resize to {w}x{h} failed: {e}");
+        }
     }
 
     fn take_auto_cuts(&mut self) -> u32 {
@@ -275,6 +206,10 @@ impl Visualizer for EngineVisualizer {
             Compat::MilkDrop2 => CompatArg::Milkdrop2,
             Compat::MilkDrop3 => CompatArg::Milkdrop3,
         })
+    }
+
+    fn set_loaded_preset_duration(&mut self, seconds: f64) {
+        self.engine.set_loaded_preset_duration(seconds);
     }
 
     fn set_mouse(&mut self, position: Option<[f32; 2]>, left_down: bool) {

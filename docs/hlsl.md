@@ -7,7 +7,7 @@ number, ONE leading backtick stripped per line — MD2 `ReadCode`) joined with `
 
 ```
 translate(kind, src)
- └ wrap::md2_wrapped_hlsl      CPlugin::LoadShaderFromMemory text assembly (plugin.cpp 4019+)
+ └ wrap::wrapped_hlsl          CPlugin::LoadShaderFromMemory text assembly (plugin.cpp 4019+); md2_/md3_/beatdrop_wrapped_hlsl are its fixed-prelude forms
  └ pp  (C preprocessor)        #define (object/function-like, ##), #undef, #if/#ifdef/#ifndef/#elif/#else/#endif
  └ lex / parse                 HLSL SM2/SM3 subset -> AST
  └ emit (type check + WGSL)    only code reachable from `PS` is translated
@@ -24,7 +24,10 @@ globals + functions + `@fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32>
   first `shader_body` becomes `void PS( float4 _vDiffuse : COLOR, float4|float2 _uv : TEXCOORD0,
   float2 _rad_ang : TEXCOORD1, out float4 _return_value : COLOR0 )`, `float3 ret = 0;` is inserted
   after the first following `{`, and everything from the *last* `}` on becomes
-  `_return_value = float4(ret.xyz, _vDiffuse.w); }`. A shader without `shader_body`/`{`/`}` is an
+  `_return_value = float4(ret.xyz, _vDiffuse.w); }` (`_vDiffuse.w` is the interpolated vertex alpha). With `Options::projectm_flavor`
+  the last line is `_return_value = float4(ret.xyz, 1.0); }`: projectM writes a constant alpha 1.0 (`MilkdropShader.cpp:468`;
+  `wrap.rs` `LAST_LINE_MD2` / `LAST_LINE_PROJECTM`, `wrapped_hlsl(kind, user, md3, projectm)`).
+  A shader without `shader_body`/`{`/`}` is an
   error (`TranslateError::Wrap`; MD2 falls back to its built-in shader).
 * Warp defines: `rad=_rad_ang.x ang=_rad_ang.y uv=_uv.xy uv_orig=_uv.zw`. Comp defines: same, but
   **`uv_orig = _uv.xy`** ([sic] in MD2; `_uv` is a float2 there) and `hue_shader = _vDiffuse.xyz`.
@@ -45,8 +48,18 @@ globals + functions + `@fragment fn fs_main(in: VsOut) -> @location(0) vec4<f32>
   or a `tex3D` use make the binding `TexDim::D3`.
 * `float4 texsize_<name>;` (and `texsize_noise_*` from include.fx): user ones go to
   `pu.texsize[slot]`, slots in order of first use, `texsize_slots[slot]` = the source of the named
-  texture (`randNN` matched by slot number as MD2 does).
+  texture (`randNN` matched by slot number through `rand_slot`, see below).
 * `max_blur_level` = highest `blurN` sampled.
+* **`randNN` names** (`lactea_hlsl::rand_slot(root, max_slot, strict) -> Option<usize>`, `root` = sampler name without `sampler_` and
+  without its quality prefix): the engine and the `texsize_randNN` lookup share it. `Options::rand_max_slot` is the highest random
+  slot (default 99 = MD2; projectM 15, higher numbers are ordinary names) and `Options::rand_strict_name` (default `true` = MD2,
+  `plugin.cpp:3575-3578`) requires exactly `randNN` or `randNN_...`, `false` accepts any name starting with `randNN`
+  (projectM, `MilkdropShader.cpp:117-119`). projectM peels the quality prefix before detecting `randNN`
+  (`MilkdropShader.cpp:80-86`), so `sampler_fw_rand03` is slot 3 there; only the pool *prefix filter* of `randNN_prefix`
+  (`GetRandomTexture` reads byte 6 of the raw name) is defeated by a quality prefix. The engine sets both options from
+  `CompatRules::{max_rand_slot, rand_filter_raw_name}` (`strict = !rand_filter_raw_name`). The engine's `ShaderCache` key holds
+  kind, source and every option that changes the output: `derivative_uniformity_off`, `floor_mod`, `projectm_flavor`, `md3`,
+  `beatdrop`, `gl_varying_fold`, `rand_max_slot`, `rand_strict_name`.
 
 ## Semantics decisions
 
@@ -75,11 +88,12 @@ matrix rows.
 ## MilkDrop 3 prelude
 
 `Options { md3: true, .. }` translates for `Compat::MilkDrop3` (see `md3.md`). With the flag off nothing changes:
-`md2_wrapped_hlsl` is untouched and every translation is byte-identical to a build without MD3 support (the shared
+the text is `md2_wrapped_hlsl`'s (`wrapped_hlsl(.., false, false)`) and every translation is byte-identical to a build without MD3 support (the shared
 `abi::WGSL_COMMON` only grew the `mx` block, which the snapshots strip with the rest of the prelude).
 
 Text assembly follows MD3 3.37: comment-stripped `include.fx`, then the **MD3 prelude**, then the per-pass `#define`s, then
-the wrapped user text. `md3_wrapped_hlsl(kind, user)` builds it (`translate` uses it when `md3` is set;
+the wrapped user text. `md3_wrapped_hlsl(kind, user)` (= `wrapped_hlsl(kind, user, true, false)`) builds it (`translate` calls
+`wrapped_hlsl(kind, src, opts.md3, opts.projectm_flavor)`, so it also covers the projectM-flavour alpha;
 `translate_wrapped` needs the same flag for text that came from `md3_wrapped_hlsl`). The prelude (written from the
 documented behaviour, nothing copied from MD3) declares:
 
@@ -93,9 +107,10 @@ documented behaviour, nothing copied from MD3) declares:
 | `float4 _mxd3qxa .. _mxd3qxd, _mxd3qsa .. _mxd3qsc;` and the macros `MXD3QX1..16`, `MXD3QS1..12` | the audio-envelope / beat-latch block (see `docs/md3.md`); `_mxd3qxa.._d` / `_mxd3qsa.._c` are `mx.mxd3q[0..6]` |
 
 `get_fft*` are macros like in MD3, so the argument expression is pasted textually (once) into the `clamp` and nested
-macros (`get_fft(mouse_x)`, `get_fft(bass > 0.5 ? .25 : .75)`) work. Not declared, on purpose: `get_fft_peak*`,
-`get_wave*`, `HAS_FFT_PEAK`, `sysTime*`, `mouse_clicked`, `aspect_sd` (BeatDrop only) and `_c15..` (MD3 never uploads
-them). The prelude's `sampler_fft` counts as declared for the implicit `sampler_<name>` declarations.
+macros (`get_fft(mouse_x)`, `get_fft(bass > 0.5 ? .25 : .75)`) work. Not declared under `md3`, on purpose: `get_fft_peak*`,
+`get_wave*`, `HAS_FFT_PEAK` and `_c15..` (BeatDrop's prelude declares them, next section; MD3 never uploads `_c15..`), and the BeatDrop
+names `sysTime*`, `mouse_clicked`, `aspect_sd` (neither prelude declares them). The prelude's `sampler_fft` counts as declared for the
+implicit `sampler_<name>` declarations.
 
 **Decisions**
 
@@ -103,11 +118,11 @@ them). The prelude's `sampler_fft` counts as declared for the implicit `sampler_
   (`ps_2_0` -> `ps_3_0` -> `ps_4_0`) has nothing to do.
 * `sampler_wave` stays what it is without MD3: an undeclared-unless-used user texture (`TexSource::User("wave")`,
   bilinear + clamp, the `fw_/fc_/pw_/pc_` prefixes apply). MD3 creates a 480 x 2 `R32F` texture for it and never
-  writes it, so the engine's 1 x 1 black dummy for unresolved user textures is the faithful content. No `get_wave`.
-* `fft` -> `TexSource::Fft` only with `md3` (otherwise `User("fft")`, as before). Default clamp + bilinear; the prefixes
+  writes it, so the engine's 1 x 1 black dummy for unresolved user textures is the faithful content. No `get_wave` (the BeatDrop prelude below differs).
+* `fft` -> `TexSource::Fft` only with `md3` or `beatdrop` (otherwise `User("fft")`, as before). Default clamp + bilinear; the prefixes
   select filter and wrap (`sampler_pw_fft`: point, `sampler_fw_fft`: wrap). No anisotropy special case: MD3 never sets
   it. `texsize_fft` also reports `TexSource::Fft` (MD3 leaves it unresolved; the host answers 512 x 1).
-* `_c14` and `_qi.._qp` only exist (and map to `mx`) under `md3`; a shader that writes to them (`q40 = 1;`,
+* `_c14` and `_qi.._qp` only exist (and map to `mx`) under `md3` (`_c14` also under `beatdrop`); a shader that writes to them (`q40 = 1;`,
   `mouse.x = 0.5;`) gets the same private per-invocation copy as for `_qa` (seeded from the uniform).
 
 **FFT lowering.** The texture is `FFT_BINS` (512) x 1 `R32Float`, which wgpu cannot filter without
@@ -156,6 +171,40 @@ only static scenes compare pixel for pixel):
 * A preset with encrypted shaders (`MD31` / `MD32`, e.g. `A story of lasers - Over Water.milk`) is black under Lactea (the placeholder shader
   runs) while MD3 draws its laser scene: expected, see `md3.md`.
 
+## BeatDrop prelude (`Options { beatdrop: true, .. }`, `Compat::MilkDrop2`)
+
+Switched on by `CompatRules::md2_shader_inputs` (MD2 true; projectM and MD3 false). Ignored when `md3` is set; with it off every translation is
+unchanged. `beatdrop_wrapped_hlsl(kind, user)` assembles the text like the MD3 one: comment-stripped `include.fx`, the prelude, the per-pass
+`#define`s, the wrapped user text (`translate_wrapped` needs the same flag). **The macro names and definitions are RECONSTRUCTED from BeatDrop's
+documented behaviour (`docs/divergences.md`, "Audio and shader inputs"): BeatDrop's `include.fx` additions are not on disk, so nothing is copied.**
+Declared: `float4 _c14, _c15, _c16; sampler2D sampler_fft; sampler2D sampler_wave;` and
+
+| Macro | Definition |
+|---|---|
+| `HAS_FFT_PEAK` | `1` |
+| `get_fft(x)` | `sqrt(tex2D(sampler_fft, float2((x), 0.25)).r)`: spectrum row, `v = .25`, **with `sqrt`** |
+| `get_fft_hz(hz)` | `get_fft((hz) / 22050.0)` (a 44.1 kHz capture, bins up to Nyquist; MD3 divides by 24000) |
+| `get_fft_peak(x)` | `sqrt(tex2D(sampler_fft, float2((x), 0.75)).r)`: peak-hold row, `v = .75` |
+| `get_fft_peak_hz(hz)` | `get_fft_peak((hz) / 22050.0)` |
+| `get_wave(x)` | `tex2D(sampler_wave, float2((x), 0.25)).r`: left waveform row |
+
+A macro the user shader itself declares or defines (a type keyword or `#define` directly before the name) is left out, so a user
+`float get_fft(float x)` is not rewritten by the function-like macro. `sampler_fft` / `sampler_wave` count as declared for the implicit sampler declarations.
+
+* **Constants** (ABI untouched): `_c14` = `mx.mouse` = `(x, y, +-lastX, +-lastY)` with `x = mousex`, `y` top-origin (`1 - mousey`, `-1` outside the window), the third
+  component `lastX` while the button is held else `-lastX`, the fourth `lastY` on the click frame else `-lastY` (the last press position, `y` top-origin;
+  `milkdropfs.cpp:5317`); `_c15` = `(hour, minute, second, totalSeconds)` and `_c16` = `(year, month, day, weekday)`, carried in `mx.q_hi[0]` / `mx.q_hi[1]`
+  (unused outside MD3). The engine side is `crates/lactea/src/md2_inputs.rs`.
+* **Textures.** The roots `fft` and `wave` both resolve to `TexSource::Fft`: one engine `R32Float` texture of `BEATDROP_FFT_BINS` (1024) x 4 texels, rows
+  smoothed spectrum, peak hold, left wave, right wave (`BEATDROP_WAVE_SAMPLES` = 480 valid texels). `sampler_fft` is a 1024 x 2 window (rows 0..2),
+  `sampler_wave` a 480 x 2 window (rows 2..4), so `v = .25` / `.75` hit the row centres. Default clamp + bilinear, prefixes as usual.
+* **Lowering.** `R32Float` is not filterable, so every `tex2D`, `tex2Dlod`, `tex2Dbias`, `tex2Dproj` (`xy / w`) and `tex2Dgrad` on those samplers becomes
+  `bd_fetch(tex_<sampler>, uv, w, row0, linear, wrapped)` (`emit/fft.rs`): both coordinates matter, filter and address apply per axis inside the 2-row window
+  (D3D9's rule for a `1024 x 2` / `480 x 2` `R32F` texture), the result is `(r, 1, 1, 1)`, LOD / bias / gradients are evaluated but change nothing.
+* The values come from `lactea_audio::BeatDropShaderFft` (`docs/audio.md`) and the preset's `FFTAttack` / `FFTDecay`; the renderer side is in `docs/render.md`.
+* tests: `tests/beatdrop.rs` (prelude text and order, a user `get_fft` winning, the spectrum / waveform lookups, `_c14.._c16` mapping, nothing changes without the
+  option); the texture layout constants are checked equal across `lactea-audio`, `lactea-hlsl`, `lactea-render`.
+
 ## Verification
 
 All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X] -- --nocapture`.
@@ -197,9 +246,9 @@ All commands: `CARGO_TARGET_DIR=target-hlsl cargo test -p lactea-hlsl [--test X]
   int literals (`7/2`) follows the integer rule above.
 * `sampler_pw_noise_lq` etc. need no declaration: `translate` declares the `sampler_*` / `texsize_*` names a shader uses
   without declaring them (projectM does; MD2 rejects such a shader as "undefined identifier" and falls back).
-* ABI note: `TexSource::Fft` is only produced with `Options::md3`; otherwise `fft` / `wave` are reported as
-  `User("fft")` / `User("wave")` (BeatDrop extensions). `include.fx` here has no `_c14.._c16` (mouse / BeatDrop system
-  time and date); with `md3` the prelude adds `_c14` (mouse, `MilkExtUniforms`), `_c15..` stay absent (MD3 never uploads them).
+* ABI note: `TexSource::Fft` is produced with `Options::md3` (`fft`) or `Options::beatdrop` (`fft` and `wave`); otherwise `fft` / `wave` are reported as
+  `User("fft")` / `User("wave")`. `include.fx` here has no `_c14.._c16` (mouse / BeatDrop system
+  time and date); with `md3` the prelude adds `_c14` (mouse, `MilkExtUniforms`), `_c15..` stay absent (MD3 never uploads them); with `beatdrop` it adds `_c14.._c16`.
 * Undefined variables (`Options::projectm_flavor`, `emit/undef.rs`): a variable read before it is written is undefined in
   projectM's GLSL; Mesa's `nir_opt_undef` turns an undef whose every use is a float ALU operand into NaN (so
   `max(x, f(undef))` is `x`). `PS` locals / private globals with that property start as NaN, every other undef read keeps

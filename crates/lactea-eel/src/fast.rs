@@ -11,7 +11,10 @@
 //! exact interpreter, so semantics are preserved for the whole language.
 
 use crate::context::Context;
-use crate::eval::{CLOSE, MAX_LOOP, assign_op, b2f, bin, cvt_i64, resolve_mem};
+use crate::eval::{
+    CLOSE, MAX_LOOP, assign_op, b2f, bin, cond_true, cvt_i64, div, if_cond, or_lhs_false,
+    resolve_mem,
+};
 use crate::ns;
 use crate::tree::{AssignOp, BinOp, Loc, Node, UnOp};
 
@@ -220,9 +223,9 @@ pub(crate) fn lower(n: Node) -> FNode {
             let [a, b] = *args;
             FNode::Exec2(opd(a), opd(b))
         }
-        Node::List { items, .. } => {
-            let mut v: Vec<FNode> = items.into_iter().map(lower).collect();
-            let last = v.pop().expect("non-empty list");
+        Node::List { init, last, .. } => {
+            let v: Vec<FNode> = init.into_iter().map(lower).collect();
+            let last = lower(*last);
             FNode::List(v.into_boxed_slice(), to_opd(last))
         }
         Node::Loop { args, ns, .. } => {
@@ -285,8 +288,8 @@ pub(crate) fn lower(n: Node) -> FNode {
 
 // Invariant for every `Var(i)` / `V(i)` / `SetVar(i, _)` slot below: `i < self.vars.len()`.
 // Slots come from `Context::var` (which pushes the slot before handing it out) and
-// `Context::vars` never shrinks, so the unchecked `self.vars[i]` cannot go out of range for
-// a `Program` run by the context that compiled it (enforced by the `ctx_id` assert in `run`).
+// `Context::vars` never shrinks, so indexing `self.vars[i]` cannot go out of range for a
+// `Program` run by the context that compiled it (checked by the context id in `run`).
 impl Context {
     #[inline(always)]
     fn opd(&mut self, o: &Opd) -> f64 {
@@ -367,20 +370,20 @@ impl Context {
             FNode::Div(a, b) => {
                 let x = self.opd(a);
                 let y = self.opd(b);
-                if y.abs() < CLOSE { 0.0 } else { x / y }
+                div(x, y)
             }
             FNode::Above(a, b) => {
                 let x = self.opd(a);
-                b2f(x > self.opd(b))
+                bin(BinOp::Above, x, self.opd(b))
             }
             FNode::Below(a, b) => {
                 let x = self.opd(a);
-                b2f(x < self.opd(b))
+                bin(BinOp::Below, x, self.opd(b))
             }
             FNode::Equal(a, b) => {
                 let x = self.opd(a);
                 let y = self.opd(b);
-                b2f((x - y).abs() < CLOSE)
+                bin(BinOp::Equal, x, y)
             }
             FNode::Bin(op, a, b) => {
                 let x = self.opd(a);
@@ -396,34 +399,22 @@ impl Context {
                 bin(*op, self.global.reg(*i as usize), y)
             }
             FNode::And(a, b, ns) => {
-                if *ns {
-                    if ns::truthy(self.opd(a)) {
-                        b2f(ns::truthy(self.opd(b)))
-                    } else {
-                        0.0
-                    }
-                } else if self.opd(a).abs() > CLOSE {
-                    b2f(self.opd(b).abs() > CLOSE)
+                if cond_true(*ns, self.opd(a)) {
+                    b2f(cond_true(*ns, self.opd(b)))
                 } else {
                     0.0
                 }
             }
             FNode::Or(a, b, ns) => {
-                if *ns {
-                    if ns::truthy(self.opd(a)) {
-                        1.0
-                    } else {
-                        b2f(ns::truthy(self.opd(b)))
-                    }
-                } else if self.opd(a).abs() < CLOSE {
-                    b2f(self.opd(b).abs() > CLOSE)
+                if or_lhs_false(*ns, self.opd(a)) {
+                    b2f(cond_true(*ns, self.opd(b)))
                 } else {
                     1.0
                 }
             }
             FNode::If(c, t, f, ns) => {
                 let x = self.opd(c);
-                if if *ns { ns::truthy(x) } else { x != 0.0 } {
+                if if_cond(*ns, x) {
                     self.opd(t)
                 } else {
                     self.opd(f)
@@ -460,7 +451,7 @@ impl Context {
                 let mut left = MAX_LOOP;
                 loop {
                     let v = self.opd(cond);
-                    if if *ns { ns::truthy(v) } else { v.abs() > CLOSE } {
+                    if cond_true(*ns, v) {
                         left -= 1;
                         if left != 0 {
                             continue;

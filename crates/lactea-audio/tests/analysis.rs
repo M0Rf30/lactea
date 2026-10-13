@@ -23,6 +23,32 @@ fn sine(freq: f32, amp: f32) -> impl Fn(u64, usize) -> f32 {
     move |i, _| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / SR as f32).sin()
 }
 
+/// A NaN / infinite sample must not poison the running averages for the rest of the session.
+#[test]
+fn non_finite_samples_do_not_poison_the_analysis() {
+    let mut a = Analyzer::new(SR as u32);
+    let mut pcm = frame_pcm(0, 60, &sine(440.0, 0.5));
+    pcm[10] = f32::NAN;
+    pcm[11] = f32::INFINITY;
+    pcm[12] = f32::NEG_INFINITY;
+    a.push_pcm_f32(&pcm, 2);
+    a.update(60.0);
+    let clean = run(&mut a, 1..30, 60, &sine(440.0, 0.5));
+    for v in [clean.bass, clean.mid, clean.treb, clean.vol_att] {
+        assert!(v.is_finite());
+    }
+    assert!(clean.spectrum[0].iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn non_finite_volume_sensitivity_is_ignored() {
+    let mut a = Analyzer::with_mode(SR as u32, AnalysisMode::Md3);
+    a.set_volume_sensitivity(2.0);
+    a.set_volume_sensitivity(f32::NAN);
+    a.set_volume_sensitivity(f32::INFINITY);
+    assert_eq!(a.volume_sensitivity(), 2.0);
+}
+
 fn run(
     a: &mut Analyzer,
     frames: std::ops::Range<u64>,

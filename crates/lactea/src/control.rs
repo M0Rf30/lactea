@@ -22,7 +22,10 @@
 //! Usage: call [`PresetControl::start_preset`] (hard cut) or [`PresetControl::start_smoothing`]
 //! (soft cut) whenever the host loads a preset, and [`PresetControl::update`] once per rendered frame
 //! with the frame time and the frame's `vol` ([`AudioFrame::vol`](lactea_audio::AudioFrame::vol));
-//! it returns `Some(SwitchRequest)` once per preset when the host should switch.
+//! it returns `Some(SwitchRequest)` once per preset when the host should switch. Right after either start call,
+//! hand [`PresetControl::preset_duration_sampled`] to
+//! [`Engine::set_loaded_preset_duration`](crate::Engine::set_loaded_preset_duration) so the preset's `progress` runs
+//! over the same display time (the C API and `lactea-app` do this at their single load funnel).
 //!
 //! This module only knows about time and loudness: nothing here depends on blending.
 
@@ -59,6 +62,7 @@ pub struct PresetControl {
     now: f64,
     preset_time: f64,
     preset_duration_a: f64,
+    preset_duration_b: f64,
     smoothing: bool,
     smooth_start: f64,
     notified: bool,
@@ -87,6 +91,7 @@ impl PresetControl {
             now: 0.0,
             preset_time: 0.0,
             preset_duration_a: 0.0,
+            preset_duration_b: 0.0,
             smoothing: false,
             smooth_start: 0.0,
             notified: false,
@@ -256,13 +261,26 @@ impl PresetControl {
         }
         self.smoothing = true;
         self.smooth_start = time;
+        self.preset_duration_b = self.sampled_preset_duration();
     }
 
-    /// `TimeKeeper::EndSmoothing`: the incoming preset becomes the displayed one.
+    /// `TimeKeeper::EndSmoothing`: the incoming preset becomes the displayed one, with the duration sampled when its
+    /// soft cut started.
     fn end_smoothing(&mut self) {
         self.smoothing = false;
         self.preset_time = self.smooth_start;
-        self.preset_duration_a = self.sampled_preset_duration();
+        self.preset_duration_a = self.preset_duration_b;
+    }
+
+    /// The display time `TimeKeeper` sampled for the preset started last (the incoming one during a soft cut):
+    /// what its `progress` runs over. Pass it to
+    /// [`Engine::set_loaded_preset_duration`](crate::Engine::set_loaded_preset_duration) right after loading.
+    pub fn preset_duration_sampled(&self) -> f64 {
+        if self.smoothing {
+            self.preset_duration_b
+        } else {
+            self.preset_duration_a
+        }
     }
 
     /// Whether a soft cut is currently running.
@@ -483,6 +501,28 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, 360);
         assert!(!got[0].1.hard_cut);
+    }
+
+    #[test]
+    fn soft_cut_preset_keeps_the_duration_sampled_when_its_cut_started() {
+        let mut c = PresetControl::new(5);
+        c.set_easter_egg(5.0);
+        c.set_preset_duration(30.0);
+        c.set_soft_cut_duration(2.0);
+        c.start_preset(0.0);
+        let shown = c.preset_duration_sampled();
+        c.start_smoothing(10.0);
+        let incoming = c.preset_duration_sampled();
+        assert_ne!(
+            shown, incoming,
+            "the incoming preset has a sample of its own"
+        );
+        run(&mut c, 600, 750, 60.0, |_| 0.0); // the soft cut ends at t = 12
+        assert!(!c.is_smoothing());
+        assert_eq!(c.preset_duration_sampled(), incoming);
+        // 15 s into the incoming preset (it started with its soft cut at t = 10)
+        c.update(25.0, 0.0);
+        assert!((c.preset_progress() - 15.0 / incoming).abs() < 1e-12);
     }
 
     #[test]

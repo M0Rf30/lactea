@@ -70,9 +70,7 @@ pub use frame::{
 };
 pub use renderer::{Renderer, readback_rgba8};
 pub use rng::{Rng, mix64};
-pub use shader_ext::{
-    BEATDROP_FFT_BINS, BEATDROP_ROWS, BEATDROP_WAVE_SAMPLES, BeatDropTexture, ShaderExt,
-};
+pub use shader_ext::{BEATDROP_FFT_BINS, BEATDROP_WAVE_SAMPLES, BeatDropTexture, ShaderExt};
 pub use sprite::{
     SPRITE_MODES, SpriteDraw, SpriteVertex, gif_frame_index, sprite_blend_reference, sprite_mode,
     sprite_vertex_color,

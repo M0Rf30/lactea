@@ -105,18 +105,18 @@ fn create_sink(device: &wgpu::Device, w: u32, h: u32) -> Tex {
     }
 }
 
-/// The shader FFT texture ([`TexSource::Fft`]) of a renderer: `R32Float`, zero until the first upload. MilkDrop 3's is
-/// [`FFT_BINS`] x 1; BeatDrop's (`CompatRules::md2_shader_inputs`) is [`BEATDROP_FFT_BINS`] x [`BEATDROP_ROWS`] (the
-/// spectrum rows, then the waveform rows). `R32Float` is not filterable without `FLOAT32_FILTERABLE`; the translated
-/// shaders `textureLoad` it and blend the neighbouring texels by hand.
-fn create_fft_tex(device: &wgpu::Device, queue: &wgpu::Queue, rules: &CompatRules) -> Tex {
-    let (w, h) = if rules.md2_shader_inputs {
-        (crate::BEATDROP_FFT_BINS, crate::BEATDROP_ROWS)
-    } else {
-        (FFT_BINS, 1)
-    };
+/// An empty `R32Float` texture, as the shader FFT and BeatDrop's wave textures are: zero until the first upload.
+/// `R32Float` is not filterable without `FLOAT32_FILTERABLE`; the translated shaders `textureLoad` it and blend the
+/// neighbouring texels by hand.
+fn create_r32f_tex(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    w: usize,
+    h: usize,
+) -> Tex {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("fft"),
+        label: Some(label),
         size: wgpu::Extent3d {
             width: w as u32,
             height: h as u32,
@@ -830,9 +830,15 @@ pub struct Renderer {
     anim_time: f64,
     dummy_2d: Tex,
     dummy_3d: Tex,
-    /// `sampler_fft` ([`TexSource::Fft`]): the smoothed MilkDrop 3 shader FFT. Owned per renderer (a
-    /// [`Renderer::sibling`] has its own) and replaced whenever a frame carries `FrameInput::ext.fft`.
+    /// `sampler_fft` ([`TexSource::Fft`]): the smoothed MilkDrop 3 shader FFT (512 x 1), or under
+    /// `CompatRules::md2_shader_inputs` BeatDrop's `m_lpFFTTexture` (1024 x 2: spectrum, peak hold). Owned per renderer
+    /// (a [`Renderer::sibling`] has its own) and replaced whenever a frame carries `FrameInput::ext.fft` /
+    /// `FrameInput::ext.beatdrop`.
     fft: Tex,
+    /// BeatDrop's `m_lpWaveTexture` (480 x 2: left, right), only under `CompatRules::md2_shader_inputs`. The
+    /// translator names it by the user texture `"wave"` (the frozen ABI has no source for it): see
+    /// [`Renderer::engine_wave`].
+    wave: Option<Tex>,
     /// Scratch attachment for the user warp shader's second output ([`with_uv_output`]); never read.
     warp_sink: Tex,
     warp_shader: Option<ShaderPass>,
@@ -1056,7 +1062,15 @@ impl Renderer {
         let rot = RotParams::randomize(&mut rng.fork(0x7072_6573));
         let dummy_2d = upload_2d(device, queue, 1, 1, &[0, 0, 0, 255], false, "dummy2d");
         let dummy_3d = upload_3d(device, queue, 1, &[0, 0, 0, 255], "dummy3d");
-        let fft = create_fft_tex(device, queue, &rules);
+        let (fft_w, fft_h) = if rules.md2_shader_inputs {
+            (crate::BEATDROP_FFT_BINS, 2)
+        } else {
+            (FFT_BINS, 1)
+        };
+        let fft = create_r32f_tex(device, queue, "fft", fft_w, fft_h);
+        let wave = rules
+            .md2_shader_inputs
+            .then(|| create_r32f_tex(device, queue, "wave", crate::BEATDROP_WAVE_SAMPLES, 2));
 
         let warp_indices = warp_index_buffer(device, &geom, &rules);
         let r = Renderer {
@@ -1082,6 +1096,7 @@ impl Renderer {
             dummy_2d,
             dummy_3d,
             fft,
+            wave,
             warp_sink: create_sink(device, w, h),
             warp_shader: None,
             comp_shader: None,
@@ -1332,9 +1347,10 @@ impl Renderer {
                 TexDim::D2 => wgpu::TextureViewDimension::D2,
                 TexDim::D3 => wgpu::TextureViewDimension::D3,
             };
-            // R32Float is not filterable: the translated shader only `textureLoad`s the FFT texture (its sampler
-            // entry stays `Filtering` and is never paired with it in a `textureSample`)
-            let filterable = !matches!(t.source, TexSource::Fft);
+            // R32Float is not filterable: the translated shader only `textureLoad`s the FFT and BeatDrop's wave
+            // textures (the sampler entry stays `Filtering` and is never paired with it in a `textureSample`)
+            let filterable =
+                !matches!(t.source, TexSource::Fft) && self.engine_wave(&t.source).is_none();
             entries.push(tex_entry(
                 lactea_abi::texture_binding(i as u32),
                 dim,

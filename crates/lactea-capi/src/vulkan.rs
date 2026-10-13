@@ -88,7 +88,9 @@ pub struct LacteaVulkanRequirements {
 
 /// Engine state of `lactea_create_vulkan` engines.
 pub(crate) struct VulkanState {
-    /// Format of the images `lactea_render_to_vk_image` accepts.
+    /// Format of the images `lactea_render_to_vk_image` accepts. Read only by the Vulkan `imp`;
+    /// without `lactea_vulkan` (Apple targets) `open_device` always fails, so no engine holds one.
+    #[cfg_attr(not(lactea_vulkan), expect(dead_code))]
     pub format: wgpu::TextureFormat,
 }
 

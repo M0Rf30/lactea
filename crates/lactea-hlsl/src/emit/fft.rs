@@ -50,41 +50,35 @@ pub(crate) fn helper_wgsl(prelude: crate::Prelude) -> String {
     }
 }
 
-/// Texels per row of the BeatDrop spectrum rows (`MY_FFT_SHADER_SAMPLES`).
-pub const BEATDROP_FFT_BINS: usize = 1024;
-/// Texels per row of the BeatDrop waveform rows (`NUM_WAVEFORM_SAMPLES`).
-pub const BEATDROP_WAVE_SAMPLES: usize = 480;
-
-/// WGSL of the BeatDrop lookups. The engine texture is [`BEATDROP_FFT_BINS`] wide and has four rows: 0 = smoothed
-/// spectrum, 1 = peak hold, 2 = left waveform, 3 = right waveform (the last two [`BEATDROP_WAVE_SAMPLES`] wide, the
-/// rest unused). `sampler_fft` addresses rows 0..2 and `sampler_wave` rows 2..4 as two-row textures of their own
-/// width, so `v = .25` / `.75` hit the row centres; filter and address mode apply per axis inside that window, as
-/// D3D9 does for a 1024 x 2 / 480 x 2 `R32F` texture (read with `textureLoad`: `R32Float` is not filterable).
+/// WGSL of the BeatDrop lookups. `sampler_fft` (`MY_FFT_SHADER_SAMPLES` x 2) and `sampler_wave`
+/// (`NUM_WAVEFORM_SAMPLES` x 2) are two separate `R32Float` textures of two rows each (`v = .25` / `.75` are the row
+/// centres), so the size comes from the bound texture. Filter and address mode apply per axis as D3D9 does for an
+/// `R32F` texture (read with `textureLoad`: `R32Float` is not filterable without `FLOAT32_FILTERABLE`).
 const BD_HELPER: &str = r#"
-fn bd_texel(t: texture_2d<f32>, x: i32, y: i32, w: i32, row0: i32, wrapped: bool) -> f32 {
-    var kx = clamp(x, 0, w - 1);
-    var ky = clamp(y, 0, 1);
+fn bd_texel(t: texture_2d<f32>, x: i32, y: i32, wrapped: bool) -> f32 {
+    let d = vec2<i32>(textureDimensions(t));
+    let p = vec2<i32>(x, y);
+    var k = clamp(p, vec2<i32>(0, 0), d - vec2<i32>(1, 1));
     if (wrapped) {
-        kx = ((x % w) + w) % w;
-        ky = ((y % 2) + 2) % 2;
+        k = ((p % d) + d) % d;
     }
-    return textureLoad(t, vec2<i32>(kx, row0 + ky), 0).r;
+    return textureLoad(t, k, 0).r;
 }
 
-fn bd_fetch(t: texture_2d<f32>, uv: vec2<f32>, w: i32, row0: i32, linear: bool, wrapped: bool) -> vec4<f32> {
-    let n = vec2<f32>(f32(w), 2.0);
+fn bd_fetch(t: texture_2d<f32>, uv: vec2<f32>, linear: bool, wrapped: bool) -> vec4<f32> {
+    let n = vec2<f32>(textureDimensions(t));
     var r: f32;
     if (linear) {
         let p = uv * n - vec2<f32>(0.5, 0.5);
         let f = floor(p);
         let i = vec2<i32>(f);
         let fr = p - f;
-        let a = mix(bd_texel(t, i.x, i.y, w, row0, wrapped), bd_texel(t, i.x + 1, i.y, w, row0, wrapped), fr.x);
-        let b = mix(bd_texel(t, i.x, i.y + 1, w, row0, wrapped), bd_texel(t, i.x + 1, i.y + 1, w, row0, wrapped), fr.x);
+        let a = mix(bd_texel(t, i.x, i.y, wrapped), bd_texel(t, i.x + 1, i.y, wrapped), fr.x);
+        let b = mix(bd_texel(t, i.x, i.y + 1, wrapped), bd_texel(t, i.x + 1, i.y + 1, wrapped), fr.x);
         r = mix(a, b, fr.y);
     } else {
         let i = vec2<i32>(floor(uv * n));
-        r = bd_texel(t, i.x, i.y, w, row0, wrapped);
+        r = bd_texel(t, i.x, i.y, wrapped);
     }
     return vec4<f32>(r, 1.0, 1.0, 1.0);
 }
@@ -175,13 +169,8 @@ impl Tr<'_> {
                 }
             }
         };
-        let (w, row0) = if crate::iface::sampler_root(samp).0 == "wave" {
-            (BEATDROP_WAVE_SAMPLES, 2)
-        } else {
-            (BEATDROP_FFT_BINS, 0)
-        };
         Ok(V::new(
-            format!("bd_fetch(tex_{samp}, {uv}, {w}, {row0}, {linear}, {wrapped})"),
+            format!("bd_fetch(tex_{samp}, {uv}, {linear}, {wrapped})"),
             Ty::vec(Sc::F, 4),
         ))
     }

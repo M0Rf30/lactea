@@ -360,5 +360,8 @@ Feature-by-feature audit against projectM's headers: `docs/parity.md`. What it a
 * **BeatDrop host inputs** (`md2_inputs.rs`, `engine/md2_host.rs`, `Compat::MilkDrop2`): `Engine::set_mouse`,
   `set_ctrl_keys(CtrlKeys)`, `set_date_time(DateTime)` / `clear_date_time()` and `monitor()` feed and read the
   `mousex .. totalseconds` expression variables and the shader constants `_c14` / `_c15` / `_c16`; the shader FFT
-  texture comes from `lactea_audio::BeatDropShaderFft` (rules `md2_input_vars`, `md2_shader_inputs`;
-  `docs/divergences.md`).
+  textures come from `lactea_audio::BeatDropShaderFft` (rules `md2_input_vars`, `md2_shader_inputs`;
+  `docs/divergences.md`). During an MD2 preset blend `blend_vars` mixes `mousex` / `mousey` and the date variables, snaps
+  `mousedown` / `mouseclick` at the snap point and does not blend `ctrl*` (BeatDrop-Music-Visualizer `milkdropfs.cpp:916-930`);
+  a preset's per-frame init code sees the current host inputs (`state.cpp:1794`). `monitor` lives in the per-frame context only and
+  persists across frames (`milkdropfs.cpp:616, 838`); a load starts it from the init code's value (0 if never written).

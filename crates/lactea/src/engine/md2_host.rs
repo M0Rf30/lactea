@@ -28,9 +28,12 @@ impl Engine {
     }
 
     /// The preset's `monitor` variable as the last rendered frame of the active preset left it (0 when no preset
-    /// is loaded or its code never mentions `monitor`). BeatDrop shows it in its debug overlay: init and per-frame
-    /// code may read and write it, per-vertex code cannot see it, and a value written in one frame is still there
-    /// in the next (the variable is an ordinary persistent one in every compat mode).
+    /// is loaded or its code never mentions `monitor`). BeatDrop registers it in the per-frame context only
+    /// (`state.cpp:328`; `plugin.cpp:353-356`: readable and writable in init and per-frame code, not from per-pixel
+    /// code). It persists from frame to frame: `milkdropfs.cpp:616` reloads `monitor_after_init_code` at the start of
+    /// every frame and `:838` stores the per-frame result back after the code ran. A preset load starts it from the
+    /// init code's value (`state.cpp:1682-1684, 1800`), 0 when the init code never writes it. Here it is a variable of
+    /// the per-frame context that nothing resets between frames, in every compat mode.
     pub fn monitor(&self) -> f64 {
         self.active.as_ref().map_or(0.0, |slot| {
             let pf = &slot.loaded.pf;

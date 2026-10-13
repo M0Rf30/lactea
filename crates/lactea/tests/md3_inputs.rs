@@ -279,9 +279,11 @@ fn monitor2_and_monitor3_persist_like_monitor() {
 fn the_other_compat_modes_have_no_md3_names() {
     for compat in [Compat::ProjectM, Compat::MilkDrop2] {
         let mut r = rig!(compat, 16, 12);
-        let mut bodies = vec!["ret = float3(q33, 0, 0);", "ret = float3(mouse.x, 0, 0);"];
-        // BeatDrop's own `get_fft` exists under MilkDrop 2 (`tests/md2_inputs.rs`), not under projectM
+        let mut bodies = vec!["ret = float3(q33, 0, 0);"];
+        // BeatDrop's own `get_fft` and `mouse` (`include.fx:120, 194`) exist under MilkDrop 2
+        // (`tests/md2_inputs.rs`), not under projectM
         if compat == Compat::ProjectM {
+            bodies.push("ret = float3(mouse.x, 0, 0);");
             bodies.push("ret = float3(get_fft(0.5), 0, 0);");
         }
         for body in bodies {

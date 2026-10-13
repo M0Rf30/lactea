@@ -2,8 +2,8 @@
 
 Sources read: projectM master `src/libprojectM/Audio/{PCM,Loudness,MilkdropFFT,WaveformAligner}.cpp`
 (behaviour only, nothing copied), `ProjectM.cpp::RenderFrame`, `TimeKeeper.cpp`;
-`third_party/md2/{plugin.cpp::DoCustomSoundAnalysis, fft.cpp, plugin.h}` (this is the BeatDrop
-fork of vis_milk2, not the original Winamp one).
+`third_party/md2/{plugin.cpp::DoCustomSoundAnalysis, fft.cpp, plugin.h}` (the band analysis); the shader FFT / waveform textures
+(see "BeatDrop shader FFT") are cited to BeatDrop-Music-Visualizer (OfficialIncubo, master) `plugin.cpp`.
 
 ## API
 
@@ -76,7 +76,7 @@ wave: [[f32;576];2], wave_len (=480), spectrum: [[f32;512];2] }`
 | 8 | waveform source | `m_sound.fWaveform` 576 -> aligned -> `NUM_WAVEFORM_SAMPLES`=480 (the shell file is not in `third_party/md2`; alignment algorithm taken from projectM which states it mirrors MD2) | same, 480 valid | same |
 | 9 | frame counter for the `<50` long-average switch | `GetFrame()` | `m_frameCount`, 0-based, incremented after each render | internal counter, 0-based, +1 per `update` (saturating; `Analyzer::frame_index`) |
 | 10| spectrum scale | un-normalised FFT of 128-scaled input | same | same; DC bin is always 0 (equalise[0] = -0.02*ln 1 = 0) |
-| 11| extra BeatDrop-only analysis (`get_fft()` shader texture with RMS normalisation, 2048-window `myfftshader`, `FFTAttack/FFTDecay` smoothing) | yes | none | `BeatDropShaderFft` (separate from `Analyzer`, fed by the engine under `Compat::MilkDrop2` only, `CompatRules::md2_shader_inputs`): see "BeatDrop shader FFT" below; no projectM counterpart |
+| 11| extra BeatDrop-only analysis (`get_fft()` shader texture with RMS normalisation, 2048-window `myfftshader`, `FFTAttack/FFTDecay` smoothing; BeatDrop-Music-Visualizer `plugin.cpp:11621-11729`) | yes | none | `BeatDropShaderFft` (separate from `Analyzer`, fed by the engine under `Compat::MilkDrop2` only, `CompatRules::md2_shader_inputs`): see "BeatDrop shader FFT" below; no projectM counterpart |
 | 12| MilkDrop 3 (3.37) analysis | rows 1-5: no 8-bit quantiser, no gain, `(L+R)/2` spectrum | rows 1-5 | `AnalysisMode::Md3` (opt-in): 8-bit quantised input, `VolumeSensitivity`, alignment **before** the analysis, bands from the **left** channel only, 576-sample window, silence -> 1; plus `ShaderFft` for the `get_fft` shader helper. See "MilkDrop 3 mode" below |
 
 ## Numerics
@@ -233,7 +233,7 @@ step(spec, attack, decay):
 
 ## BeatDrop shader FFT (`BeatDropShaderFft`)
 
-Source: `third_party/md2/plugin.cpp::DoCustomSoundAnalysis` (the BeatDrop fork). It feeds the `sampler_fft` / `sampler_wave` textures of BeatDrop shaders
+Source: `plugin.cpp:11621-11729` of BeatDrop-Music-Visualizer (OfficialIncubo, master; `m_nFFTShaderScaling` / `m_nFFTShaderNoiseFloor` in `plugin.h:429-430`). It feeds the `sampler_fft` / `sampler_wave` textures of BeatDrop shaders
 (`get_fft`, `get_fft_peak`, `get_wave`; `docs/hlsl.md` "BeatDrop prelude") and does not touch `Analyzer`.
 
 ```rust
@@ -260,5 +260,6 @@ Per `update`:
 5. Peak hold (row 1, `m_fFFTPeak`): `peak = smoothed` when `smoothed >= peak` and the bin holds for `int(fps * (.25 + .75 * decay))` frames; afterwards it
    falls by `exp(-1 / fps / .3)` per frame.
 
-The engine builds the texture rows `spectrum`, `peak`, wave L, wave R: the waves are `AudioFrame.wave / 128` (the first 480 aligned samples, scaled to `-1..1`,
-zero beyond). `FFTAttack` / `FFTDecay` come from the active state's preset (not blended during a soft cut). Tests: `tests/beatdrop.rs`.
+The engine builds the texture rows `spectrum`, `peak`, wave L, wave R (two textures: `sampler_fft` 1024 x 2, `sampler_wave` 480 x 2): the waves are `m_sound.fWaveform[ch][i] / 128.0f` for the first 480 samples of the 576-sample capture
+(`plugin.cpp:11700-11750`; lactea feeds `AudioFrame.wave / 128`, scaled to `-1..1`, zero beyond). `FFTAttack` / `FFTDecay` are the active state's `m_fFFTAttack.eval(GetTime())` /
+`m_fFFTDecay.eval(GetTime())` (`plugin.cpp:11665-11666`): blended like every timed float while a soft cut runs (`BlendBase::fft_params`). Tests: `tests/beatdrop.rs`.

@@ -82,7 +82,9 @@ fn identifiers(s: &str) -> Vec<&str> {
     out
 }
 
-/// `sampler_*` / `texsize_*` names declared by `text` (a sampler / `float4` declaration or a `#define`).
+/// `sampler_*` / `texsize_*` names declared by `text` (a sampler / `float4` declaration or a `#define`). `SAMPLER1D` /
+/// `SAMPLER2D` / `SAMPLER3D` are BeatDrop's aliases of the sampler types (`include.fx:142-144`); without its prelude
+/// they are not types at all, so counting them changes nothing for shaders that translate without it.
 fn declared_names(text: &str) -> std::collections::HashSet<&str> {
     let ids = identifiers(text);
     let mut set = std::collections::HashSet::new();
@@ -91,7 +93,15 @@ fn declared_names(text: &str) -> std::collections::HashSet<&str> {
             && k > 0
             && matches!(
                 ids[k - 1],
-                "sampler" | "sampler2D" | "sampler3D" | "samplerCUBE" | "float4" | "define"
+                "sampler"
+                    | "sampler2D"
+                    | "sampler3D"
+                    | "samplerCUBE"
+                    | "SAMPLER1D"
+                    | "SAMPLER2D"
+                    | "SAMPLER3D"
+                    | "float4"
+                    | "define"
             )
         {
             set.insert(*id);
@@ -117,7 +127,7 @@ pub(crate) fn implicit_declarations(user: &str, prelude: impl Into<Prelude>) -> 
         declared.extend(declared_names(&MD3_PRELUDE));
     }
     if prelude.beatdrop() {
-        declared.extend(declared_names(BEATDROP_PRELUDE_DECLS));
+        declared.extend(declared_names(&BEATDROP_FULL));
     }
     declared.extend(declared_names(&stripped));
     let mut seen = std::collections::HashSet::new();
@@ -185,39 +195,120 @@ static MD3_PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     s
 });
 
-/// Declarations of the BeatDrop prelude that are not macros: the constants `_c14.._c16` and the two samplers.
-const BEATDROP_PRELUDE_DECLS: &str =
-    "float4 _c14, _c15, _c16;\nsampler2D sampler_fft;\nsampler2D sampler_wave;\n";
+/// One piece of BeatDrop's additions to `include.fx`, in file order.
+struct BdItem {
+    /// The name the piece declares or defines (`""`: always present). A user shader that declares or defines the same
+    /// name keeps its own: BeatDrop's text for it is left out.
+    name: &'static str,
+    /// The text of `include.fx`, comments dropped.
+    text: &'static str,
+    /// A name of an earlier piece this one calls: it is left out with that piece (it would call the user's function,
+    /// which is declared further down).
+    uses: Option<&'static str>,
+}
 
-/// The BeatDrop macros: `(name, definition)`; a macro the user shader declares or defines itself is left out (a user
-/// `float get_fft(float x)` must not be rewritten by a function-like macro of the same name).
+macro_rules! bd_define {
+    ($name:literal, $def:literal) => {
+        BdItem {
+            name: $name,
+            text: concat!("#define ", $name, " ", $def, "\n"),
+            uses: None,
+        }
+    };
+}
+
+/// What BeatDrop's `include.fx` has on top of MilkDrop 2's (BeatDrop-Music-Visualizer, `include.fx`): the constants
+/// `_c14` / `_c15` / `_c16` (lines 18-20), `aspect_sd` (104), the `mouse*` / `sysTime*` / `sysDate*` names over them
+/// (119-135), the `SAMPLER*D` / `texture*D` / `tex1d` / `texcube` / `texCube` aliases and the `trunc` macro (142-155)
+/// and the FFT / waveform samplers with `HAS_FFT_PEAK` and the `get_fft*` / `get_wave*` functions (187-231), as the file
+/// has them. The extension block carries the values (`_c14` in `mx.mouse`, `_c15` / `_c16` in `mx.q_hi[0..2]`);
+/// `aspect_sd` is `_c1`, which MilkDrop 2 already declares and the renderer uploads.
 ///
-/// BeatDrop's own `include.fx` additions are not on disk; these are written from the documented behaviour
-/// (`docs/divergences.md`, "Audio and shader inputs"): `get_fft` samples row 0 of the 1024 x 2 spectrum texture
-/// (`v = .25`) and takes `sqrt`, `get_fft_peak` the peak-hold row 1 (`v = .75`); `get_fft_hz` divides by 22050 (a
-/// 44.1 kHz capture, bins up to Nyquist); `get_wave` reads the left row of the 480 x 2 waveform texture.
-const BEATDROP_MACROS: [(&str, &str); 6] = [
-    ("HAS_FFT_PEAK", "#define HAS_FFT_PEAK 1\n"),
-    (
-        "get_fft",
-        "#define get_fft(x) sqrt(tex2D(sampler_fft, float2((x), 0.25)).r)\n",
-    ),
-    (
-        "get_fft_hz",
-        "#define get_fft_hz(hz) get_fft((hz) / 22050.0)\n",
-    ),
-    (
-        "get_fft_peak",
-        "#define get_fft_peak(x) sqrt(tex2D(sampler_fft, float2((x), 0.75)).r)\n",
-    ),
-    (
-        "get_fft_peak_hz",
-        "#define get_fft_peak_hz(hz) get_fft_peak((hz) / 22050.0)\n",
-    ),
-    (
-        "get_wave",
-        "#define get_wave(x) tex2D(sampler_wave, float2((x), 0.25)).r\n",
-    ),
+/// `sampler_fft` is `MY_FFT_SHADER_SAMPLES` x 2 and `sampler_wave` `NUM_WAVEFORM_SAMPLES` x 2 (`R32F`; row 0 left /
+/// smoothed, row 1 right / peak hold): `v = .25` and `.75` are the row centres, `get_fft_hz` divides by 22050.
+const BEATDROP_PRELUDE: &[BdItem] = &[
+    BdItem {
+        name: "",
+        text: "float4 _c14;\nfloat4 _c15;\nfloat4 _c16;\n",
+        uses: None,
+    },
+    bd_define!("aspect_sd", "_c1"),
+    bd_define!("mouse", "_c14"),
+    bd_define!("mouse_x", "_c14.x"),
+    bd_define!("mouse_y", "_c14.y"),
+    bd_define!("mouse_pos", "_c14.xy"),
+    bd_define!("mouse_clicked", "_c14.z"),
+    bd_define!("mouse_released", "_c14.w"),
+    bd_define!("sysTime", "_c15"),
+    bd_define!("sysDate", "_c16"),
+    bd_define!("sysTimeHour", "_c15.x"),
+    bd_define!("sysTimeMinute", "_c15.y"),
+    bd_define!("sysTimeSecond", "_c15.z"),
+    bd_define!("sysTimeTotalSeconds", "_c15.w"),
+    bd_define!("sysDateYear", "_c16.x"),
+    bd_define!("sysDateMonth", "_c16.y"),
+    bd_define!("sysDateDay", "_c16.z"),
+    bd_define!("sysDateWeekday", "_c16.w"),
+    bd_define!("SAMPLER1D", "sampler1D"),
+    bd_define!("SAMPLER2D", "sampler2D"),
+    bd_define!("SAMPLER3D", "sampler3D"),
+    bd_define!("texture1D", "tex1D"),
+    bd_define!("texture2D", "tex2D"),
+    bd_define!("texture3D", "tex3D"),
+    BdItem {
+        name: "trunc",
+        text: "#define trunc(x) ((x) < 0 ? ceil((x)) : floor((x)))\n",
+        uses: None,
+    },
+    bd_define!("tex1d", "tex1D"),
+    bd_define!("texcube", "texCUBE"),
+    bd_define!("texCube", "texCUBE"),
+    BdItem {
+        name: "",
+        text: "sampler2D sampler_fft;\n",
+        uses: None,
+    },
+    bd_define!("HAS_FFT_PEAK", "1"),
+    BdItem {
+        name: "get_fft",
+        text: "float get_fft(float pos) {\n    return sqrt(tex2D(sampler_fft, float2(saturate(pos), .25)).x);\n}\n",
+        uses: None,
+    },
+    BdItem {
+        name: "get_fft_hz",
+        text: "float get_fft_hz(float freq) {\n    return get_fft(freq / 22050.0);\n}\n",
+        uses: Some("get_fft"),
+    },
+    BdItem {
+        name: "get_fft_peak",
+        text: "float get_fft_peak(float pos) {\n    return sqrt(tex2D(sampler_fft, float2(saturate(pos), 0.75)).x);\n}\n",
+        uses: None,
+    },
+    BdItem {
+        name: "get_fft_peak_hz",
+        text: "float get_fft_peak_hz(float freq) {\n    return get_fft_peak(freq / 22050.0);\n}\n",
+        uses: Some("get_fft_peak"),
+    },
+    BdItem {
+        name: "",
+        text: "sampler2D sampler_wave;\n",
+        uses: None,
+    },
+    BdItem {
+        name: "get_wave",
+        text: "float get_wave(float pos) {\n    float left = tex2D(sampler_wave, float2(saturate(pos), 0.25)).x;\n    float right = tex2D(sampler_wave, float2(saturate(pos), 0.75)).x;\n    return (left + right) * 0.5;\n}\n",
+        uses: None,
+    },
+    BdItem {
+        name: "get_wave_left",
+        text: "float get_wave_left(float pos) {\n    return tex2D(sampler_wave, float2(saturate(pos), 0.25)).x;\n}\n",
+        uses: None,
+    },
+    BdItem {
+        name: "get_wave_right",
+        text: "float get_wave_right(float pos) {\n    return tex2D(sampler_wave, float2(saturate(pos), 0.75)).x;\n}\n",
+        uses: None,
+    },
 ];
 
 /// Whether comment-free `text` declares or defines `name`: a type keyword or `define` directly (whitespace only)
@@ -247,16 +338,27 @@ fn user_declares(text: &str, name: &str) -> bool {
     })
 }
 
-/// The BeatDrop prelude for a shader whose comment-free text is `user`.
+/// The BeatDrop prelude for a shader whose comment-free text is `user`: [`BEATDROP_PRELUDE`] without the names (and
+/// the helpers built on them) that `user` declares or defines itself, so a shader that has its own `get_fft` or a local
+/// `mouse` keeps working. (BeatDrop's D3DX compile would reject such a shader.)
 fn beatdrop_prelude(user: &str) -> String {
-    let mut s = String::from(BEATDROP_PRELUDE_DECLS);
-    for (name, def) in BEATDROP_MACROS {
-        if !user_declares(user, name) {
-            s.push_str(def);
+    let mut s = String::new();
+    let mut left_out: Vec<&str> = Vec::new();
+    for item in BEATDROP_PRELUDE {
+        if !item.name.is_empty()
+            && (user_declares(user, item.name) || item.uses.is_some_and(|u| left_out.contains(&u)))
+        {
+            left_out.push(item.name);
+            continue;
         }
+        s.push_str(item.text);
     }
     s
 }
+
+/// The whole BeatDrop prelude: the names it declares count as declared for [`implicit_declarations`].
+static BEATDROP_FULL: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| beatdrop_prelude(""));
 
 /// The complete HLSL text MD2 hands to `D3DXCompileShader` (entry point `PS`):
 /// comment-stripped include.fx + per-kind `#define`s + the user shader with the `shader_body`
@@ -267,9 +369,12 @@ pub fn md2_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateE
     wrapped_with(kind, user, Prelude::None, false)
 }
 
-/// [`md2_wrapped_hlsl`] for BeatDrop's shader inputs: `_c14` (mouse), `_c15` (`hour, minute, second, totalSeconds`),
-/// `_c16` (`year, month, day, weekday`), `sampler_fft`, `sampler_wave` and the `get_fft*` / `get_wave` macros sit
-/// between the comment-stripped include.fx and the per-pass `#define`s. Translate the result with
+/// [`md2_wrapped_hlsl`] for BeatDrop's shader inputs: BeatDrop's additions to `include.fx` (`_c14` mouse, `_c15`
+/// `hour, minute, second, totalSeconds`, `_c16` `year, month, day, weekday`, `aspect_sd`, the `mouse*` / `sysTime*` /
+/// `sysDate*` macros, the `SAMPLER*D` / `texture*D` / `tex1d` / `texcube` / `texCube` aliases, the `trunc` macro,
+/// `sampler_fft` / `sampler_wave`, `HAS_FFT_PEAK` and `get_fft`, `get_fft_hz`, `get_fft_peak`,
+/// `get_fft_peak_hz`, `get_wave`, `get_wave_left`, `get_wave_right`) sit between the comment-stripped include.fx and the
+/// per-pass `#define`s. A name the user shader declares itself is left out. Translate the result with
 /// [`translate_wrapped`](crate::translate_wrapped) and `Options { beatdrop: true, .. }`.
 pub fn beatdrop_wrapped_hlsl(kind: PassKind, user: &str) -> Result<String, TranslateError> {
     wrapped_with(kind, user, Prelude::BeatDrop, false)

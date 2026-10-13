@@ -129,6 +129,17 @@ blend_base! {
     ]
 }
 
+impl BlendBase {
+    /// `m_fFFTAttack.eval(GetTime())` and `m_fFFTDecay.eval(GetTime())` of the state whose base values are `base`
+    /// (`plugin.cpp:11665-11666`): the shader FFT's coefficients blend in over a soft cut like every other timed float.
+    pub fn fft_params(&mut self, base: &BaseValues, t: f32) -> (f32, f32) {
+        (
+            self.fft_attack.eval(base.fft_attack, t),
+            self.fft_decay.eval(base.fft_decay, t),
+        )
+    }
+}
+
 /// What `CState::StartBlendFrom` remembers beyond the floats (`m_fVideoEchoAlphaOld`,
 /// `m_nVideoEchoOrientationOld`, `m_nOldWaveMode`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -276,6 +287,30 @@ pub(super) fn blend_vars(new: &mut PerFrame, old: &PerFrame, mix: f64, snap: f64
         blur3_max,
         blur1_edge_darken
     );
+    // BeatDrop's host variables (`milkdropfs.cpp:916-930`): the mouse position and the clock blend like the rest,
+    // the buttons snap at the same point as the booleans; the arrow keys are not touched
+    if let (Some(nh), Some(oh)) = (&new.host, &old.host) {
+        let mut blended: Vec<(lactea_eel::Var, f64)> =
+            Vec::with_capacity(nh.mouse.len() + nh.date.len());
+        for (i, (&nv, &ov)) in nh.mouse.iter().zip(&oh.mouse).enumerate() {
+            let (n, o) = (new.ctx.get(nv), old.ctx.get(ov));
+            // `mousex`, `mousey`: mixed; `mousedown`, `mouseclick`: the old state's before the snap point
+            let v = if i < 2 {
+                mix * n + mix2 * o
+            } else if mix < snap {
+                o
+            } else {
+                n
+            };
+            blended.push((nv, v));
+        }
+        for (&nv, &ov) in nh.date.iter().zip(&oh.date) {
+            blended.push((nv, mix * new.ctx.get(nv) + mix2 * old.ctx.get(ov)));
+        }
+        for (v, x) in blended {
+            new.ctx.set(v, x);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1358,6 +1393,76 @@ mod tests {
         old4.ctx.set(old4.v.darken, 0.0);
         blend_vars(&mut new, &old4, 0.0, -0.01);
         assert_eq!(new.ctx.get(new.v.darken), 1.0);
+    }
+
+    #[test]
+    fn beatdrop_host_variables_blend_the_mouse_position_and_the_clock_and_snap_the_buttons() {
+        let gm = Arc::new(GlobalMemory::new());
+        let host = |p: &mut PerFrame| {
+            p.extend_md2_inputs();
+            p.host.take().unwrap()
+        };
+        let (mut new, mut old) = (pf(&gm), pf(&gm));
+        let (nh, oh) = (host(&mut new), host(&mut old));
+        // `milkdropfs.cpp:916-930`: both states carry their own value of every variable
+        let set = |p: &mut PerFrame, h: &crate::vars::HostVars, base: f64| {
+            for (i, v) in h.mouse.iter().chain(&h.ctrl).chain(&h.date).enumerate() {
+                p.ctx.set(*v, base + i as f64);
+            }
+        };
+        set(&mut new, &nh, 100.0);
+        set(&mut old, &oh, 0.0);
+        new.host = Some(nh);
+        old.host = Some(oh);
+        // mix = 0.25, before the snap point: mousex / mousey and every date variable blend, mousedown / mouseclick
+        // are the old state's, the arrow keys stay the new state's own
+        blend_vars(&mut new, &old, 0.25, 0.5);
+        let h = new.host.as_ref().unwrap();
+        let got = |v: lactea_eel::Var| new.ctx.get(v);
+        for (i, v) in h.mouse[..2].iter().enumerate() {
+            let want = 0.25 * (100.0 + i as f64) + 0.75 * (i as f64);
+            assert!((got(*v) - want).abs() < 1e-12, "mouse {i}");
+        }
+        assert_eq!(got(h.mouse[2]), 2.0, "mousedown snaps to the old state");
+        assert_eq!(got(h.mouse[3]), 3.0, "mouseclick snaps to the old state");
+        for (i, v) in h.ctrl.iter().enumerate() {
+            assert_eq!(got(*v), 104.0 + i as f64, "ctrl {i} is not blended");
+        }
+        assert_eq!(h.date.len(), 9);
+        for (i, v) in h.date.iter().enumerate() {
+            let k = (8 + i) as f64;
+            let want = 0.25 * (100.0 + k) + 0.75 * k;
+            assert!((got(*v) - want).abs() < 1e-12, "date {i}");
+        }
+
+        // after the snap point the new state's buttons stay
+        let h = new.host.as_ref().unwrap();
+        let (mousedown, mouseclick) = (h.mouse[2], h.mouse[3]);
+        new.ctx.set(mousedown, 7.0);
+        new.ctx.set(mouseclick, 8.0);
+        blend_vars(&mut new, &old, 0.75, 0.5);
+        assert_eq!(new.ctx.get(mousedown), 7.0);
+        assert_eq!(new.ctx.get(mouseclick), 8.0);
+    }
+
+    /// The shader FFT reads `m_fFFTAttack.eval(GetTime())`: the new state's coefficients blend in with a soft cut.
+    #[test]
+    fn the_shader_fft_coefficients_blend_over_a_soft_cut() {
+        let (mut new, mut old) = (BlendBase::default(), BlendBase::default());
+        let (mut base_new, mut base_old) = (BaseValues::default(), BaseValues::default());
+        base_new.fft_attack = 1.0;
+        base_new.fft_decay = 0.5;
+        base_old.fft_attack = 0.0;
+        base_old.fft_decay = 0.1;
+        assert_eq!(
+            new.fft_params(&base_new, 9.0),
+            (1.0, 0.5),
+            "no blend: the base values"
+        );
+        new.start_blend_from(&mut old, &base_old, 10.0, 4.0);
+        let (a, d) = new.fft_params(&base_new, 12.0);
+        assert!((a - 0.5).abs() < 1e-6 && (d - 0.3).abs() < 1e-6, "{a} {d}");
+        assert_eq!(new.fft_params(&base_new, 15.0), (1.0, 0.5), "blend over");
     }
 
     // ---- mix2 / mesh blend -------------------------------------------------------------------------

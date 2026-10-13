@@ -96,4 +96,5 @@ Result on `/usr/share/projectM/presets/**/*.milk`: 4189 files parse (3451 versio
   (`docs/audio.md`, "BeatDrop shader FFT").
 * BeatDrop's expression variables `mousex mousey mousedown mouseclick ctrllt ctrlrt ctrldn ctrlup` (per-frame and per-vertex) and `year month day weekday hour minute second
   milliseconds totalseconds` (per-frame only) are not keys of the file and not part of `Preset`: the engine registers them in the preset's expression contexts only under
-  `Compat::MilkDrop2` (`CompatRules::md2_input_vars`; see `docs/eel.md`). `monitor` is an ordinary persistent per-frame variable in every mode.
+  `Compat::MilkDrop2` (`CompatRules::md2_input_vars`; see `docs/eel.md`). `monitor` is a per-frame-context variable (`state.cpp:328`) that persists from frame to frame in every mode
+  (`milkdropfs.cpp:616, 838`) and starts from the init code's value.

@@ -26,6 +26,8 @@ GL, WebGPU). It ships as:
 - **a C library** (`lactea-capi`) for non-Rust hosts, including rendering into a host `VkImage`;
 - **a standalone app** (`lactea-app`, binary `lactea`) with PipeWire "what you hear" capture, file
   playback and preset browsing;
+- **a Kodi visualization addon** ([`visualization.lactea`](https://github.com/M0Rf30/visualization.lactea),
+  built on the C library; the Lactea counterpart of `visualization.projectm`);
 - **a web demo** ([try it in your browser](https://m0rf30.github.io/lactea/), WebGPU required; see
   [WebAssembly](#webassembly)).
 
@@ -53,6 +55,7 @@ GL, WebGPU). It ships as:
 | Windows x86_64, macOS arm64 | zip / tarball from the releases |
 | from source | `cargo install --path crates/lactea-app` |
 | Rust library | `cargo add lactea` |
+| Kodi 21 (Omega) | [`visualization.lactea`](https://github.com/M0Rf30/visualization.lactea) addon |
 
 Build prerequisites on Linux: Rust ≥ 1.88, `libasound2-dev` (cpal) and, for the default PipeWire
 capture, `libpipewire-0.3-dev` + `clang`. Without PipeWire audio capture goes through cpal: on

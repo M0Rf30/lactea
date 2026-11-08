@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "lactea"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "gif",
  "lactea-abi",
@@ -326,29 +326,29 @@ dependencies = [
 
 [[package]]
 name = "lactea-abi"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytemuck",
 ]
 
 [[package]]
 name = "lactea-audio"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "lactea-eel"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "lactea-hlsl"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "lactea-abi",
 ]
 
 [[package]]
 name = "lactea-host"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "image",
  "lactea",
@@ -359,15 +359,15 @@ dependencies = [
 
 [[package]]
 name = "lactea-jpeg"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "lactea-preset"
-version = "0.2.1"
+version = "0.2.2"
 
 [[package]]
 name = "lactea-render"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "bytemuck",
  "lactea-abi",
@@ -426,9 +426,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "miniz_oxide"
